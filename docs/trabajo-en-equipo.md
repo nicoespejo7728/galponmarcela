@@ -7,6 +7,12 @@ rutina de cada día.
 El repositorio es el único punto de encuentro: no se pasan archivos sueltos ni
 parches por chat.
 
+> **¿Recién sumando a alguien?** `puesta-en-marcha-segundo-desarrollador.md`
+> (en esta misma carpeta) es la versión paso a paso, con cada clic: crear la
+> cuenta, instalar Git y Node en Windows, armar una base de datos propia y
+> hacer el primer pull request. Este documento es el resumen para consultar
+> después.
+
 ---
 
 ## 1. Lo que hace el dueño del proyecto, una sola vez
