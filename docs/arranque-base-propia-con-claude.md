@@ -21,9 +21,12 @@ puede armar solo.
 > 2. Aplica las migraciones de `supabase/migrations/` una por una y **en orden
 >    numérico**, de la `0001` a la `0009`. Si alguna falla, detente y dime cuál
 >    y por qué; no sigas con la siguiente.
-> 3. Expón el esquema `galpon` en la API del proyecto (`alter role authenticator
->    set pgrst.db_schemas = 'public, graphql_public, galpon';` y recarga la
->    configuración de PostgREST). Sin esto el sistema abre pero no carga nada.
+> 3. Expón el esquema `galpon` en la API del proyecto:
+>    `alter role authenticator set pgrst.db_schemas = 'public, graphql_public, galpon';`
+>    y **enseguida refresca la caché de la API**, que si no queda con la lista
+>    vieja en memoria y todas las consultas responden 404:
+>    `notify pgrst, 'reload config';` y `notify pgrst, 'reload schema';`
+>    Sin este paso el sistema abre pero no carga nada.
 > 4. Crea dos buckets de Storage: `galpon-facturas` privado y `galpon-publico`
 >    público.
 > 5. Crea mi cuenta de administrador: un usuario de Supabase Auth con correo
@@ -38,6 +41,39 @@ puede armar solo.
 > Antes de empezar, lee `CLAUDE.md` y `README.md`: ahí están las reglas del
 > proyecto. Y no toques nunca el proyecto Supabase `INTRANET`, que es la base
 > real del negocio.
+
+## Si al entrar dice "No se pudo entrar al sistema"
+
+Con la consola del navegador abierta (F12) se distingue en un vistazo:
+
+- **`Could not find the table 'galpon.perfil' in the schema cache`** — las
+  tablas están y los permisos también; lo que quedó atrasado es la caché de la
+  API. Se arregla con `notify pgrst, 'reload schema';` y, si insiste,
+  reiniciando el proyecto desde Project Settings → General → Restart project.
+- **`The schema must be one of the following: public, graphql_public`** — falta
+  exponer `galpon` (paso 3).
+
+Esta consulta responde las tres preguntas de una vez, y hay que correrla en el
+proyecto que aparece en la dirección de los errores del navegador:
+
+```sql
+select
+  (select count(*) from information_schema.tables
+     where table_schema = 'galpon') as tablas,
+  (select count(*) from information_schema.role_table_grants
+     where table_schema = 'galpon' and grantee = 'authenticated'
+       and privilege_type = 'SELECT') as con_permiso,
+  (select rolconfig::text from pg_roles
+     where rolname = 'authenticator') as esquemas_api;
+```
+
+Con las migraciones bien aplicadas devuelve 35, 35 y una lista que incluye
+`galpon`. Si `tablas` es 0, las migraciones se aplicaron en otro proyecto. Si
+`con_permiso` es 0, faltó la migración `0004`, que es la que da acceso al rol
+`authenticated`.
+
+> El editor SQL de Supabase muestra solo el resultado de la última consulta
+> cuando se pegan varias juntas. Por eso esta va en una sola.
 
 ## Qué queda después
 

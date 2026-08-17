@@ -195,7 +195,13 @@ SQL Editor:
 ```sql
 alter role authenticator set pgrst.db_schemas = 'public, graphql_public, galpon';
 notify pgrst, 'reload config';
+notify pgrst, 'reload schema';
 ```
+
+Las dos últimas líneas no son opcionales: el valor queda guardado, pero el
+servicio que atiende la API sigue con la lista vieja en memoria hasta que se le
+avisa. Si aun así no toma el cambio, **Project Settings → General → Restart
+project** lo levanta de cero.
 
 > Si te saltas este paso, el sistema abre pero no carga nada y la consola del
 > navegador muestra errores de esquema.
@@ -341,6 +347,8 @@ comentario en el pull request. Nico revisa ahí y fusiona.
 | `GH007: your push would publish a private email address` | El correo del commit está oculto en GitHub. Ver B4, y después `git commit --amend --reset-author --no-edit` y volver a empujar. |
 | `! [rejected] ... (fetch first)` | Alguien empujó antes que tú. `git pull --rebase` y vuelve a empujar. |
 | El sistema abre pero no carga nada | Falta exponer el esquema `galpon` en la API (B6.2), o las claves de `.env.local` no son las de tu proyecto. |
+| "No se pudo entrar al sistema" y en la consola `Could not find the table 'galpon.perfil' in the schema cache` | La base está bien; la caché de la API quedó atrasada. `notify pgrst, 'reload schema';` y recarga con Ctrl+Shift+R. Si insiste, reinicia el proyecto. |
+| "Usuario o contraseña incorrectos" | Ese sí es la cuenta. Si dice cualquier otra cosa, el problema no es la contraseña. |
 | `Permission denied` al clonar | No aceptaste la invitación de GitHub, o iniciaste sesión con otra cuenta. |
 | `npm: command not found` | No cerraste y volviste a abrir Git Bash después de instalar Node. |
 | Al subir una foto de factura falla | Faltan los buckets de Storage (B6.3), o sus permisos. |
