@@ -9910,7 +9910,12 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
       await onRestore(restoreFile);
       toast("Datos restaurados desde el respaldo", "success");
     } catch (err) {
-      toast(friendlyError(err, "No se pudo restaurar el respaldo"), "error");
+      // Acá se muestra el error tal como viene, aunque sea técnico: en una
+      // restauración lo que importa es saber en qué se atascó, y un mensaje
+      // genérico obliga a adivinar. Queda además en la consola completo.
+      console.error("[restaurar] falló", err);
+      const detalle = (err && err.message) ? String(err.message) : "";
+      toast(detalle ? `No se pudo restaurar: ${detalle}` : "No se pudo restaurar el respaldo", "error");
     } finally {
       setRestoring(false);
       setRestoreFile(null);
@@ -10535,7 +10540,12 @@ export default function SistemaVentas() {
       if (data[field] === undefined) continue;
       // Las boletas conservan su número original: si la secuencia les asignara
       // otro, el histórico dejaría de calzar con los asientos de caja.
-      await saveJSON(keys[field], data[field], field === "sales" ? { preservarNumero: true } : {});
+      // sinBajas: restaurar agrega y actualiza, nunca da de baja. Lo que no
+      // viene en el archivo no fue eliminado; puede ser algo que ya estaba.
+      await saveJSON(keys[field], data[field], {
+        sinBajas: true,
+        ...(field === "sales" ? { preservarNumero: true } : {}),
+      });
       setters[field](data[field]);
     }
 
