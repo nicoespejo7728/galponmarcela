@@ -10317,6 +10317,9 @@ export default function SistemaVentas() {
   const [workers, setWorkers] = useState([]);
   const [myAccountOpen, setMyAccountOpen] = useState(false);
   const [session, setSession] = useState(null);
+  // Mientras no se haya revisado si había una sesión abierta, no se decide
+  // qué mostrar: sin esto, quien recarga la página ve parpadear el ingreso.
+  const [sesionRevisada, setSesionRevisada] = useState(false);
   const [tab, setTab] = useState("pos");
   const [toastData, setToastState] = useState(null);
 
@@ -10355,156 +10358,72 @@ export default function SistemaVentas() {
         }
       } catch (e) {
         console.error("[sesión] no se pudo recuperar", e);
+      } finally {
+        setSesionRevisada(true);
       }
     })();
   }, []);
 
+  // Carga de los datos del negocio. Solo corre cuando hay una sesión iniciada:
+  // las políticas de la base exigen un perfil activo, así que pedir los datos
+  // antes de entrar devolvía vacío en todo y dejaba la pantalla colgada.
   useEffect(() => {
-    (async () => {
-      const [s, p, sl, mv, os, sh, sup, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
-        loadJSON("business-settings", null),
-        loadJSON("products-catalog", []),
-        loadJSON("sales-log", []),
-        loadJSON("movements-log", []),
-        loadJSON("open-shifts", []),
-        loadJSON("shifts-log", []),
-        loadJSON("suppliers", []),
-        loadJSON("invoices-index", []),
-        loadJSON("purchase-items-log", []),
-        loadJSON("marcelita-feedback", []),
-        loadJSON("users", []),
-        loadJSON("inventory-counts", []),
-        loadJSON("workers", []),
-      ]);
-      let finalSettings = s || DEFAULT_SETTINGS;
-      let settingsChanged = !s;
-      if (s && s.businessName === "Mi Negocio") {
-        // El negocio ya tenía datos guardados con el nombre genérico anterior —
-        // se actualiza una sola vez al nombre y logo reales de "El Galpón".
-        finalSettings = { ...finalSettings, businessName: "El Galpón", businessLogo: s.businessLogo || EL_GALPON_LOGO };
-        settingsChanged = true;
-      }
-      let finalMovements = mv;
-      if (!finalSettings.historicalImported) {
-        // Primera vez: se cargan los datos reales de compras/ventas/gastos del
-        // último año (agosto 2025 - julio 2026) tomados de la planilla Excel del
-        // negocio, como movimientos históricos marcados aparte de los del día a día.
-        finalMovements = [...buildHistoricalMovements(), ...mv];
-        finalSettings = { ...finalSettings, historicalImported: true };
-        settingsChanged = true;
-        await saveJSON("movements-log", finalMovements);
-      }
-      if (settingsChanged) await saveJSON("business-settings", finalSettings);
-      // Las cuentas ya no se siembran desde aquí: las crea Supabase Auth. Si la
-      // lista viene vacía es porque todavía no se ha dado de alta a nadie, y eso
-      // se resuelve desde el panel de Supabase, no inventando un usuario.
-      const finalUsers = us;
-      // La nómina viene cargada en la base desde la migración inicial.
-      const finalWorkers = wk;
-      let finalProducts = p;
-      if (!finalSettings.legacyProductsRemoved) {
-        // Los datos del sistema POS anterior que se habían importado resultaron
-        // estar equivocados — se retiran del catálogo (solo los que nadie tocó
-        // desde entonces: sin stock ni costo cargado) a la espera de los datos
-        // correctos.
-        const withdrawnBarcodes = new Set(["7802900230227","7802820600100","6705177618351","6653126446623","6723616875311","6755503248838","6383462312082","6235713572230","6711875538477","6871133624586","6163325441035","6487772653786","6270267553116","6164453046734","6027742454308","6078165562741","6574133115500","6577700433741","6170331082652","6546122034370","6321671421460","6422661135550","6252153643114","6183566511773","6685157817534","6187750202160","6001471188544","6288735842733","6585240327650","6026854207230","7803600002503","7896019209717","7802420006111"]);
-        const toRemove = p.filter(prod => withdrawnBarcodes.has(prod.barcode) && (prod.stock || 0) === 0 && (prod.cost || 0) === 0);
-        if (toRemove.length > 0) {
-          const removeIds = new Set(toRemove.map(prod => prod.id));
-          finalProducts = p.filter(prod => !removeIds.has(prod.id));
-          await saveJSON("products-catalog", finalProducts);
-        }
-        finalSettings = { ...finalSettings, legacyProductsRemoved: true };
-        await saveJSON("business-settings", finalSettings);
-      }
-      let finalSuppliers = sup;
-      if (!finalSettings.legacyImportV2Done) {
-        // Segunda entrega de datos del sistema anterior, ya verificada: se
-        // agregan los productos y proveedores reales que faltaban (solo los
-        // que no existan ya por código de barras / nombre de proveedor).
-        const { newProducts, newSuppliers } = buildLegacyImportV2(finalProducts, sup);
-        if (newSuppliers.length > 0) {
-          finalSuppliers = [...sup, ...newSuppliers];
-          await saveJSON("suppliers", finalSuppliers);
-        }
-        if (newProducts.length > 0) {
-          finalProducts = [...finalProducts, ...newProducts];
-          await saveJSON("products-catalog", finalProducts);
-        }
-        finalSettings = { ...finalSettings, legacyImportV2Done: true };
-        await saveJSON("business-settings", finalSettings);
-      }
-      if (!finalSettings.productsUppercased) {
-        // Se pasan a MAYÚSCULAS todos los nombres de producto y secciones ya
-        // cargados de una sola vez — así secciones como "Bebidas", "bebidas" y
-        // "BEBIDAS" quedan fusionadas en una sola, sin quedar separadas por
-        // error de tipeo. De aquí en adelante, cada producto o sección nueva
-        // se guarda en mayúsculas automáticamente.
-        finalProducts = finalProducts.map(p => ({ ...p, name: upperField(p.name), category: upperField(p.category) }));
-        await saveJSON("products-catalog", finalProducts);
-        finalSettings = { ...finalSettings, productsUppercased: true };
-        await saveJSON("business-settings", finalSettings);
-      }
-      if (!finalSettings.breadProductEnsured) {
-        // El producto "PAN" (se vende por unidad) se había perdido del
-        // inventario — se repone con el precio real indicado por el negocio
-        // ($200 c/u). Se compra por Kg (cada Kg trae 12 unidades), así que
-        // queda configurado con esa conversión para calcular costo y precio
-        // por unidad al reponerlo. Stock y costo quedan en cero porque no
-        // hay un valor real conocido en este momento — se cargan solos con
-        // la próxima recepción y reposición, en vez de inventar un número.
-        const hasBreadProduct = finalProducts.some(p => p.category === "PAN" && p.name === "PAN");
-        if (!hasBreadProduct) {
-          const now = new Date().toISOString();
-          finalProducts = [...finalProducts, {
-            id: uid("prod"), barcode: `INT-${Date.now()}`, name: "PAN", category: "PAN",
-            price: 200, cost: 0, stock: 0, minStock: 5, supplierId: null,
-            unitType: "unidad", unitsPerKg: 12, quickAccess: true, priceApproval: null,
-            priceHistory: [{ date: now, cost: 0, price: 200 }],
-          }];
-        } else {
-          // Ya existía (de una carga anterior) pero sin la conversión Kg→unidad configurada.
-          finalProducts = finalProducts.map(p => (p.category === "PAN" && p.name === "PAN" && !p.unitsPerKg) ? { ...p, unitsPerKg: 12 } : p);
-        }
-        await saveJSON("products-catalog", finalProducts);
-        finalSettings = { ...finalSettings, breadProductEnsured: true };
-        await saveJSON("business-settings", finalSettings);
-      }
-      if (!finalSettings.coldBreadEnsured) {
-        // "Pan Frío" — el pan que sobra del día anterior, se vende más barato.
-        // El precio es un punto de partida (270% del fresco... en realidad un
-        // 30% más barato) que el negocio va a terminar de ajustar; el costo se
-        // completa solo cada vez que se pasa pan fresco a frío en el cierre
-        // del día, así que no se inventa un número real todavía.
-        const hasColdBread = finalProducts.some(p => p.category === "PAN" && p.name === "PAN FRÍO");
-        if (!hasColdBread) {
-          const freshBread = finalProducts.find(p => p.category === "PAN" && p.name === "PAN");
-          const startingPrice = freshBread ? Math.round((freshBread.price * 0.7) / 10) * 10 : 140;
-          const now = new Date().toISOString();
-          finalProducts = [...finalProducts, {
-            id: uid("prod"), barcode: `INT-${Date.now() + 1}`, name: "PAN FRÍO", category: "PAN",
-            price: startingPrice, cost: 0, stock: 0, minStock: 5, supplierId: null,
-            unitType: "unidad", unitsPerKg: null, quickAccess: true, priceApproval: null,
-            priceHistory: [{ date: now, cost: 0, price: startingPrice }],
-          }];
-          await saveJSON("products-catalog", finalProducts);
-        }
-        finalSettings = { ...finalSettings, coldBreadEnsured: true };
-        await saveJSON("business-settings", finalSettings);
-      }
-      setSettings(finalSettings);
-      setProducts(finalProducts); setSales(sl); setMovements(finalMovements); setOpenShifts(os); setShiftsLog(sh); setSuppliers(finalSuppliers);
-      setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb); setUsers(finalUsers); setInventoryCounts(ic); setWorkers(finalWorkers);
+    if (!sesionRevisada) return;   // todavía no se sabe si había sesión abierta
+    if (!session) {
+      // Sin sesión no hay nada que cargar: se muestra la pantalla de ingreso.
       setLoading(false);
+      return;
+    }
+    let cancelado = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const [s, p, sl, mv, os, sh, sup, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
+          loadJSON("business-settings", null),
+          loadJSON("products-catalog", []),
+          loadJSON("sales-log", []),
+          loadJSON("movements-log", []),
+          loadJSON("open-shifts", []),
+          loadJSON("shifts-log", []),
+          loadJSON("suppliers", []),
+          loadJSON("invoices-index", []),
+          loadJSON("purchase-items-log", []),
+          loadJSON("marcelita-feedback", []),
+          loadJSON("users", []),
+          loadJSON("inventory-counts", []),
+          loadJSON("workers", []),
+        ]);
+        if (cancelado) return;
+
+        // Ya no hay bloques de migración acá. En la versión anterior, la primera
+        // apertura importaba la planilla Excel, retiraba productos del sistema
+        // viejo y sembraba el PAN, porque no existía otro lugar donde hacerlo.
+        // Ahora eso vive en las migraciones de la base, y dejarlo aquí era
+        // peligroso: bastaba una lectura fallida para que la aplicación creyera
+        // que era la primera vez y volviera a inyectar todo el histórico.
+        setSettings(s || DEFAULT_SETTINGS);
+        setProducts(p); setSales(sl); setMovements(mv);
+        setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
+        setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
+        setUsers(us); setInventoryCounts(ic); setWorkers(wk);
+      } catch (e) {
+        console.error("[carga inicial] no se pudieron leer los datos", e);
+        toast(friendlyError(e, "No se pudieron cargar los datos del negocio"), "error");
+      } finally {
+        // Pase lo que pase se sale del estado de carga: quedarse girando para
+        // siempre es peor que entrar y ver un aviso de que algo falló.
+        if (!cancelado) setLoading(false);
+      }
     })();
-  }, []);
+    return () => { cancelado = true; };
+  }, [session, sesionRevisada, toast]);
 
   // Sincronización entre dispositivos: como el almacenamiento no empuja cambios en
   // vivo, se refresca periódicamente todo lo compartido (catálogo, ventas, cajas
   // abiertas, etc.) para que lo que haga una persona aparezca en las demás pantallas
   // en segundos, sin que nadie tenga que recargar manualmente.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !session) return;
     let cancelled = false;
     async function refresh() {
       // Si este mismo dispositivo acaba de guardar algo (por ejemplo, una
@@ -10562,7 +10481,7 @@ export default function SistemaVentas() {
     function onVisible() { if (document.visibilityState === "visible") refresh(); }
     document.addEventListener("visibilitychange", onVisible);
     return () => { cancelled = true; clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [loading]);
+  }, [loading, session]);
 
   if (loading) {
     return (
