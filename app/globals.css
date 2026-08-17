@@ -1,0 +1,8 @@
+/* Estilos mínimos de la raíz.
+   Tailwind NO se carga aquí a propósito: su "preflight" borra márgenes y
+   tamaños de título, y el sitio público trae su propia hoja de estilos
+   completa que quedaría deshecha. Tailwind se carga solo dentro de /sistema,
+   que sí está escrito con clases utilitarias. */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
