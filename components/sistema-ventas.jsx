@@ -32,7 +32,8 @@ import {
   Receipt, ClipboardCheck, ImagePlus, Banknote, Unlock, Building2, Phone, Mail,
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
-  CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend
+  CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
+  MoreHorizontal
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -44,34 +45,87 @@ import {
    tinta verde botella, papel manila, latón de caja registradora.
 --------------------------------------------------------- */
 const C = {
-  ink: "#1b2420",
-  inkSoft: "#2a352f",
-  paper: "#f1ece0",
-  paperDark: "#e6ddc9",
-  paperLine: "#d9cfb8",
-  green: "#2f6f52",
-  greenDark: "#20503b",
-  greenSoft: "#e4efe6",
-  rust: "#a8452c",
-  rustSoft: "#f6e4de",
-  brass: "#c3963c",
-  brassSoft: "#f5ecd4",
-  gray: "#8a8271",
-  grayLight: "#b7ae9a",
+  // Texto y superficies oscuras
+  ink: "#0f172a",        // texto principal · 16.9:1 sobre blanco
+  inkSoft: "#1e293b",    // superficies oscuras (barra lateral, totales)
+
+  // Superficies claras
+  paper: "#f5f6f8",      // fondo de la aplicación
+  paperDark: "#eef1f5",  // relleno suave: filas, chips, cajas de resumen
+  paperLine: "#e2e8f0",  // bordes y separadores
+
+  // Verde: color de acción y de confirmación
+  green: "#15803d",      // 4.9:1 sobre blanco · 4.9:1 con texto blanco encima
+  greenDark: "#166534",  // 6.9:1 sobre blanco
+  greenSoft: "#f0fdf4",  // fondo de estados positivos
+
+  // Rojo: alertas, mermas, egresos
+  rust: "#dc2626",       // 4.5:1 en ambos sentidos
+  rustSoft: "#fef2f2",
+
+  // Ámbar: pendientes y avisos. El tono de fondo y el de texto son
+  // distintos a propósito: un mismo ámbar no puede cumplir contraste
+  // como fondo con texto oscuro y como texto sobre blanco a la vez.
+  brass: "#fbbf24",      // fondo · 9.4:1 con texto tinta encima
+  brassText: "#b45309",  // texto · 4.6:1 sobre blanco
+  brassSoft: "#fffbeb",
+
+  // Grises de apoyo
+  gray: "#64748b",       // texto secundario · 4.8:1 sobre blanco
+  grayLight: "#94a3b8",  // texto terciario, solo sobre fondos oscuros
+
+  // Azul: información neutra
+  info: "#2563eb",
+  infoSoft: "#eff6ff",
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* Letra mínima más grande en todo el sistema, para que sea cómodo de leer
-   también para personas mayores — refuerza los tamaños de texto más chicos
-   usados en tarjetas, tablas y etiquetas de todos los paneles. */
-.text-\\[9px\\], .text-\\[10px\\] { font-size: 12px !important; line-height: 1.15rem !important; }
-.text-\\[11px\\] { font-size: 12.5px !important; line-height: 1.2rem !important; }
-.text-xs { font-size: 13.5px !important; line-height: 1.3rem !important; }
-.text-sm { font-size: 15px !important; line-height: 1.4rem !important; }
-select, input, textarea { font-size: 16px !important; }
-button { min-height: 44px; }
+/* Escala tipográfica. El mínimo es 14px: por debajo de eso el texto cansa en
+   una jornada completa, y en el teléfono cualquier campo bajo 16px hace que
+   iOS acerque la pantalla solo al tocarlo. */
+.text-\\[9px\\], .text-\\[10px\\], .text-\\[11px\\] { font-size: 13px !important; line-height: 1.35 !important; }
+.text-xs { font-size: 14px !important; line-height: 1.45 !important; }
+.text-sm { font-size: 15px !important; line-height: 1.5 !important; }
+input, select, textarea { font-size: 16px !important; }
+
+/* Los números de dinero y cantidad van en cifras de ancho fijo, para que las
+   columnas queden alineadas y no bailen al actualizarse. */
+.font-mono, table td, .tabular {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Área táctil mínima: 44px es lo que exige la guía de Apple y lo que hace
+   falta para no errarle a un botón con el dedo apurado en el mesón. */
+button, [role="button"] { min-height: 44px; }
+button { touch-action: manipulation; }
+
+/* Foco siempre visible: es la única pista que tiene quien navega con teclado
+   —o con el lector de código— de dónde está parado. */
+*:focus-visible {
+  outline: 2px solid ${"#15803d"};
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Movimiento breve y con sentido. Quien haya pedido menos animación en su
+   sistema operativo no ve ninguna. */
+.transition, button, a { transition: background-color .15s ease-out, border-color .15s ease-out, color .15s ease-out, box-shadow .15s ease-out, transform .15s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* Respuesta al toque: una escala apenas perceptible confirma que el golpe
+   entró, sin mover nada de sitio. */
+button:not(:disabled):active { transform: scale(.98); }
+
+/* Barras de desplazamiento discretas */
+::-webkit-scrollbar { height: 10px; width: 10px; }
+::-webkit-scrollbar-thumb { background: ${"#cbd5e1"}; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: ${"#94a3b8"}; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
 `;
 
 /* ---------------------------------------------------------
@@ -5326,6 +5380,9 @@ function Btn({ children, onClick, variant = "primary", full, disabled, type = "b
     primary: { background: C.green, color: "#fff" },
     dark: { background: C.ink, color: C.paper },
     ghost: { background: "transparent", color: C.ink, border: `1.5px solid ${C.paperLine}` },
+    // Para usar sobre fondo oscuro: el contorno normal lleva texto tinta y
+    // ahí queda negro sobre negro, invisible.
+    ghostClaro: { background: "transparent", color: "#e2e8f0", border: "1.5px solid rgba(255,255,255,.25)" },
     danger: { background: C.rustSoft, color: C.rust },
     rust: { background: C.rust, color: "#fff" },
   };
@@ -5341,7 +5398,7 @@ function Badge({ children, tone = "green" }) {
   const map = {
     green: { background: C.greenSoft, color: C.greenDark },
     rust: { background: C.rustSoft, color: C.rust },
-    brass: { background: C.brassSoft, color: "#8a6a1f" },
+    brass: { background: C.brassSoft, color: C.brassText },
     gray: { background: "#eee9db", color: C.gray },
   };
   return <span className="px-2.5 py-1 rounded-full text-xs font-bold" style={map[tone]}>{children}</span>;
@@ -5792,7 +5849,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   return (
     <div className="space-y-4">
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <ScanLine size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
             <input
@@ -5904,7 +5961,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         {role === "admin" && (
           <div className="mt-3 pt-3 flex items-center justify-between gap-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
             <p className="text-xs" style={{ color: C.grayLight }}>¿Consumo del local o los dueños? No genera venta ni boleta.</p>
-            <Btn size="sm" variant="ghost" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+            <Btn size="sm" variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
           </div>
         )}
       </div>
@@ -7082,7 +7139,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Ventas del turno ({summary.count})</span><span className="font-mono font-semibold" style={{ color: C.greenDark }}>{formatCLP(summary.total)}</span></div>
-        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Refuerzos ({(myShift.reinforcements || []).length})</span><span className="font-mono font-semibold" style={{ color: C.brass }}>+{formatCLP(reinforcementsTotal)}</span></div>
+        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Refuerzos ({(myShift.reinforcements || []).length})</span><span className="font-mono font-semibold" style={{ color: C.brassText }}>+{formatCLP(reinforcementsTotal)}</span></div>
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Retiros ({myShift.withdrawals.length})</span><span className="font-mono font-semibold" style={{ color: C.rust }}>−{formatCLP(withdrawalsTotal)}</span></div>
         <div className="flex justify-between text-base font-semibold pt-2 mt-2" style={{ borderTop: `1px dashed ${C.paperLine}`, color: C.ink }}><span>Efectivo esperado en caja</span><span className="font-mono">{formatCLP(expectedCash)}</span></div>
       </div>
@@ -7094,7 +7151,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
             {myShift.reinforcements.map(r => (
               <div key={r.id} className="px-4 py-2 flex justify-between text-sm">
                 <span style={{ color: C.ink }}>{r.reason || "Refuerzo de caja"} <span className="text-xs" style={{ color: C.gray }}>· {formatDate(r.date)} · {r.by}</span></span>
-                <span className="font-mono" style={{ color: C.brass }}>+{formatCLP(r.amount)}</span>
+                <span className="font-mono" style={{ color: C.brassText }}>+{formatCLP(r.amount)}</span>
               </div>
             ))}
           </div>
@@ -7458,7 +7515,7 @@ function BreadPredictionPanel({ products, setProducts, sales, movements, setMove
         </div>
 
         {daysWithData < 5 ? (
-          <div className="rounded-lg p-3 mb-4 text-sm" style={{ background: C.brassSoft, color: "#8a6a1f" }}>
+          <div className="rounded-lg p-3 mb-4 text-sm" style={{ background: C.brassSoft, color: C.brassText }}>
             Todavía hay poco historial de pan (solo {daysWithData} día{daysWithData === 1 ? "" : "s"} con ventas, mermas o recepciones registradas). La predicción va a ir mejorando sola a medida que el sistema acumule más días reales de uso — por ahora los números de abajo son una referencia poco confiable.
           </div>
         ) : (
@@ -8394,7 +8451,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
         {role !== "admin" && " El precio de venta lo calcula el sistema y queda a la espera de que un administrador lo confirme."}
       </p>
       {lowStock > 0 && (
-        <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg text-sm" style={{ background: C.brassSoft, color: "#8a6a1f" }}>
+        <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg text-sm" style={{ background: C.brassSoft, color: C.brassText }}>
           <AlertTriangle size={15} /> {lowStock} producto(s) con stock bajo o agotado
         </div>
       )}
@@ -10227,7 +10284,7 @@ function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast
     <>
       <button
         onClick={() => setOpen(true)}
-        className="fixed bottom-5 right-5 z-40 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition"
+        className="fixed bottom-20 right-4 lg:bottom-5 lg:right-5 z-40 rounded-full shadow-lg flex items-center justify-center active:scale-95 transition"
         style={{ width: 56, height: 56, background: C.ink, display: open ? "none" : "flex" }}
         title="Marcelita, tu asistente"
       >
@@ -10281,30 +10338,192 @@ function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast
 /* ---------------------------------------------------------
    APP PRINCIPAL
 --------------------------------------------------------- */
-const TABS = {
+/* Las pestañas agrupadas por lo que se hace con ellas. Doce opciones sueltas en
+   una barra obligaban a arrastrar para encontrar cualquier cosa; agrupadas, el
+   menú se lee de una mirada y cada grupo corresponde a un momento del día. */
+const GRUPOS = {
   vendedor: [
-    { id: "pos", label: "Vender", icon: ShoppingCart },
-    { id: "caja", label: "Caja", icon: Banknote },
-    { id: "facturas", label: "Boletas", icon: FileText },
-    { id: "inventario", label: "Inventario", icon: Package },
-    { id: "recepcion", label: "Recepción", icon: Truck },
-    { id: "conteos", label: "Conteos", icon: ClipboardList },
+    { titulo: "Mesón", items: [
+      { id: "pos", label: "Vender", icon: ShoppingCart },
+      { id: "caja", label: "Caja", icon: Banknote },
+      { id: "facturas", label: "Boletas", icon: FileText },
+    ]},
+    { titulo: "Bodega", items: [
+      { id: "inventario", label: "Inventario", icon: Package },
+      { id: "recepcion", label: "Recepción", icon: Truck },
+      { id: "conteos", label: "Conteos", icon: ClipboardList },
+    ]},
   ],
   admin: [
-    { id: "pos", label: "Vender", icon: ShoppingCart },
-    { id: "caja", label: "Caja", icon: Banknote },
-    { id: "facturas", label: "Boletas", icon: FileText },
-    { id: "inventario", label: "Inventario", icon: Package },
-    { id: "recepcion", label: "Recepción", icon: Truck },
-    { id: "conteos", label: "Conteos", icon: ClipboardList },
-    { id: "transformar", label: "Transformar", icon: Blend },
-    { id: "proveedores", label: "Proveedores", icon: Building2 },
-    { id: "finanzas", label: "Finanzas", icon: Wallet },
-    { id: "analisis", label: "Análisis", icon: BarChart3 },
-    { id: "usuarios", label: "Usuarios", icon: User },
-    { id: "ajustes", label: "Ajustes", icon: SettingsIcon },
+    { titulo: "Mesón", items: [
+      { id: "pos", label: "Vender", icon: ShoppingCart },
+      { id: "caja", label: "Caja", icon: Banknote },
+      { id: "facturas", label: "Boletas", icon: FileText },
+    ]},
+    { titulo: "Bodega", items: [
+      { id: "inventario", label: "Inventario", icon: Package },
+      { id: "recepcion", label: "Recepción", icon: Truck },
+      { id: "conteos", label: "Conteos", icon: ClipboardList },
+      { id: "transformar", label: "Transformar", icon: Blend },
+    ]},
+    { titulo: "Administración", items: [
+      { id: "proveedores", label: "Proveedores", icon: Building2 },
+      { id: "finanzas", label: "Finanzas", icon: Wallet },
+      { id: "analisis", label: "Análisis", icon: BarChart3 },
+      { id: "usuarios", label: "Usuarios", icon: User },
+      { id: "ajustes", label: "Ajustes", icon: SettingsIcon },
+    ]},
   ],
 };
+
+/* La lista plana que siguen usando las comprobaciones de rol. */
+const TABS = {
+  vendedor: GRUPOS.vendedor.flatMap(g => g.items),
+  admin: GRUPOS.admin.flatMap(g => g.items),
+};
+
+/* En el teléfono la barra inferior no debe pasar de cinco destinos: más que eso
+   y los toques empiezan a errarse. Van los cuatro de uso diario y el resto
+   queda detrás de "Más". */
+const MOVIL_PRINCIPALES = ["pos", "caja", "inventario", "recepcion"];
+
+/* Un punto de color por pestaña que necesita atención. */
+function Aviso({ n }) {
+  if (!n) return null;
+  return (
+    <span
+      className="ml-auto min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-semibold flex items-center justify-center flex-shrink-0"
+      style={{ background: C.rust, color: "#fff" }}
+      aria-label={`${n} pendiente${n === 1 ? "" : "s"}`}
+    >{n}</span>
+  );
+}
+
+/* Menú lateral. Desde 1024px de ancho queda fijo a la izquierda: en un
+   computador hay espacio de sobra y tener las doce opciones siempre visibles
+   ahorra un clic en cada cambio de pantalla. */
+function MenuLateral({ grupos, tab, setTab, avisos, settings }) {
+  return (
+    <aside
+      className="hidden lg:flex lg:flex-col fixed inset-y-0 left-0 w-64 z-40"
+      style={{ background: C.inkSoft, borderRight: `1px solid ${C.ink}` }}
+    >
+      <div className="flex items-center gap-3 px-5 h-16 flex-shrink-0" style={{ borderBottom: `1px solid rgba(255,255,255,.08)` }}>
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden"
+             style={{ background: settings.businessLogo ? "#fff" : C.brass }}>
+          {settings.businessLogo
+            ? <img src={settings.businessLogo} alt="" className="w-full h-full object-contain p-0.5" />
+            : <Store size={18} style={{ color: C.ink }} aria-hidden="true" />}
+        </div>
+        <div className="min-w-0">
+          <div className="font-semibold text-sm truncate" style={{ color: "#fff" }}>{settings.businessName}</div>
+          <div className="text-xs" style={{ color: C.grayLight }}>Punto de venta</div>
+        </div>
+      </div>
+
+      <nav className="flex-1 overflow-y-auto py-4 px-3" aria-label="Secciones del sistema">
+        {grupos.map(grupo => (
+          <div key={grupo.titulo} className="mb-5">
+            <div className="px-3 mb-1.5 text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.grayLight }}>
+              {grupo.titulo}
+            </div>
+            {grupo.items.map(t => {
+              const activo = tab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setTab(t.id)}
+                  aria-current={activo ? "page" : undefined}
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium mb-0.5 text-left"
+                  style={activo
+                    ? { background: C.green, color: "#fff" }
+                    : { background: "transparent", color: "#cbd5e1" }}
+                >
+                  <t.icon size={18} className="flex-shrink-0" aria-hidden="true" />
+                  <span className="truncate">{t.label}</span>
+                  <Aviso n={avisos[t.id]} />
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
+/* Barra inferior del teléfono. Se queda fija al alcance del pulgar y respeta el
+   área segura de los teléfonos con barra de gestos. */
+function BarraInferior({ items, tab, setTab, avisos, onMas, masActivo }) {
+  const boton = (t, activo, alPulsar, etiqueta, Icono) => (
+    <button
+      key={t}
+      onClick={alPulsar}
+      aria-current={activo ? "page" : undefined}
+      className="flex-1 flex flex-col items-center justify-center gap-1 py-2 relative"
+      style={{ color: activo ? C.green : C.gray, minHeight: 56 }}
+    >
+      <span className="relative">
+        <Icono size={22} aria-hidden="true" />
+        {!!avisos[t] && (
+          <span className="absolute -top-1 -right-2 min-w-[16px] h-4 px-1 rounded-full text-[10px] font-semibold flex items-center justify-center"
+                style={{ background: C.rust, color: "#fff" }}>{avisos[t]}</span>
+        )}
+      </span>
+      <span className="text-[11px] font-medium leading-none">{etiqueta}</span>
+    </button>
+  );
+
+  return (
+    <nav
+      className="lg:hidden fixed bottom-0 inset-x-0 z-40 flex"
+      aria-label="Navegación principal"
+      style={{
+        background: "#fff",
+        borderTop: `1px solid ${C.paperLine}`,
+        paddingBottom: "env(safe-area-inset-bottom)",
+        boxShadow: "0 -1px 3px rgba(15,23,42,.06)",
+      }}
+    >
+      {items.map(t => boton(t.id, tab === t.id, () => setTab(t.id), t.label, t.icon))}
+      {boton("__mas", masActivo, onMas, "Más", MoreHorizontal)}
+    </nav>
+  );
+}
+
+/* El resto de las secciones, en una hoja que sube desde abajo. */
+function HojaDeSecciones({ grupos, tab, setTab, avisos, onClose }) {
+  return (
+    <div className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end" role="dialog" aria-modal="true" aria-label="Todas las secciones">
+      <button className="absolute inset-0" onClick={onClose} aria-label="Cerrar" style={{ background: "rgba(15,23,42,.5)" }} />
+      <div className="relative rounded-t-2xl max-h-[80vh] overflow-y-auto" style={{ background: "#fff", paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div className="sticky top-0 flex items-center justify-between px-5 py-4" style={{ background: "#fff", borderBottom: `1px solid ${C.paperLine}` }}>
+          <span className="font-semibold" style={{ color: C.ink }}>Todas las secciones</span>
+          <button onClick={onClose} className="p-2 -mr-2 rounded-lg" aria-label="Cerrar"><X size={20} style={{ color: C.gray }} /></button>
+        </div>
+        <div className="px-3 py-3">
+          {grupos.map(grupo => (
+            <div key={grupo.titulo} className="mb-4">
+              <div className="px-3 mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.gray }}>{grupo.titulo}</div>
+              {grupo.items.map(t => (
+                <button
+                  key={t.id}
+                  onClick={() => { setTab(t.id); onClose(); }}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left"
+                  style={tab === t.id ? { background: C.greenSoft, color: C.greenDark } : { color: C.ink }}
+                >
+                  <t.icon size={20} className="flex-shrink-0" aria-hidden="true" />
+                  <span className="text-sm font-medium">{t.label}</span>
+                  <Aviso n={avisos[t.id]} />
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function SistemaVentas() {
   const [loading, setLoading] = useState(true);
@@ -10322,6 +10541,7 @@ export default function SistemaVentas() {
   const [inventoryCounts, setInventoryCounts] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [myAccountOpen, setMyAccountOpen] = useState(false);
+  const [menuAbierto, setMenuAbierto] = useState(false);
   const [session, setSession] = useState(null);
   // Mientras no se haya revisado si había una sesión abierta, no se decide
   // qué mostrar: sin esto, quien recarga la página ve parpadear el ingreso.
@@ -10574,51 +10794,85 @@ export default function SistemaVentas() {
     // las guarda Supabase Auth y nunca salen en el archivo.
   }
 
+  const grupos = GRUPOS[session.role];
+  const avisos = {
+    recepcion: session.role === "admin" ? pendingApprovals : 0,
+    conteos: pendingCounts,
+  };
+  const principales = tabs.filter(t => MOVIL_PRINCIPALES.includes(t.id));
+  const seccionActual = tabs.find(t => t.id === tab);
+  const enBarraInferior = MOVIL_PRINCIPALES.includes(tab);
+
   return (
-    <div className="min-h-screen" style={{ background: C.paper, fontFamily: "'IBM Plex Sans', sans-serif" }}>
+    <div className="min-h-dvh" style={{ background: C.paper, fontFamily: "'Inter', system-ui, -apple-system, sans-serif", color: C.ink }}>
       <style>{FONTS}</style>
       <style>{`
         @keyframes fadeUp { from { opacity:0; transform: translate(-50%,8px);} to {opacity:1; transform: translate(-50%,0);} }
-        input:focus, select:focus, textarea:focus { border-color: ${C.green} !important; box-shadow: 0 0 0 3px ${C.greenSoft}; }
-        ::-webkit-scrollbar { height: 8px; width: 8px; }
-        ::-webkit-scrollbar-thumb { background: ${C.paperLine}; border-radius: 8px; }
+        input:focus, select:focus, textarea:focus { border-color: ${C.green} !important; box-shadow: 0 0 0 3px ${C.greenSoft}; outline: none; }
+
+        /* Las tarjetas y campos comparten un mismo radio y una sombra apenas
+           perceptible: lo justo para separarlos del fondo sin que la pantalla
+           se llene de cajas flotando. */
+        .rounded-lg { border-radius: 10px !important; }
+        .rounded-xl { border-radius: 14px !important; }
+        main .rounded-xl { box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06); }
+
+        /* En pantallas angostas las tablas anchas se desplazan solas en vez de
+           empujar la página entera hacia el costado. */
+        @media (max-width: 767px) {
+          main table { display: block; overflow-x: auto; white-space: nowrap; }
+        }
       `}</style>
 
-      <header className="sticky top-0 z-40 px-4 sm:px-6 py-3 flex items-center justify-between gap-4" style={{ background: C.ink }}>
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden" style={{ background: settings.businessLogo ? "#fff" : C.brass }}>
-            {settings.businessLogo ? <img src={settings.businessLogo} alt={settings.businessName} className="w-full h-full object-contain p-1" /> : <Store size={20} style={{ color: C.ink }} />}
-          </div>
-          <div className="min-w-0">
-            <div className="font-semibold text-sm truncate" style={{ color: C.paper, fontFamily: "'Space Grotesk', sans-serif" }}>{settings.businessName}</div>
-            <div className="text-xs truncate" style={{ color: C.grayLight }}>{session.name} · {session.role === "admin" ? "Administrador" : "Vendedor"}</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button onClick={() => setMyAccountOpen(true)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={{ background: C.inkSoft, color: C.grayLight }}>
-            <User size={13} /> Mi cuenta
-          </button>
-          <button onClick={cerrarSesion} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg" style={{ background: C.inkSoft, color: C.grayLight }}>
-            <LogOut size={13} /> Salir
-          </button>
-        </div>
-      </header>
+      <MenuLateral grupos={grupos} tab={tab} setTab={setTab} avisos={avisos} settings={settings} />
 
-      <nav className="sticky top-[52px] z-30 px-4 sm:px-6 flex gap-1 overflow-x-auto" style={{ background: C.paper, borderBottom: `1.5px solid ${C.paperLine}` }}>
-        {tabs.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} className="relative flex items-center gap-2 px-4 py-3.5 text-sm font-semibold whitespace-nowrap border-b-[3px] transition" style={tab === t.id ? { color: C.greenDark, borderColor: C.green } : { color: C.gray, borderColor: "transparent" }}>
-            <t.icon size={18} /> {t.label}
-            {t.id === "recepcion" && session.role === "admin" && pendingApprovals > 0 && (
-              <span className="ml-0.5 min-w-[16px] h-4 px-1 rounded-full text-[10px] font-semibold flex items-center justify-center" style={{ background: C.rust, color: "#fff" }}>{pendingApprovals}</span>
-            )}
-            {t.id === "conteos" && pendingCounts > 0 && (
-              <span className="ml-0.5 min-w-[16px] h-4 px-1 rounded-full text-[10px] font-semibold flex items-center justify-center" style={{ background: C.rust, color: "#fff" }}>{pendingCounts}</span>
-            )}
-          </button>
-        ))}
-      </nav>
+      <div className="lg:pl-64">
+        {/* Barra superior. En computador solo lleva el nombre de la sección y la
+            cuenta; el logo y el menú ya viven en la barra lateral. */}
+        <header
+          className="sticky top-0 z-30 flex items-center justify-between gap-3 px-4 sm:px-6 h-16"
+          style={{ background: "#fff", borderBottom: `1px solid ${C.paperLine}` }}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="lg:hidden w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden"
+                 style={{ background: settings.businessLogo ? C.paperDark : C.brass }}>
+              {settings.businessLogo
+                ? <img src={settings.businessLogo} alt="" className="w-full h-full object-contain p-0.5" />
+                : <Store size={18} style={{ color: C.ink }} aria-hidden="true" />}
+            </div>
+            <div className="min-w-0">
+              <h1 className="font-semibold text-base truncate" style={{ color: C.ink }}>
+                {seccionActual?.label || settings.businessName}
+              </h1>
+              <div className="text-xs truncate" style={{ color: C.gray }}>
+                {session.name} · {session.role === "admin" ? "Administrador" : "Vendedor"}
+              </div>
+            </div>
+          </div>
 
-      <main className="p-4 sm:p-6 max-w-6xl mx-auto">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <button
+              onClick={() => setMyAccountOpen(true)}
+              className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
+              style={{ background: C.paperDark, color: C.ink }}
+            >
+              <User size={16} aria-hidden="true" />
+              <span className="hidden sm:inline">Mi cuenta</span>
+            </button>
+            <button
+              onClick={cerrarSesion}
+              className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
+              style={{ background: C.paperDark, color: C.ink }}
+            >
+              <LogOut size={16} aria-hidden="true" />
+              <span className="hidden sm:inline">Salir</span>
+            </button>
+          </div>
+        </header>
+
+        {/* El espacio de abajo deja respirar el contenido por encima de la
+            barra inferior del teléfono, que va fija. */}
+        <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
         {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} session={session} toast={toast} role={session.role} />}
         {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={session.role} toast={toast} />}
         {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
@@ -10631,7 +10885,19 @@ export default function SistemaVentas() {
         {tab === "usuarios" && session.role === "admin" && <UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} />}
         {tab === "transformar" && session.role === "admin" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
         {tab === "conteos" && <InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={session.role} toast={toast} />}
-      </main>
+        </main>
+      </div>
+
+      <BarraInferior
+        items={principales} tab={tab} setTab={setTab} avisos={avisos}
+        onMas={() => setMenuAbierto(true)} masActivo={!enBarraInferior}
+      />
+      {menuAbierto && (
+        <HojaDeSecciones
+          grupos={grupos} tab={tab} setTab={setTab} avisos={avisos}
+          onClose={() => setMenuAbierto(false)}
+        />
+      )}
 
       <MarcelitaWidget products={products} feedback={feedback} setFeedback={setFeedback} session={session} role={session.role} toast={toast} />
       {myAccountOpen && <MyAccountModal session={session} users={users} setUsers={setUsers} onClose={() => setMyAccountOpen(false)} toast={toast} />}
