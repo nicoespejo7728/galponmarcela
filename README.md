@@ -65,6 +65,13 @@ desarrollo. Ver `.env.example`.
 `SUPABASE_SERVICE_ROLE_KEY` nunca debe llevar el prefijo `NEXT_PUBLIC_`: eso la
 publicaría en el navegador y daría acceso total a la base.
 
+## Trabajo en equipo
+
+Dos personas sobre el mismo repositorio: `docs/trabajo-en-equipo.md` tiene el
+acceso a dar, el flujo de ramas y pull requests, y el acuerdo para no chocar
+dentro de `sistema-ventas.jsx`. Las reglas del proyecto para una sesión de
+Claude están en `CLAUDE.md`.
+
 ## Desarrollo
 
 ```bash
