@@ -10533,8 +10533,18 @@ export default function SistemaVentas() {
     ];
     for (const field of orden) {
       if (data[field] === undefined) continue;
-      await saveJSON(keys[field], data[field]);
+      // Las boletas conservan su número original: si la secuencia les asignara
+      // otro, el histórico dejaría de calzar con los asientos de caja.
+      await saveJSON(keys[field], data[field], field === "sales" ? { preservarNumero: true } : {});
       setters[field](data[field]);
+    }
+
+    // Y la secuencia se adelanta más allá del último número restaurado, para
+    // que la próxima venta no choque con una boleta que ya existe.
+    try {
+      await obtenerCliente().rpc("sincronizar_boletas");
+    } catch (e) {
+      console.error("[restaurar] no se pudo reordenar el correlativo", e);
     }
     // Las cuentas del equipo no se restauran desde el respaldo: las contraseñas
     // las guarda Supabase Auth y nunca salen en el archivo.
