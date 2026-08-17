@@ -5743,7 +5743,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     await saveJSON("sales-log", newSales);
 
     const numeroReal = sale.invoiceNumber;
-    const asiento = { id: uid("mov"), date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal };
+    const asiento = { id: uid("mov"), date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal, saleId: sale.id };
     const movimientosFinales = [asiento, ...latestMovements];
     setMovements(movimientosFinales);
     await saveJSON("movements-log", movimientosFinales);
@@ -6081,7 +6081,13 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], role
   const currentStock = Number(form.stock) || 0;
   const newPriceNum = Number(form.price) || 0;
   const oldPrice = initial?.price ?? 0;
-  const highestPastCost = Math.max(0, ...(initial?.priceHistory || []).map(h => h.cost || 0));
+  // El costo histórico más alto viene calculado sobre TODA la historia, no solo
+  // sobre las 15 entradas que se muestran: el piso de margen depende de él.
+  const highestPastCost = Math.max(
+    0,
+    initial?.maxHistoricCost || 0,
+    ...(initial?.priceHistory || []).map(h => h.cost || 0)
+  );
   const referenceCost = Math.max(Number(form.cost) || 0, highestPastCost);
   const hardFloor = referenceCost * 1.19;
   const sellsAtLoss = !needsApproval && newPriceNum > 0 && referenceCost > 0 && newPriceNum <= hardFloor;
@@ -6628,7 +6634,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       ...draftItems.map(item => ({
         id: uid("pi"), date, invoiceId,
         supplierId: supplierId || null, supplierName,
-        productId: item.isNew ? null : item.productId,
+        // El producto nuevo ya se creó en esta misma recepción con un id
+        // conocido: guardarlo permite comparar precios entre proveedores desde
+        // la primera compra, en vez de perder el vínculo.
+        productId: item.productId,
         productName: item.name.trim(),
         qty: Number(item.qty) || 0, netCost: Number(item.netCost) || 0,
       })),
@@ -7822,7 +7831,7 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
    pedidos). Cuando una recepción queda asociada a un proveedor
    registrado, aquí se ve el total comprado y la última compra.
 --------------------------------------------------------- */
-function InvoiceViewerModal({ invoiceMeta, onClose }) {
+function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [] }) {
   const [pages, setPages] = useState([]);
   const [pageIdx, setPageIdx] = useState(0);
   const [loading, setLoading] = useState(!invoiceMeta.noDocument);
@@ -7832,11 +7841,9 @@ function InvoiceViewerModal({ invoiceMeta, onClose }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await window.storage.get(`invoice-image:${invoiceMeta.id}`, true);
-        if (!cancelled && res && res.value) {
-          const parsed = JSON.parse(res.value);
-          // Compatibilidad con facturas guardadas antes de soportar varias páginas.
-          setPages(Array.isArray(parsed.pages) ? parsed.pages : [parsed]);
+        const res = await loadJSON(`invoice-image:${invoiceMeta.id}`, null);
+        if (!cancelled && res) {
+          setPages(Array.isArray(res.pages) ? res.pages : []);
         }
       } catch (e) { /* imagen no disponible */ }
       if (!cancelled) setLoading(false);
@@ -7883,7 +7890,7 @@ function InvoiceViewerModal({ invoiceMeta, onClose }) {
         <div className="text-sm space-y-1.5">
           <div className="flex justify-between"><span style={{ color: C.gray }}>Fecha</span><span>{formatDate(invoiceMeta.date)}</span></div>
           {invoiceMeta.refNumber && <div className="flex justify-between"><span style={{ color: C.gray }}>N° documento</span><span className="font-mono">{invoiceMeta.refNumber}</span></div>}
-          <div className="flex justify-between"><span style={{ color: C.gray }}>Productos</span><span>{invoiceMeta.itemCount}</span></div>
+          <div className="flex justify-between"><span style={{ color: C.gray }}>Productos</span><span>{purchaseItems.filter(pi => pi.invoiceId === invoiceMeta.id).length || invoiceMeta.itemCount || 0}</span></div>
           <div className="flex justify-between"><span style={{ color: C.gray }}>Registrada por</span><span>{invoiceMeta.registeredBy}</span></div>
           <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Monto neto</span><span className="font-mono">{formatCLP(invoiceMeta.totalNet)}</span></div>
           <div className="flex justify-between font-semibold"><span>Total con IVA</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
@@ -8122,7 +8129,7 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteSupplier(deleting.id)}>Eliminar</Btn></div>
         </Modal>
       )}
-      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} onClose={() => setViewingInvoice(null)} />}
+      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} onClose={() => setViewingInvoice(null)} />}
     </div>
   );
 }
@@ -8800,11 +8807,19 @@ function PayrollPanel({ workers, setWorkers, movements, setMovements, session, t
 /* ---------------------------------------------------------
    FINANZAS (solo admin)
 --------------------------------------------------------- */
+// Categorías que el libro de caja reconoce. Antes este campo era texto libre,
+// pero cualquier valor inventado terminaba archivado como "General" y
+// fragmentaba los informes sin que nadie se enterara.
+const CATEGORIAS_MOVIMIENTO = [
+  "General", "Venta", "Compra de mercadería", "Sueldos", "Merma",
+  "Consumo interno", "Entrada libre", "Ajuste de inventario",
+];
+
 function MovementModal({ onClose, onSave }) {
   const [type, setType] = useState("ingreso");
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState("");
+  const [category, setCategory] = useState("General");
   return (
     <Modal title="Nuevo movimiento" onClose={onClose}>
       <div className="grid grid-cols-2 gap-1.5 mb-3">
@@ -8812,7 +8827,11 @@ function MovementModal({ onClose, onSave }) {
         <button onClick={() => setType("egreso")} className="py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={type === "egreso" ? { background: C.rustSoft, color: C.rust } : { background: C.paperDark, color: C.gray }}><ArrowDownCircle size={15} />Egreso</button>
       </div>
       <Field label="Concepto"><input autoFocus value={concept} onChange={e => setConcept(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Pago de arriendo, venta al por mayor…" /></Field>
-      <Field label="Categoría"><input value={category} onChange={e => setCategory(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Servicios, Sueldos, Otros ingresos…" /></Field>
+      <Field label="Categoría">
+        <select value={category} onChange={e => setCategory(e.target.value)} className={inputCls} style={inputStyle()}>
+          {CATEGORIAS_MOVIMIENTO.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </Field>
       <Field label="Monto"><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} /></Field>
       <Btn full icon={Check} disabled={!concept || !amount} onClick={() => onSave({ id: uid("mov"), date: new Date().toISOString(), type, concept, category: category || "General", amount: Number(amount), auto: false })}>Guardar movimiento</Btn>
     </Modal>
@@ -9220,6 +9239,8 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
         concept: `Ajuste por conteo de inventario: ${i.name} (${i.diff > 0 ? "+" : ""}${i.diff})`,
         amount: Math.abs(i.diff) * (prod?.cost || 0),
         category: "Ajuste de inventario", auto: true,
+        // Dejan el rastro de qué conteo y qué producto originaron el ajuste.
+        countId: executing.id, productId: i.productId, diff: i.diff,
       };
     });
     const newMovements = [...diffMovements, ...latestMovements];
@@ -9229,9 +9250,10 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
     setProducts(newProducts); setMovements(newMovements); setCounts(newCounts);
     await Promise.all([
       saveJSON("products-catalog", newProducts, { origen: "conteo" }),
-      saveJSON("movements-log", newMovements),
       saveJSON("inventory-counts", newCounts),
     ]);
+    // El detalle del ajuste apunta al conteo, así que va después de él.
+    await saveJSON("movements-log", newMovements);
     setExecuting(null);
     toast("Conteo registrado y stock ajustado", "success");
   }
@@ -9479,9 +9501,14 @@ function TransformView({ products, setProducts, movements, setMovements, setting
       const ns = { ...settings, transformMaterialsCost: Number(materialsCost) || 0, transformFixedCost: Number(fixedCost) || 0 };
 
       setProducts(np); setMovements(nm); setLog(nl); setSettings(ns);
+      // El producto de salida puede ser nuevo, y la transformación lo referencia:
+      // tiene que existir antes. Por eso el catálogo va primero y solo entonces
+      // se registra la transformación.
+      await saveJSON("products-catalog", np, { origen: "transformacion" });
+      await saveJSON("transformations-log", nl);
       await Promise.all([
-        saveJSON("products-catalog", np, { origen: "transformacion" }), saveJSON("movements-log", nm),
-        saveJSON("transformations-log", nl), saveJSON("business-settings", ns),
+        saveJSON("movements-log", nm),
+        saveJSON("business-settings", ns),
       ]);
 
       setInputs([{ productId: "", qty: "" }]);
@@ -9743,16 +9770,35 @@ function MyAccountModal({ session, users, setUsers, onClose, toast }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
 
+  const [guardando, setGuardando] = useState(false);
+
+  // La contraseña la guarda Supabase Auth hasheada, así que no hay con qué
+  // compararla acá: se comprueba la actual iniciando sesión con ella, y el
+  // cambio lo hace la propia sesión — sin necesidad de ser administrador.
   async function submit() {
-    const latest = await loadJSON("users", users);
-    const me = latest.find(u => u.id === session.userId);
-    if (!me) return toast("No se encontró tu usuario", "error");
-    if (me.password !== currentPassword) return toast("Tu contraseña actual no es correcta", "error");
-    if (!newPassword || newPassword.length < 4) return toast("La nueva contraseña debe tener al menos 4 caracteres", "error");
-    const nu = latest.map(u => u.id === me.id ? { ...u, password: newPassword } : u);
-    setUsers(nu); await saveJSON("users", nu);
-    toast("Contraseña actualizada", "success");
-    onClose();
+    if (!newPassword || newPassword.length < 4) {
+      return toast("La nueva contraseña debe tener al menos 4 caracteres", "error");
+    }
+    if (guardando) return;
+    setGuardando(true);
+    try {
+      const sb = obtenerCliente();
+      const { error: errorActual } = await sb.auth.signInWithPassword({
+        email: `${session.username}@elgalpon.local`,
+        password: currentPassword,
+      });
+      if (errorActual) return toast("Tu contraseña actual no es correcta", "error");
+
+      const { error } = await sb.auth.updateUser({ password: newPassword });
+      if (error) return toast(friendlyError(error, "No se pudo cambiar la contraseña"), "error");
+
+      toast("Contraseña actualizada", "success");
+      onClose();
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo cambiar la contraseña"), "error");
+    } finally {
+      setGuardando(false);
+    }
   }
 
   return (
@@ -9763,7 +9809,7 @@ function MyAccountModal({ session, users, setUsers, onClose, toast }) {
       </div>
       <Field label="Contraseña actual"><input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
       <Field label="Contraseña nueva"><input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
-      <Btn full icon={Check} onClick={submit}>Actualizar contraseña</Btn>
+      <Btn full icon={Check} onClick={submit} disabled={guardando}>{guardando ? "Guardando…" : "Actualizar contraseña"}</Btn>
     </Modal>
   );
 }
@@ -10558,11 +10604,21 @@ export default function SistemaVentas() {
       purchaseItems: setPurchaseItems, feedback: setFeedback, users: setUsers,
       inventoryCounts: setInventoryCounts, workers: setWorkers,
     };
-    await Promise.all(Object.entries(keys).map(async ([field, storageKey]) => {
-      if (data[field] === undefined) return;
-      await saveJSON(storageKey, data[field]);
+    // Orden obligatorio: cada cosa depende de la anterior. Las boletas apuntan a
+    // quien vendió, las líneas de compra al documento, los sueldos al trabajador.
+    // Antes se guardaba todo en paralelo, cuando no había relaciones que romper.
+    const orden = [
+      "workers", "suppliers", "settings", "products", "openShifts",
+      "invoicesIndex", "sales", "purchaseItems", "movements", "shiftsLog",
+      "inventoryCounts", "feedback",
+    ];
+    for (const field of orden) {
+      if (data[field] === undefined) continue;
+      await saveJSON(keys[field], data[field]);
       setters[field](data[field]);
-    }));
+    }
+    // Las cuentas del equipo no se restauran desde el respaldo: las contraseñas
+    // las guarda Supabase Auth y nunca salen en el archivo.
   }
 
   return (
