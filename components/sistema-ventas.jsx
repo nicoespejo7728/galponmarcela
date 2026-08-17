@@ -21,6 +21,7 @@ import {
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
 import { nuevoId } from "@/lib/datos/traduccion";
+import { normalizarRespaldo } from "@/lib/datos/respaldo";
 import { subirLogo, quitarLogo } from "@/lib/datos/logo";
 import {
   ShoppingCart, Package, FileText, Wallet, Settings as SettingsIcon,
@@ -10515,7 +10516,20 @@ export default function SistemaVentas() {
 
   const allData = { settings, products, sales, movements, openShifts, shiftsLog, suppliers, invoicesIndex, purchaseItems, feedback, users, inventoryCounts, workers };
 
-  async function restoreAll(data) {
+  async function restoreAll(archivo) {
+    // Los respaldos del sistema anterior traen identificadores propios
+    // ("sup_msseiz1q_vg20o2"), y las tablas usan uuid. Antes de escribir nada
+    // se traduce el archivo completo, referencias incluidas, para que los
+    // vínculos entre productos, proveedores y documentos sigan en pie.
+    const { datos: data, traducidos, sueltos } = normalizarRespaldo(archivo);
+    if (traducidos > 0) {
+      console.info(`[restaurar] ${traducidos} identificadores antiguos traducidos a uuid`);
+    }
+    const totalSueltos = Object.values(sueltos || {}).reduce((a, b) => a + b, 0);
+    if (totalSueltos > 0) {
+      console.warn("[restaurar] referencias que apuntaban a algo inexistente:", sueltos);
+    }
+
     const keys = {
       settings: "business-settings", products: "products-catalog", sales: "sales-log", movements: "movements-log",
       openShifts: "open-shifts", shiftsLog: "shifts-log", suppliers: "suppliers", invoicesIndex: "invoices-index",
