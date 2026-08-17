@@ -5632,42 +5632,62 @@ function QuickCatalogPanel({ products, onAdd }) {
   );
 
   return (
-    <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-      <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: C.paperDark }}>
-        <Tags size={15} style={{ color: C.ink }} />
-        <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Catálogo rápido</span>
-      </div>
+    <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
+        <Tags size={17} style={{ color: C.green }} />
+        <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Catálogo rápido</h2>
+        <span className="ml-auto text-xs" style={{ color: C.gray }}>
+          {uncoded.length > 0 && `${filtered.length} producto${filtered.length === 1 ? "" : "s"}`}
+        </span>
+      </header>
       {uncoded.length === 0 ? (
-        <p className="text-xs p-4" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
+        <p className="text-sm p-6 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
       ) : (
         <>
-          <div className="flex gap-1.5 overflow-x-auto px-3 pt-3 pb-2">
+          {/* Las categorías van arriba, en una fila propia: es el filtro del
+              tablero, no un elemento más entre los productos. */}
+          <div className="flex gap-2 overflow-x-auto px-4 py-3 flex-shrink-0" style={{ background: C.paperDark, borderBottom: `1px solid ${C.paperLine}` }}>
             {categories.map(cat => (
-              <button key={cat} onClick={() => setActiveCategory(cat)} className="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap flex-shrink-0" style={activeCategory === cat ? { background: C.green, color: "#fff" } : { background: C.paperDark, color: C.gray }}>{cat}</button>
+              <button
+                key={cat}
+                onClick={() => setActiveCategory(cat)}
+                className="px-4 rounded-lg text-sm font-semibold whitespace-nowrap flex-shrink-0 transition"
+                style={activeCategory === cat
+                  ? { background: C.green, color: "#fff" }
+                  : { background: "#fff", color: C.inkSoft, border: `1.5px solid ${C.paperLine}` }}
+              >{cat}</button>
             ))}
           </div>
-          <div className="grid grid-cols-2 gap-2 p-3 pt-0 max-h-80 overflow-y-auto">
+          {/* Botonera de productos. Las fichas son grandes a propósito: se usan
+              con el dedo o de un vistazo, mientras el cliente espera. */}
+          <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5 p-4 overflow-y-auto md:max-h-[calc(100vh-21rem)]">
             {filtered.map(p => {
               const outOfStock = p.stock <= 0;
               return (
-              <button key={p.id} onClick={() => onAdd(p)} disabled={outOfStock} className="rounded-lg p-2.5 text-left disabled:cursor-not-allowed active:scale-[.97] transition" style={{ background: outOfStock ? C.rustSoft : C.paperDark, border: `1px solid ${outOfStock ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.75 : 1 }}>
-                <div className="text-xs font-medium leading-tight mb-1.5" style={{ color: C.ink }}>{p.name}</div>
-                <div className="flex items-center justify-between">
+              <button
+                key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
+                className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
+                style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
+              >
+                <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>{p.name}</span>
+                <span className="flex items-end justify-between gap-1">
                   {outOfStock ? (
-                    <span className="text-[11px] font-semibold" style={{ color: C.rust }}>Sin stock</span>
+                    <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
                   ) : (
-                    <span className="text-xs font-mono font-semibold" style={{ color: C.green }}>{formatCLP(p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
+                    <span className="text-base font-mono font-bold leading-none" style={{ color: C.greenDark }}>
+                      {formatCLP(p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+                    </span>
                   )}
-                  {p.unitType === "peso" && <Scale size={12} style={{ color: C.gray }} />}
-                </div>
+                  {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
+                </span>
               </button>
               );
             })}
-            {filtered.length === 0 && <p className="col-span-2 text-xs text-center py-4" style={{ color: C.gray }}>Sin productos en esta categoría.</p>}
+            {filtered.length === 0 && <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta categoría.</p>}
           </div>
         </>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -5848,122 +5868,170 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-        <div className="flex flex-col sm:flex-row gap-2">
-          <div className="relative flex-1">
-            <ScanLine size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+      {/* Barra de captura. Es lo primero que toca el operador en cada venta —el
+          lector de código escribe acá— así que ocupa el ancho completo y queda
+          separada del resto: una sola fila, sin nada más compitiendo. */}
+      <div className="rounded-xl p-3 sm:p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto]">
+          <div className="relative">
+            <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
             <input
               ref={inputRef} value={barcode} onChange={e => setBarcode(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") handleScan(barcode); }}
               placeholder="Escanea o escribe el código de barras…"
-              className={`${inputCls} pl-9 font-mono`} style={inputStyle()}
+              aria-label="Código de barras"
+              className={`${inputCls} pl-10 font-mono`} style={inputStyle()}
             />
+          </div>
+          <div className="relative">
+            <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.gray }} />
+            <input
+              value={nameQuery} onChange={e => setNameQuery(e.target.value)}
+              placeholder="…o busca por nombre"
+              aria-label="Buscar producto por nombre"
+              className={`${inputCls} pl-10`} style={inputStyle()}
+            />
+            {nameMatches.length > 0 && (
+              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                {nameMatches.map(p => (
+                  <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                    <span className="truncate" style={{ color: C.ink }}>{p.name}</span>
+                    <span className="flex items-center gap-2 flex-shrink-0">
+                      <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}{p.unitType === "peso" ? " kg" : ""}</span>
+                      <span className="font-semibold font-mono" style={{ color: C.greenDark }}>{formatCLP(p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <Btn variant="dark" icon={Camera} onClick={() => setScannerOpen(true)}>Cámara</Btn>
         </div>
         {notFound && (
-          <div className="mt-3 rounded-lg p-3 flex items-center justify-between gap-2" style={{ background: C.rustSoft }}>
+          <div className="mt-3 rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ background: C.rustSoft }}>
             <span className="text-sm" style={{ color: C.rust }}>Código <span className="font-mono">{notFound}</span> no encontrado.</span>
             {role === "admin" ? (
               <Btn size="sm" variant="rust" onClick={() => { setQuickAdd({ barcode: notFound }); setNotFound(null); }}>Crear producto</Btn>
             ) : <span className="text-xs" style={{ color: C.rust }}>Avisa al administrador</span>}
           </div>
         )}
-        <div className="mt-3">
-          <input value={nameQuery} onChange={e => setNameQuery(e.target.value)} placeholder="…o busca un producto por nombre" className={`${inputCls} text-sm`} style={inputStyle()} />
-          {nameMatches.length > 0 && (
-            <div className="mt-1.5 rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
-              {nameMatches.map(p => (
-                <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-black/[.03] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                  <span style={{ color: C.ink }}>{p.name}</span>
-                  <span className="flex items-center gap-2">
-                    <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}{p.unitType === "peso" ? " kg" : ""}</span>
-                    <span className="font-medium" style={{ color: C.green }}>{formatCLP(p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
 
-      <div className="grid lg:grid-cols-[1fr_320px] gap-4 items-start">
-        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          {cart.length === 0 ? (
-            <EmptyState icon={ShoppingCart} title="Carrito vacío" hint="Escanea un producto o elige uno del catálogo rápido para comenzar." />
-          ) : (
-            <div className="divide-y" style={{ borderColor: C.paperLine }}>
-              {cart.map(i => (
-                <div key={i.productId} className="flex items-center gap-3 px-4 py-3" style={{ borderColor: C.paperLine }}>
+      {/* Dos zonas de trabajo y nada más: a la izquierda de dónde saco los
+          productos, a la derecha la boleta que se está armando con su cobro.
+          En el teléfono la boleta va primero, porque es lo que hay que ver
+          mientras se carga la venta. */}
+      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px] lg:grid-cols-[minmax(0,1fr)_400px] items-start">
+        <div className="order-2 md:order-1 min-w-0">
+          <QuickCatalogPanel products={products} onAdd={addToCart} />
+        </div>
+
+        <section className="order-1 md:order-2 lg:sticky lg:top-4 min-w-0 rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <header className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
+            <ShoppingCart size={17} style={{ color: C.green }} />
+            <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Venta en curso</h2>
+            {cart.length > 0 && (
+              <>
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ background: C.greenSoft, color: C.greenDark }}>{cart.length}</span>
+                <button onClick={() => setCart([])} className="ml-auto px-2 text-sm font-semibold" style={{ color: C.rust }}>Vaciar</button>
+              </>
+            )}
+          </header>
+
+          <div className="divide-y overflow-y-auto md:max-h-[46vh]" style={{ borderColor: C.paperLine }}>
+            {cart.length === 0 ? (
+              <div className="flex flex-col items-center text-center px-6 py-10">
+                <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ background: C.paperDark }}>
+                  <ShoppingCart size={26} style={{ color: C.gray }} />
+                </div>
+                <p className="font-semibold text-sm" style={{ color: C.ink }}>Todavía no hay productos</p>
+                <p className="text-xs mt-1" style={{ color: C.gray }}>Escanea un código o toca un producto del catálogo rápido.</p>
+              </div>
+            ) : cart.map(i => (
+              <div key={i.productId} className="px-3 py-3">
+                <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate" style={{ color: C.ink }}>{i.name}</div>
-                    <div className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(i.price)} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                    <div className="text-sm font-semibold leading-snug" style={{ color: C.ink }}>{i.name}</div>
+                    <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(i.price)} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
                   </div>
+                  <button onClick={() => removeItem(i.productId)} aria-label={`Quitar ${i.name}`} className="flex items-center justify-center min-w-[44px] rounded-lg" style={{ color: C.rust }}><Trash2 size={18} /></button>
+                </div>
+                <div className="flex items-center justify-between gap-2 mt-2">
                   {i.unitType === "peso" ? (
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1.5">
                       <input
                         type="number" step="0.001" value={i.qty}
                         onChange={e => setWeightQty(i.productId, e.target.value)}
-                        className="w-16 text-center text-sm font-mono rounded-md px-1 py-1"
-                        style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}
+                        aria-label={`Peso de ${i.name} en kilogramos`}
+                        className="w-24 text-center font-mono rounded-lg px-2 py-2"
+                        style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}`, color: C.ink }}
                       />
-                      <span className="text-xs" style={{ color: C.gray }}>kg</span>
+                      <span className="text-sm" style={{ color: C.gray }}>kg</span>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => changeQty(i.productId, -1)} className="w-10 h-10 rounded-md flex items-center justify-center" style={{ background: C.paperDark }}><Minus size={17} /></button>
-                      <span className="w-7 text-center text-base font-mono font-semibold">{i.qty}</span>
-                      <button onClick={() => changeQty(i.productId, 1)} className="w-10 h-10 rounded-md flex items-center justify-center" style={{ background: C.paperDark }}><Plus size={17} /></button>
+                    <div className="flex items-center rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
+                      <button onClick={() => changeQty(i.productId, -1)} aria-label="Quitar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Minus size={17} /></button>
+                      <span className="w-12 text-center text-base font-mono font-bold" style={{ color: C.ink }}>{i.qty}</span>
+                      <button onClick={() => changeQty(i.productId, 1)} aria-label="Agregar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Plus size={17} /></button>
                     </div>
                   )}
-                  <div className="w-20 text-right text-sm font-semibold font-mono" style={{ color: C.ink }}>{formatCLP(i.price * i.qty)}</div>
-                  <button onClick={() => removeItem(i.productId)} className="p-2" style={{ color: C.rust }}><Trash2 size={18} /></button>
+                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(i.price * i.qty)}</span>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+              </div>
+            ))}
+          </div>
 
-        <div className="lg:sticky lg:top-4">
-          <QuickCatalogPanel products={products} onAdd={addToCart} />
-        </div>
-      </div>
-
-      <div className="rounded-xl p-4" style={{ background: C.ink }}>
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <span className="text-sm" style={{ color: C.grayLight }}>Total a pagar</span>
-          <span className="text-3xl font-semibold font-mono" style={{ color: C.paper }}>{formatCLP(total)}</span>
-        </div>
-        <div className="grid sm:grid-cols-[1fr_auto] gap-3 items-start">
-          <div>
-            <div className="grid grid-cols-4 gap-1.5 mb-2">
-              {["Efectivo", "Débito", "Crédito", "Transferencia"].map(m => (
-                <button key={m} onClick={() => { setPayment(m); if (m !== "Efectivo") setCashReceived(""); }} className="px-2 py-2.5 rounded-lg text-xs font-medium transition" style={payment === m ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: C.grayLight }}>{m}</button>
-              ))}
+          {/* Cierre de la venta: total, forma de pago y cobro, todo dentro de
+              la misma ficha de la boleta. Antes vivía en un recuadro aparte y
+              parecía otra pantalla. */}
+          <div className="p-4 space-y-3" style={{ background: C.ink }}>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-sm" style={{ color: C.grayLight }}>Total a pagar</span>
+              <span className="text-3xl font-bold font-mono leading-none" style={{ color: "#ffffff" }}>{formatCLP(total)}</span>
             </div>
+
+            <div>
+              <p className="text-xs mb-1.5" style={{ color: C.grayLight }}>Forma de pago</p>
+              <div className="grid grid-cols-2 gap-2">
+                {["Efectivo", "Débito", "Crédito", "Transferencia"].map(m => (
+                  <button
+                    key={m} onClick={() => { setPayment(m); if (m !== "Efectivo") setCashReceived(""); }}
+                    aria-pressed={payment === m}
+                    className="px-2 rounded-lg text-sm font-semibold transition"
+                    style={payment === m ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e2e8f0" }}
+                  >{m}</button>
+                ))}
+              </div>
+            </div>
+
             {payment === "Efectivo" && (
-              <div className="rounded-lg p-3 flex flex-wrap items-center gap-3" style={{ background: C.inkSoft }}>
+              <div className="rounded-lg p-3 space-y-2" style={{ background: C.inkSoft }}>
+                <label className="text-xs block" style={{ color: C.grayLight }} htmlFor="pos-efectivo">¿Con cuánto paga?</label>
                 <input
-                  type="number" value={cashReceived} onChange={e => setCashReceived(e.target.value)}
-                  className={`${inputCls} font-mono flex-1 min-w-[140px]`} style={inputStyle()} placeholder="¿Con cuánto paga?"
+                  id="pos-efectivo" type="number" value={cashReceived} onChange={e => setCashReceived(e.target.value)}
+                  className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0"
                 />
                 {cashReceived !== "" && (
-                  <span className="font-mono font-semibold text-sm" style={{ color: Number(cashReceived) - total >= 0 ? C.brass : C.rust }}>
-                    {Number(cashReceived) - total >= 0 ? "Vuelto" : "Falta"} {formatCLP(Math.abs(Number(cashReceived) - total))}
-                  </span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold" style={{ color: C.grayLight }}>{Number(cashReceived) - total >= 0 ? "Vuelto" : "Falta"}</span>
+                    <span className="font-mono font-bold text-lg" style={{ color: Number(cashReceived) - total >= 0 ? C.brass : "#fca5a5" }}>
+                      {formatCLP(Math.abs(Number(cashReceived) - total))}
+                    </span>
+                  </div>
                 )}
               </div>
             )}
-          </div>
-          <Btn full onClick={checkout} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0)} icon={Check}>Cobrar y emitir</Btn>
-        </div>
 
-        {role === "admin" && (
-          <div className="mt-3 pt-3 flex items-center justify-between gap-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
-            <p className="text-xs" style={{ color: C.grayLight }}>¿Consumo del local o los dueños? No genera venta ni boleta.</p>
-            <Btn size="sm" variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+            <Btn full onClick={checkout} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0)} icon={Check}>Cobrar y emitir</Btn>
+
+            {role === "admin" && (
+              <div className="pt-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
+                <Btn size="sm" full variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+                <p className="text-xs mt-2 text-center" style={{ color: C.grayLight }}>Consumo del local o los dueños: descuenta stock, no genera boleta.</p>
+              </div>
+            )}
           </div>
-        )}
+        </section>
       </div>
 
       {weightPromptProduct && <WeightPromptModal product={weightPromptProduct} onClose={() => setWeightPromptProduct(null)} onConfirm={confirmWeight} />}
