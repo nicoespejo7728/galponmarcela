@@ -81,9 +81,27 @@ que no hace falta explicárselas cada vez.
 
 ## 3. La rutina de cada cambio
 
+Ya no es obligatorio pasar por pull request. Para un cambio chico y ya
+probado, directo a `main`:
+
 ```bash
 git checkout main
 git pull                                  # siempre, antes de empezar
+# ... trabajo ...
+npm run build                             # tiene que pasar
+git add -A
+git commit -m "Vender: ..."
+git push
+```
+
+Apenas se empuja, Vercel despliega solo a producción — no hay ningún paso
+extra que hacer.
+
+Para un cambio grande, o uno que conviene que la otra persona mire antes de
+que llegue al almacén, sigue disponible el camino de antes, con rama y pull
+request:
+
+```bash
 git checkout -b vender/carrito-por-peso   # zona/qué-hace
 # ... trabajo ...
 npm run build                             # tiene que pasar
@@ -106,7 +124,9 @@ sabe fusionar dos ediciones simultáneas ahí adentro con criterio.
 
 Antes de empezar, digan en qué pestaña van a trabajar. Dos personas en pestañas
 distintas del mismo archivo casi nunca chocan; dos personas en la misma pestaña
-chocan siempre.
+chocan siempre. Esto importa más ahora que el push directo a `main` es el
+camino normal: ya no hay una revisión de por medio que frene un choque antes
+de que llegue a producción.
 
 ### Migraciones
 
@@ -119,15 +139,17 @@ fusionar el pull request.
 
 ---
 
-## 4. Proteger `main` (opcional, recomendado)
+## 4. Protección de `main` (ya no es el modo por defecto)
 
-GitHub → **Settings → Branches → Add branch protection rule**, patrón `main`:
+Antes se recomendaba activar en GitHub → **Settings → Branches → Add branch
+protection rule**, patrón `main`, las opciones **Require a pull request before
+merging** y **Require approvals: 1** — así nadie empujaba sin querer directo a
+producción.
 
-- Require a pull request before merging.
-- Require approvals: 1.
-
-Así nadie —ni por descuido— empuja directo a producción, porque cada push a
-`main` publica en `www.galponmarcela.cl`.
+Con el cambio a push directo, si esa regla está activada hay que
+**desactivarla**: si no, el `git push` a `main` del punto 3 se va a rechazar.
+Si en algún momento el equipo prefiere volver a exigir revisión antes de que
+un cambio llegue a `www.galponmarcela.cl`, se reactiva desde el mismo lugar.
 
 ---
 

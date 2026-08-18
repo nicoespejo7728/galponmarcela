@@ -6,17 +6,17 @@ navegador, después en una vista previa en internet, y al final en
 
 ## Lo primero: qué actualiza qué
 
-Conviene tenerlo claro antes de empezar, porque `git push` **no** publica el
-sitio por sí solo.
-
 | Lo que haces | Qué se actualiza |
 |---|---|
 | Guardar un archivo con `npm run dev` corriendo | Tu navegador, al instante (`localhost:3000`) |
-| `git push` de tu rama | Una **vista previa** en internet, con dirección propia. El sitio real no se toca |
-| Fusionar el pull request a `main` | `www.galponmarcela.cl`, en 1 o 2 minutos |
+| `git push` de una rama | Una **vista previa** en internet, con dirección propia. El sitio real no se toca |
+| `git push` directo a `main`, o fusionar un pull request | `www.galponmarcela.cl`, en 1 o 2 minutos |
 
-Es a propósito: `main` es lo que está usando el almacén ahora mismo. Nada llega
-ahí sin pasar antes por una rama y un pull request.
+`main` es lo que está usando el almacén ahora mismo, así que un push ahí se ve
+casi al instante. Para un cambio chico y ya probado (`npm run build` +
+mirarlo en el navegador), se puede empujar directo. Para algo grande, o que
+conviene que Nico mire antes de que llegue al almacén, sigue disponible el
+camino de rama + pull request.
 
 ---
 
@@ -74,6 +74,28 @@ Las dos líneas tienen que decir
 ---
 
 ## El ciclo de trabajo, cada vez
+
+Para un cambio chico y ya probado, directo a `main`:
+
+```bash
+git checkout main
+git pull
+
+npm run dev                 # http://localhost:3000/sistema
+#    (se recarga solo al guardar; Ctrl+C para parar)
+
+npm run build                # comprobar que compila de verdad
+
+git add -A
+git commit -m "Vender: descuento por kilo en productos a granel"
+git push
+```
+
+Apenas se empuja, Vercel despliega solo a `www.galponmarcela.cl` — nada más
+que hacer.
+
+Para algo grande, o que conviene que Nico revise antes de que llegue al
+almacén, usa rama + pull request:
 
 ```bash
 # 1. Partir de lo último que hay publicado
@@ -177,8 +199,11 @@ credenciales** → *Credenciales de Windows* → quita las entradas
 `git:https://github.com` y vuelve a empujar; te preguntará de nuevo.
 
 **`protected branch` al empujar a `main`**
-Está bien que pase: `main` no recibe pushes directos. Crea una rama y abre un
-pull request.
+Ahora `main` sí recibe pushes directos — si sale este error es que la
+protección de rama sigue activada en GitHub. Nico tiene que entrar a
+**Settings → Branches** y quitar la regla de `main` (o desmarcar "Require a
+pull request before merging"). Mientras tanto, la alternativa es crear una
+rama y abrir un pull request.
 
 **La vista previa no aparece en el pull request**
 La construcción falló. En el pull request, `Details` junto a la comprobación de

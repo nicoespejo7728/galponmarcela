@@ -40,18 +40,18 @@ Le llega un correo con la invitación. Hasta que la acepte, no puede clonar.
 > **Write** le deja crear ramas y abrir pull requests. No le deja borrar el
 > repositorio ni cambiar su configuración.
 
-## A3. Proteger `main` (recomendado, 2 minutos)
+## A3. Sobre `main` y los pull request
 
-Cada push a `main` publica en `www.galponmarcela.cl`. Para que eso nunca pase
-por descuido:
+Cada push a `main` publica en `www.galponmarcela.cl` — y eso es a propósito:
+el equipo trabaja empujando directo a `main` para los cambios chicos, sin
+pasar por pull request cada vez. Para cambios grandes, o algo que conviene que
+la otra persona mire antes de que llegue al almacén, sigue disponible el
+camino de rama + pull request (ver Parte C).
 
-1. **Settings** → **Branches** → **Add branch protection rule**
-2. Branch name pattern: `main`
-3. Marca **Require a pull request before merging**
-4. Marca **Require approvals** → 1
-5. **Create**
-
-Desde ahí, todo cambio —tuyo también— entra revisado por pull request.
+Si en algún momento quieren exigir revisión siempre, se activa en **Settings**
+→ **Branches** → **Add branch protection rule**, patrón `main`, marcando
+**Require a pull request before merging** y **Require approvals** → 1. Con eso
+activado, un `git push` directo a `main` se rechaza.
 
 ## A4. Enviarle esta guía
 
@@ -299,6 +299,25 @@ proyecto, sobre todo la parte del puente de datos) y `CLAUDE.md`.
 
 ## B10. Tu primer cambio, de punta a punta
 
+Para un cambio chico y ya probado, directo a `main`:
+
+```bash
+git checkout main
+git pull
+
+# ... trabajas con Claude ...
+
+npm run build          # tiene que compilar sin errores
+git add -A
+git commit -m "Vender: descripción corta de lo que hace"
+git push
+```
+
+Apenas se empuja, Vercel despliega solo — no hace falta nada más.
+
+Si el cambio es grande, o prefieres que Nico lo mire antes de que llegue al
+almacén, usa rama + pull request:
+
 ```bash
 git checkout main
 git pull
@@ -322,13 +341,16 @@ comentario en el pull request. Nico revisa ahí y fusiona.
 
 # Parte C — Las cuatro reglas de convivencia
 
-1. **Nunca directo a `main`.** Todo entra por rama y pull request, aunque sea
-   una línea. `main` es lo que están usando en el almacén ahora mismo.
+1. **Push directo a `main` está permitido, para cambios chicos y probados.**
+   `main` es lo que están usando en el almacén ahora mismo, así que cada push
+   ahí se ve enseguida. Para algo grande, o que conviene que el otro mire
+   antes, sigue disponible rama + pull request.
 
 2. **Avisar en qué pestaña se va a trabajar.** `components/sistema-ventas.jsx`
    son 10.700 líneas en un archivo solo. Dos personas en pestañas distintas casi
    nunca chocan; dos personas en la misma pestaña chocan siempre, y git no sabe
-   resolver eso con criterio.
+   resolver eso con criterio. Esto importa más ahora que no hay pull request de
+   por medio para frenar un choque antes de que llegue a producción.
 
 3. **`git pull` antes de empezar, siempre.** Ramas cortas y fusionadas pronto.
    Una rama de dos semanas sobre ese archivo es un conflicto asegurado.

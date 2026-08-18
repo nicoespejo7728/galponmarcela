@@ -71,6 +71,10 @@ está en `docs/modelo-er-el-galpon.html`.
 
 ## Ramas
 
-`main` es lo que está publicado. Todo cambio entra por rama y pull request
-—`vender/`, `inventario/`, `datos/`, `docs/` según lo que toque— aunque sea de
-una línea. Ver `docs/trabajo-en-equipo.md`.
+`main` es lo que está publicado — cada push ahí despliega directo a
+producción. Ya no es obligatorio pasar por pull request: se puede empujar
+directo a `main` cuando el cambio ya se probó (`npm run build` + mirarlo en
+los tres anchos). Para cambios grandes, o que conviene que alguien más revise
+antes de que lleguen al almacén, sigue disponible el camino de rama + PR
+—`vender/`, `inventario/`, `datos/`, `docs/` según lo que toque. Ver
+`docs/trabajo-en-equipo.md`.
