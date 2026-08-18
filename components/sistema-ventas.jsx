@@ -6576,7 +6576,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   const [invoiceFiles, setInvoiceFiles] = useState([]);
   const [freeEntry, setFreeEntry] = useState(false);
   const [freeEntryReason, setFreeEntryReason] = useState("");
+  const [pistolaBarcode, setPistolaBarcode] = useState("");
+  const [scannerOpen, setScannerOpen] = useState(false);
   const fileInputRef = useRef(null);
+  const pistolaInputRef = useRef(null);
 
   function toggleFreeEntry(v) {
     setFreeEntry(v);
@@ -6623,6 +6626,34 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   }
   function removeDraft(tempId) {
     setDraftItems(prev => prev.filter(d => d.tempId !== tempId));
+  }
+
+  // Mismo criterio que al vender: si el código ya está en el catálogo se suma
+  // 1 a la cantidad recibida (o a la fila que ya se había escaneado en esta
+  // misma recepción); si no está, queda como producto nuevo con el código ya
+  // cargado, listo para completar nombre, categoría, cantidad y costo.
+  function handlePistolaScan(code) {
+    const clean = code.trim();
+    if (!clean) return;
+    const found = products.find(p => p.barcode === clean);
+    setDraftItems(prev => {
+      const idx = found
+        ? prev.findIndex(d => !d.isNew && d.productId === found.id)
+        : prev.findIndex(d => d.isNew && d.barcode === clean);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = { ...copy[idx], qty: (Number(copy[idx].qty) || 0) + 1 };
+        return copy;
+      }
+      if (found) {
+        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: 1, netCost: found.cost || 0 }];
+      }
+      return [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: clean, name: "", category: "", qty: 1, netCost: 0, unitType: "unidad" }];
+    });
+    toast(found ? `"${found.name}" agregado — revisa cantidad y costo` : `Código ${clean} no está en el catálogo — complétalo como producto nuevo`, "success");
+    setPistolaBarcode("");
+    setScannerOpen(false);
+    pistolaInputRef.current?.focus();
   }
 
   async function handleAttach(e) {
@@ -6863,6 +6894,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         {!freeEntry && (
           <div className="flex gap-1.5 mb-3">
             <button onClick={() => setSubTab("manual")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "manual" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><Package size={15} />Ingreso manual</button>
+            <button onClick={() => setSubTab("pistola")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "pistola" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><ScanLine size={15} />Pistola</button>
             <button onClick={() => setSubTab("scan")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "scan" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><Sparkles size={15} />Leer con IA</button>
           </div>
         )}
@@ -6884,6 +6916,21 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
               )}
             </div>
             <Btn variant="ghost" size="sm" icon={Plus} onClick={addNewDraft}>Producto nuevo (no está en el catálogo)</Btn>
+          </div>
+        ) : subTab === "pistola" ? (
+          <div>
+            <div className="relative mb-2">
+              <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
+              <input
+                ref={pistolaInputRef} value={pistolaBarcode} onChange={e => setPistolaBarcode(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") handlePistolaScan(pistolaBarcode); }}
+                placeholder="Escanea con la pistola, o escribe el código y presiona Enter…"
+                aria-label="Código de barras"
+                className={`${inputCls} pl-9`} style={inputStyle()}
+              />
+            </div>
+            <Btn variant="dark" size="sm" icon={Camera} onClick={() => setScannerOpen(true)} full>Escanear con la cámara del dispositivo</Btn>
+            <p className="text-xs mt-2" style={{ color: C.gray }}>Cada código escaneado se agrega solo a la lista de abajo: si el producto ya existe en el catálogo, se suma 1 a la cantidad recibida; si no existe, queda como producto nuevo con el código ya cargado — solo falta completar nombre, categoría, cantidad y costo.</p>
           </div>
         ) : (
           <div>
@@ -6916,7 +6963,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         </Btn>
       )}
       {draftItems.length === 0 && (
-        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Adjunta la foto de la boleta/factura y luego busca productos existentes, agrega uno nuevo, o analízala con IA para cargarlos automáticamente. Para casos aislados sin documento, usa 'Entrada libre'." />
+        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Adjunta la foto de la boleta/factura y luego busca productos existentes, escanéalos con la pistola, o analízala con IA para cargarlos automáticamente. Para casos aislados sin documento, usa 'Entrada libre'." />
       )}
 
       {role !== "admin" && (
@@ -6924,6 +6971,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       )}
 
       {quickAddSupplier && <SupplierModal initial={{ name: supplier }} onClose={() => setQuickAddSupplier(false)} onSave={saveQuickSupplier} />}
+      {scannerOpen && <CameraScanner onDetect={handlePistolaScan} onClose={() => setScannerOpen(false)} />}
     </div>
   );
 }
