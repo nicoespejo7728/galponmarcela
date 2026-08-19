@@ -5309,9 +5309,25 @@ Ayudas con tres cosas principales:
 
 3. Listados de compra por categoría (ej. "hazme un listado de lo que no queda de útiles de aseo"). Cuando el usuario pida esto, el sistema ya te entrega el listado REAL calculado desde el inventario en el contexto de este mensaje — tu trabajo es solo presentarlo de forma clara y ordenada (como una lista de compra), SIN inventar, agregar ni quitar productos del listado que te pasaron. Si el contexto te dice que no se identificó la categoría, pide que la aclare. Si te dice que no falta nada de esa categoría, dilo con confianza, no inventes una lista igual.
 
+4. Programar conteos de inventario (solo si tienes la herramienta "programar_conteo" disponible — se te da solo a administradores). Úsala cuando te pidan agendar, programar o asignar un conteo a alguien (ej. "agéndale a Carla un conteo de bebidas para el viernes"). El contexto de este mensaje te da la lista real de personas del equipo y de categorías — usa esos nombres EXACTOS, nunca inventes uno. Si falta la persona, la categoría o la fecha, o no estás segura de a cuál se refieren, pregunta primero en vez de adivinar; no llames la herramienta con datos dudosos. Si quien te escribe no es administrador y pide esto, explícale que solo un administrador puede programar conteos.
+
 Responde siempre en español de Chile, de forma breve y práctica (esto se usa en el mesón, con el cliente esperando). No inventes datos del sistema que no estén en esta descripción.`;
 
-async function askMarcelita(history, localContext) {
+const PROGRAMAR_CONTEO_TOOL = {
+  name: "programar_conteo",
+  description: "Programa un conteo de inventario obligatorio para una persona del equipo, en una categoría de productos y con una fecha límite. Solo se usa cuando el usuario lo pide explícitamente y los tres datos (categoría, persona, fecha) están claros. No inventes nombres de personas ni de categorías: deben coincidir con los que aparecen como reales en el contexto del mensaje.",
+  input_schema: {
+    type: "object",
+    properties: {
+      categoria: { type: "string", description: "Nombre exacto de la categoría de productos a contar, tal como aparece en la lista de categorías reales del contexto." },
+      asignado_a: { type: "string", description: "Nombre de la persona del equipo a la que se asigna el conteo, tal como aparece en la lista de usuarios reales del contexto." },
+      fecha: { type: "string", description: "Fecha límite del conteo, en formato AAAA-MM-DD." },
+    },
+    required: ["categoria", "asignado_a", "fecha"],
+  },
+};
+
+async function askMarcelita(history, localContext, canScheduleCounts) {
   const systemText = localContext
     ? `${MARCELITA_BASE_PROMPT}\n\nCONTEXTO DEL INVENTARIO LOCAL PARA ESTE MENSAJE: ${localContext}`
     : MARCELITA_BASE_PROMPT;
@@ -5320,19 +5336,22 @@ async function askMarcelita(history, localContext) {
   // así que no hace falta arrastrar mensajes viejos; esto hace cada consulta
   // más liviana y rápida, y deja más cupo compartido para el resto del equipo.
   const recentHistory = history.slice(-10);
+  const tools = [{ type: "web_search_20250305", name: "web_search" }];
+  // La herramienta para programar conteos solo se le da a Marcelita cuando
+  // quien pregunta es administrador — igual que la pantalla de Conteos, que
+  // ya restringe "Programar inventario" a ese rol.
+  if (canScheduleCounts) tools.push(PROGRAMAR_CONTEO_TOOL);
   const data_ = await callClaudeAPI({
     model: "claude-sonnet-4-6",
     max_tokens: 700,
     system: systemText,
     messages: recentHistory.map(m => ({ role: m.role, content: m.content })),
-    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    tools,
   });
-  const text = (data_.content || [])
-    .filter(b => b.type === "text")
-    .map(b => b.text)
-    .join("\n")
-    .trim();
-  return text || "No encontré una respuesta clara, ¿puedes reformular la pregunta?";
+  const blocks = data_.content || [];
+  const text = blocks.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+  const toolUse = blocks.find(b => b.type === "tool_use" && b.name === "programar_conteo");
+  return { text: text || (toolUse ? "" : "No encontré una respuesta clara, ¿puedes reformular la pregunta?"), toolUse: toolUse ? toolUse.input : null };
 }
 
 /* ---------------------------------------------------------
@@ -10431,8 +10450,31 @@ function MarcelitaAvatar({ size = 40 }) {
   );
 }
 
-function ChatBubble({ msg }) {
+function ChatBubble({ msg, onConfirm, onCancel }) {
   const isUser = msg.role === "user";
+  if (msg.type === "count-confirm") {
+    const resolved = msg.data?.resolved;
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-2xl px-3 py-2.5 text-sm" style={{ background: C.brassSoft, border: `1.5px solid ${C.brass}`, color: C.ink }}>
+          <div className="flex items-center gap-1.5 mb-1.5 font-semibold text-xs" style={{ color: "#8a6a1f" }}>
+            <ClipboardList size={14} /> Programar conteo
+          </div>
+          <div className="text-xs mb-2">{msg.content}</div>
+          {resolved === "confirmed" ? (
+            <Badge tone="green">programado ✓</Badge>
+          ) : resolved === "cancelled" ? (
+            <Badge tone="gray">cancelado</Badge>
+          ) : (
+            <div className="flex gap-2">
+              <Btn size="sm" icon={Check} onClick={onConfirm}>Confirmar</Btn>
+              <Btn size="sm" variant="ghost" onClick={onCancel}>Cancelar</Btn>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className="max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap" style={isUser ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.ink }}>
@@ -10483,9 +10525,39 @@ function detectPurchaseListRequest(text, products) {
   return `El usuario pidió el listado de compra de la categoría "${bestCat}". Este es el listado REAL calculado desde el inventario (productos en su stock mínimo o por debajo) — preséntaselo como una lista de compra clara y ordenada, con este mismo dato exacto, sin agregar ni quitar productos:\n${lines}`;
 }
 
-function MarcelitaChat({ products, session }) {
+// Marcelita devuelve categoría y persona como texto libre — acá se calzan
+// contra las categorías y usuarios reales (sin distinguir mayúsculas ni
+// tildes) antes de dejar programar nada. Si algo no calza con confianza, se
+// pide aclarar en vez de adivinar: esto queda escrito en el sistema real.
+function resolveCountToolUse(input, users, categories) {
+  const catQ = normalize(input?.categoria || "");
+  const category = categories.find(c => normalize(c) === catQ)
+    || categories.find(c => catQ && (normalize(c).includes(catQ) || catQ.includes(normalize(c))));
+  if (!category) {
+    return { ok: false, message: `No identifiqué la categoría "${input?.categoria || ""}" entre las reales del inventario. ¿Cuál es exactamente?` };
+  }
+
+  const userQ = normalize(input?.asignado_a || "");
+  const user = users.find(u => normalize(u.name) === userQ)
+    || users.find(u => userQ && normalize(u.name).split(" ").includes(userQ))
+    || users.find(u => userQ && (normalize(u.name).includes(userQ) || userQ.includes(normalize(u.name).split(" ")[0])));
+  if (!user) {
+    return { ok: false, message: `No identifiqué a "${input?.asignado_a || ""}" entre los usuarios del sistema. ¿A quién se lo asigno?` };
+  }
+
+  const dueDate = input?.fecha || "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    return { ok: false, message: `La fecha "${input?.fecha || ""}" no quedó clara. ¿Para cuándo quieres programarlo? (ej. 2026-08-25)` };
+  }
+
+  return { ok: true, category, userId: user.id, userName: user.name, dueDate };
+}
+
+function MarcelitaChat({ products, session, role, users, counts, setCounts, toast }) {
+  const canScheduleCounts = role === "admin";
+  const categories = useMemo(() => [...new Set(products.map(p => p.category).filter(Boolean))].sort(), [products]);
   const [messages, setMessages] = useState([
-    { role: "assistant", content: `¡Hola ${session.name.split(" ")[0]}! Soy Marcelita 🙂 ¿En qué te ayudo? Puedo explicarte cómo usar el sistema, buscarte precios de un producto que no tengas en el inventario, o armarte un listado de compra por categoría (ej. "hazme un listado de lo que falta de bebidas").` }
+    { role: "assistant", content: `¡Hola ${session.name.split(" ")[0]}! Soy Marcelita 🙂 ¿En qué te ayudo? Puedo explicarte cómo usar el sistema, buscarte precios de un producto que no tengas en el inventario, armarte un listado de compra por categoría${canScheduleCounts ? ", o programarle un conteo a alguien del equipo" : ""} (ej. "hazme un listado de lo que falta de bebidas").` }
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -10498,6 +10570,25 @@ function MarcelitaChat({ products, session }) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, sending]);
+
+  async function confirmCount(data, idx) {
+    const latest = await loadJSON("inventory-counts", counts);
+    const record = {
+      id: uid("inv-count"), dueDate: data.dueDate, category: data.category,
+      assignedToId: data.userId, assignedToName: data.userName,
+      assignedBy: session.name, status: "pendiente",
+      createdAt: new Date().toISOString(),
+      completedAt: null, completedBy: null, items: [], exception: null,
+    };
+    const nc = [record, ...latest];
+    setCounts(nc);
+    await saveJSON("inventory-counts", nc);
+    setMessages(prev => prev.map((m, i) => i === idx ? { ...m, data: { ...m.data, resolved: "confirmed" } } : m));
+    toast("Conteo programado", "success");
+  }
+  function cancelCount(idx) {
+    setMessages(prev => prev.map((m, i) => i === idx ? { ...m, data: { ...m.data, resolved: "cancelled" } } : m));
+  }
 
   async function send() {
     const text = input.trim();
@@ -10519,8 +10610,28 @@ function MarcelitaChat({ products, session }) {
           ? `Se encontraron estos productos parecidos en el inventario local: ${localMatches.map(p => `${p.name} (${formatCLP(p.price)}${p.unitType === "peso" ? "/kg" : ""}, stock ${p.stock})`).join("; ")}. Si el usuario pregunta por algo similar a esto, respóndele con estos datos reales en vez de buscar en internet.`
           : `No se encontró ningún producto parecido en el inventario local. Si el usuario está preguntando por un producto para vender, usa la búsqueda web para comparar precios en tiendas online chilenas.`;
       }
-      const reply = await askMarcelita(newHistory, localContext);
-      setMessages(prev => [...prev, { role: "assistant", content: reply }]);
+      if (canScheduleCounts) {
+        localContext += ` Usuarios reales del equipo para asignar conteos: ${users.map(u => u.name).join(", ") || "ninguno cargado"}. Categorías reales de inventario para conteos: ${categories.join(", ") || "ninguna cargada"}.`;
+      }
+      const result = await askMarcelita(newHistory, localContext, canScheduleCounts);
+      setMessages(prev => {
+        const next = [...prev];
+        if (result.text) next.push({ role: "assistant", content: result.text });
+        if (result.toolUse) {
+          const resolved = resolveCountToolUse(result.toolUse, users, categories);
+          if (resolved.ok) {
+            next.push({
+              role: "assistant", type: "count-confirm",
+              content: `¿Programo el conteo de "${resolved.category}" para ${resolved.userName}, con fecha ${resolved.dueDate}?`,
+              data: resolved,
+            });
+          } else {
+            next.push({ role: "assistant", content: resolved.message });
+          }
+        }
+        if (!result.text && !result.toolUse) next.push({ role: "assistant", content: "No encontré una respuesta clara, ¿puedes reformular la pregunta?" });
+        return next;
+      });
     } catch (err) {
       setMessages(prev => [...prev, { role: "assistant", content: `Se me cruzaron los cables: ${friendlyError(err, "no pude responder")}. Intenta de nuevo.` }]);
     } finally {
@@ -10534,7 +10645,9 @@ function MarcelitaChat({ products, session }) {
   return (
     <div className="flex flex-col" style={{ height: 420 }}>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-1 py-2 space-y-2">
-        {messages.map((m, i) => <ChatBubble key={i} msg={m} />)}
+        {messages.map((m, i) => (
+          <ChatBubble key={i} msg={m} onConfirm={() => confirmCount(m.data, i)} onCancel={() => cancelCount(i)} />
+        ))}
         {sending && (
           <div className="flex justify-start">
             <div className="rounded-2xl px-3 py-2 flex items-center gap-1.5" style={{ background: C.paperDark }}>
@@ -10633,7 +10746,7 @@ function MarcelitaFeedback({ feedback, setFeedback, session, role, toast }) {
   );
 }
 
-function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast }) {
+function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast, users, counts, setCounts }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("chat");
   const pendingCount = role === "admin" ? feedback.filter(f => f.status !== "resuelto").length : 0;
@@ -10682,7 +10795,7 @@ function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast
 
             <div className="p-3">
               {tab === "chat"
-                ? <MarcelitaChat products={products} session={session} />
+                ? <MarcelitaChat products={products} session={session} role={role} users={users} counts={counts} setCounts={setCounts} toast={toast} />
                 : <MarcelitaFeedback feedback={feedback} setFeedback={setFeedback} session={session} role={role} toast={toast} />}
             </div>
           </div>
@@ -11258,7 +11371,7 @@ export default function SistemaVentas() {
         />
       )}
 
-      <MarcelitaWidget products={products} feedback={feedback} setFeedback={setFeedback} session={session} role={session.role} toast={toast} />
+      <MarcelitaWidget products={products} feedback={feedback} setFeedback={setFeedback} session={session} role={session.role} toast={toast} users={users} counts={inventoryCounts} setCounts={setInventoryCounts} />
       {myAccountOpen && <MyAccountModal session={session} users={users} setUsers={setUsers} onClose={() => setMyAccountOpen(false)} toast={toast} />}
       <Toast toast={toastData} />
     </div>
