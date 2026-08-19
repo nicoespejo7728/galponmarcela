@@ -5086,6 +5086,17 @@ function pushPriceHistory(history, cost, price) {
   return next.slice(-15);
 }
 
+/* Fecha desde la que un producto quedó en 0 —Inventario la usa para avisar
+   cuáles llevan 6 meses o más sin stock. Se marca la primera vez que el stock
+   cae a 0 y se limpia sola en cuanto vuelve a tener stock; mientras se
+   mantenga en 0, la fecha original no cambia. */
+function nextStockZeroSince(prevStock, prevZeroSince, newStock) {
+  const stock = Math.max(0, Number(newStock) || 0);
+  if (stock === 0 && !(Number(prevStock) > 0) && prevZeroSince) return prevZeroSince;
+  if (stock === 0) return new Date().toISOString();
+  return null;
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -5699,6 +5710,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [nameQuery, setNameQuery] = useState("");
   const [payment, setPayment] = useState("Efectivo");
   const [cashReceived, setCashReceived] = useState("");
+  const [boletaEmitida, setBoletaEmitida] = useState(true);
   const [receipt, setReceipt] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
   const [consumptionOpen, setConsumptionOpen] = useState(false);
@@ -5776,6 +5788,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   function removeItem(productId) { setCart(prev => prev.filter(i => i.productId !== productId)); }
 
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
+  // imprime la misma máquina—; en efectivo o transferencia queda a criterio
+  // de quien cobra, así que ahí sí se pregunta.
+  const boletaAutomatica = payment === "Débito" || payment === "Crédito";
+  const boletaEmitidaFinal = boletaAutomatica ? true : boletaEmitida;
 
   async function checkout() {
     if (cart.length === 0) return;
@@ -5804,10 +5821,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       items: cart.map(i => ({ productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty, price: i.price, cost: i.cost, unitType: i.unitType })),
       total,
       paymentMethod: payment,
+      boletaEmitida: boletaEmitidaFinal,
     };
     const newProducts = latestProducts.map(p => {
       const item = cart.find(i => i.productId === p.id);
-      return item ? { ...p, stock: p.stock - item.qty } : p;
+      if (!item) return p;
+      const nextStock = Math.max(0, p.stock - item.qty);
+      return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
     });
     const newSales = [sale, ...latestSales];
 
@@ -5827,7 +5847,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     await saveJSON("movements-log", movimientosFinales);
 
     setReceipt(sale);
-    setCart([]); setPayment("Efectivo"); setCashReceived("");
+    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(true);
     toast(`Venta #${numeroReal} registrada`, "success");
     setTimeout(() => inputRef.current?.focus(), 50);
   }
@@ -5848,7 +5868,9 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     const latestProducts = await loadJSON("products-catalog", products);
     const newProducts = latestProducts.map(p => {
       const item = cart.find(i => i.productId === p.id);
-      return item ? { ...p, stock: p.stock - item.qty } : p;
+      if (!item) return p;
+      const nextStock = Math.max(0, p.stock - item.qty);
+      return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
     });
     const latestMovements = await loadJSON("movements-log", movements);
     const newMovements = [{
@@ -5862,7 +5884,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     await saveJSON("movements-log", newMovements);
 
     setConsumptionTicket(ticket);
-    setCart([]); setPayment("Efectivo"); setCashReceived(""); setConsumptionOpen(false);
+    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(true); setConsumptionOpen(false);
     toast("Consumo interno registrado, stock actualizado", "success");
   }
 
@@ -6004,6 +6026,24 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               </div>
             </div>
 
+            {boletaAutomatica ? (
+              <p className="text-[11px]" style={{ color: C.grayLight }}>Con {payment.toLowerCase()} la boleta se emite automáticamente.</p>
+            ) : (
+              <div>
+                <p className="text-xs mb-1.5" style={{ color: C.grayLight }}>¿Se emitió boleta?</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {[{ v: true, l: "Sí, con boleta" }, { v: false, l: "No, sin boleta" }].map(o => (
+                    <button
+                      key={String(o.v)} onClick={() => setBoletaEmitida(o.v)}
+                      aria-pressed={boletaEmitida === o.v}
+                      className="px-2 py-2 rounded-lg text-sm font-semibold transition"
+                      style={boletaEmitida === o.v ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e2e8f0" }}
+                    >{o.l}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {payment === "Efectivo" && (
               <div className="rounded-lg p-3 space-y-2" style={{ background: C.inkSoft }}>
                 <label className="text-xs block" style={{ color: C.grayLight }} htmlFor="pos-efectivo">¿Con cuánto paga?</label>
@@ -6038,7 +6078,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       {scannerOpen && <CameraScanner onDetect={handleScan} onClose={() => setScannerOpen(false)} />}
       {quickAdd && <ProductModal initial={quickAdd} onClose={() => setQuickAdd(null)} onSave={async (p) => {
         const latest = await loadJSON("products-catalog", products);
-        const np = [...latest, p];
+        const np = [...latest, { ...p, stockZeroSince: p.stock > 0 ? null : new Date().toISOString() }];
         setProducts(np); await saveJSON("products-catalog", np, { origen: "carga_inicial" });
         setQuickAdd(null); toast("Producto creado", "success");
       }} products={products} suppliers={suppliers} role={role} session={session} />}
@@ -6146,6 +6186,7 @@ function ReceiptModal({ sale, settings, onClose }) {
           )}
           <div className="flex justify-between text-base font-semibold pt-1"><span>Total</span><span>{formatCLP(sale.total)}</span></div>
           <div className="text-xs pt-1" style={{ color: C.gray }}>Pago: {sale.paymentMethod}</div>
+          {sale.boletaEmitida === false && <div className="text-xs" style={{ color: C.rust }}>Sin boleta emitida</div>}
         </div>
       </div>
       <div className="flex gap-2 mt-4">
@@ -6516,8 +6557,9 @@ function ApprovalsPanel({ products, setProducts, toast }) {
   );
 }
 
-function DraftRow({ item, onChange, onRemove, role }) {
+function DraftRow({ item, onChange, onRemove, role, products }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
+  const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
   return (
     <div className="px-4 py-3 flex flex-wrap items-center gap-2.5" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
       <div className="flex-1 min-w-[180px]">
@@ -6537,12 +6579,13 @@ function DraftRow({ item, onChange, onRemove, role }) {
           <div>
             <div className="text-sm font-medium" style={{ color: C.ink }}>{item.name}</div>
             <div className="text-xs font-mono" style={{ color: C.gray }}>{item.barcode}</div>
+            <div className="text-xs mt-0.5" style={{ color: C.green }}>Stock actual: <span className="font-mono font-semibold">{currentProduct ? currentProduct.stock : "—"}</span></div>
           </div>
         )}
       </div>
       <Badge tone={item.isNew ? "brass" : "green"}>{item.isNew ? "nuevo" : "existente"}</Badge>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>{item.unitType === "peso" ? "cant. (kg)" : "cant."}</span>
+        <span className="text-[10px]" style={{ color: C.gray }}>{item.unitType === "peso" ? "recibes (kg)" : "recibes"}</span>
         <input type="number" step={item.unitType === "peso" ? "0.001" : "1"} value={item.qty} onChange={e => onChange({ ...item, qty: e.target.value })} className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
       </div>
       <div className="flex flex-col items-center">
@@ -6738,6 +6781,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           price: role === "admin" ? Number(item.finalPrice ?? suggested) : suggested,
           cost: netCost,
           stock: qty,
+          stockZeroSince: qty > 0 ? null : new Date().toISOString(),
           minStock: 5,
           supplierId: supplierId || null,
           unitType: item.unitType || "unidad",
@@ -6748,7 +6792,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       } else {
         newProducts = newProducts.map(p => {
           if (p.id !== item.productId) return p;
-          const updated = { ...p, stock: p.stock + qty, cost: netCost };
+          const updated = { ...p, stock: p.stock + qty, cost: netCost, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + qty) };
           if (!updated.supplierId && supplierId) updated.supplierId = supplierId;
           if (role === "admin") {
             updated.price = Number(item.finalPrice ?? suggested);
@@ -6922,7 +6966,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             <div className="relative mb-2">
               <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
               <input
-                ref={pistolaInputRef} value={pistolaBarcode} onChange={e => setPistolaBarcode(e.target.value)}
+                ref={pistolaInputRef} autoFocus value={pistolaBarcode} onChange={e => setPistolaBarcode(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") handlePistolaScan(pistolaBarcode); }}
                 placeholder="Escanea con la pistola, o escribe el código y presiona Enter…"
                 aria-label="Código de barras"
@@ -6951,7 +6995,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </div>
           <div>
             {draftItems.map(item => (
-              <DraftRow key={item.tempId} item={item} role={role} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} />
+              <DraftRow key={item.tempId} item={item} role={role} products={products} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} />
             ))}
           </div>
         </div>
@@ -6963,7 +7007,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         </Btn>
       )}
       {draftItems.length === 0 && (
-        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Adjunta la foto de la boleta/factura y luego busca productos existentes, escanéalos con la pistola, o analízala con IA para cargarlos automáticamente. Para casos aislados sin documento, usa 'Entrada libre'." />
+        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Adjunta la foto de la boleta/factura y luego busca productos existentes, agrega uno nuevo, escanéalos con la pistola, o analiza el documento con IA para cargarlos automáticamente. Para casos aislados sin documento, usa 'Entrada libre'." />
       )}
 
       {role !== "admin" && (
@@ -7490,9 +7534,13 @@ function BreadDayCloseCard({ products, setProducts, movements, setMovements, bre
     setSaving(true);
     try {
       const latestProducts = await loadJSON("products-catalog", products);
-      let np = latestProducts.map(p => p.id === freshBread.id ? { ...p, stock: Math.max(0, p.stock - totalOut) } : p);
+      let np = latestProducts.map(p => {
+        if (p.id !== freshBread.id) return p;
+        const nextStock = Math.max(0, p.stock - totalOut);
+        return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+      });
       if (toColdNum > 0 && coldBread) {
-        np = np.map(p => p.id === coldBread.id ? { ...p, stock: p.stock + toColdNum, cost: freshBread.cost || p.cost } : p);
+        np = np.map(p => p.id === coldBread.id ? { ...p, stock: p.stock + toColdNum, cost: freshBread.cost || p.cost, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + toColdNum) } : p);
       }
       const latestMovements = await loadJSON("movements-log", movements);
       let nm = latestMovements;
@@ -8416,6 +8464,72 @@ function UnclassifiedRow({ product, categoryOptions, onAssign }) {
   );
 }
 
+/* Productos sin stock desde hace 6 meses o más: candidatos a sacarlos del
+   catálogo porque ya no se venden ni se reponen. No se borran directo —un
+   administrador pide la eliminación y otro (o el mismo, más adelante) la
+   aprueba— para que no se pierda un producto por un clic apurado. */
+function StaleStockPanel({ products, setProducts, session, toast }) {
+  const now = Date.now();
+  const mesMs = 1000 * 60 * 60 * 24 * 30.44;
+  const pending = products.filter(p => p.deletionRequest);
+  const candidates = products.filter(p =>
+    p.stock === 0 && p.stockZeroSince && !p.deletionRequest && (now - new Date(p.stockZeroSince).getTime()) >= mesMs * 6
+  );
+  if (pending.length === 0 && candidates.length === 0) return null;
+
+  function monthsSince(iso) { return Math.floor((now - new Date(iso).getTime()) / mesMs); }
+
+  async function requestDeletion(product) {
+    const latest = await loadJSON("products-catalog", products);
+    const np = latest.map(p => p.id === product.id ? { ...p, deletionRequest: { requestedBy: session.name, date: new Date().toISOString() } } : p);
+    setProducts(np); await saveJSON("products-catalog", np);
+    toast("Eliminación solicitada — queda pendiente de aprobación", "success");
+  }
+  async function approveDeletion(product) {
+    const latest = await loadJSON("products-catalog", products);
+    const np = latest.filter(p => p.id !== product.id);
+    setProducts(np); await saveJSON("products-catalog", np);
+    toast(`"${product.name}" eliminado del catálogo`, "success");
+  }
+  async function cancelRequest(product) {
+    const latest = await loadJSON("products-catalog", products);
+    const np = latest.map(p => p.id === product.id ? { ...p, deletionRequest: null } : p);
+    setProducts(np); await saveJSON("products-catalog", np);
+    toast("Solicitud de eliminación cancelada", "success");
+  }
+
+  return (
+    <div className="rounded-xl overflow-hidden mb-4" style={{ background: "#fff", border: `1.5px solid ${C.rust}` }}>
+      <div className="px-4 py-3 flex items-center gap-2" style={{ background: C.rustSoft }}>
+        <PackageX size={16} style={{ color: C.rust }} />
+        <span className="text-sm font-semibold" style={{ color: C.rust, fontFamily: "'Space Grotesk', sans-serif" }}>Sin stock hace 6 meses o más ({candidates.length + pending.length})</span>
+      </div>
+      <div className="divide-y" style={{ borderColor: C.paperLine }}>
+        {pending.map(p => (
+          <div key={p.id} className="px-4 py-3 flex flex-wrap items-center gap-2.5">
+            <div className="flex-1 min-w-[180px]">
+              <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+              <div className="text-xs" style={{ color: C.gray }}>Sin stock hace {monthsSince(p.stockZeroSince)} meses · Eliminación pedida por {p.deletionRequest.requestedBy}</div>
+            </div>
+            <Badge tone="brass">pendiente de aprobar</Badge>
+            <Btn size="sm" icon={Check} onClick={() => approveDeletion(p)}>Aprobar y eliminar</Btn>
+            <Btn size="sm" variant="ghost" onClick={() => cancelRequest(p)}>Cancelar</Btn>
+          </div>
+        ))}
+        {candidates.map(p => (
+          <div key={p.id} className="px-4 py-3 flex flex-wrap items-center gap-2.5">
+            <div className="flex-1 min-w-[180px]">
+              <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+              <div className="text-xs" style={{ color: C.gray }}>{p.category || "Sin categoría"} · Sin stock hace {monthsSince(p.stockZeroSince)} meses</div>
+            </div>
+            <Btn size="sm" variant="ghost" icon={Trash2} onClick={() => requestDeletion(p)}>Solicitar eliminación</Btn>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function InventoryView({ products, setProducts, movements, setMovements, purchaseItems, setPurchaseItems, suppliers, settings, role, session, toast }) {
   const [query, setQuery] = useState("");
   const [selectedSection, setSelectedSection] = useState(null); // null = grilla de secciones, "__unclassified__", o nombre de categoría
@@ -8425,6 +8539,23 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   const [deleting, setDeleting] = useState(null);
   const [shrinking, setShrinking] = useState(null);
   const [shrinkageSummaryOpen, setShrinkageSummaryOpen] = useState(false);
+
+  // Productos que ya estaban en 0 antes de que existiera este seguimiento no
+  // tienen fecha registrada. No hay cómo saber desde cuándo llevan así, así
+  // que se marcan desde hoy la primera vez que se detectan — el aviso de "6
+  // meses o más" empieza a contar desde ese momento, no desde antes.
+  useEffect(() => {
+    if (role !== "admin") return;
+    const sinFecha = products.filter(p => p.stock === 0 && !p.stockZeroSince);
+    if (sinFecha.length === 0) return;
+    (async () => {
+      const latest = await loadJSON("products-catalog", products);
+      const now = new Date().toISOString();
+      const np = latest.map(p => (p.stock === 0 && !p.stockZeroSince) ? { ...p, stockZeroSince: now } : p);
+      setProducts(np);
+      await saveJSON("products-catalog", np, { origen: "backfill_stock_cero" });
+    })();
+  }, [products, role]);
 
   function isUnclassified(p) { return !p.category || !p.category.trim() || p.category.trim() === "Sin Clasificar"; }
 
@@ -8460,8 +8591,10 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   // una copia local que otro dispositivo ya haya dejado atrás.
   async function saveProduct(p) {
     const latest = await loadJSON("products-catalog", products);
-    const exists = latest.some(x => x.id === p.id);
-    const np = exists ? latest.map(x => x.id === p.id ? p : x) : [...latest, p];
+    const prev = latest.find(x => x.id === p.id);
+    const exists = !!prev;
+    const withZero = { ...p, stockZeroSince: nextStockZeroSince(prev?.stock, prev?.stockZeroSince, p.stock) };
+    const np = exists ? latest.map(x => x.id === p.id ? withZero : x) : [...latest, withZero];
     await persist(np);
     setEditing(null);
     toast(exists ? "Producto actualizado" : "Producto creado", "success");
@@ -8484,7 +8617,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
 
   async function confirmRestock(qty, cost) {
     const latestProducts = await loadJSON("products-catalog", products);
-    const np = latestProducts.map(p => p.id === restocking.id ? { ...p, stock: p.stock + qty, cost: cost || p.cost, priceHistory: pushPriceHistory(p.priceHistory, cost || p.cost, p.price) } : p);
+    const np = latestProducts.map(p => p.id === restocking.id ? { ...p, stock: p.stock + qty, cost: cost || p.cost, priceHistory: pushPriceHistory(p.priceHistory, cost || p.cost, p.price), stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + qty) } : p);
     const latestMovements = await loadJSON("movements-log", movements);
     const nm = [{ id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept: `Reposición: ${restocking.name}`, amount: qty * cost, category: "Compra de mercadería", auto: true }, ...latestMovements];
     // También se deja registro en el historial de recepciones (con la hora
@@ -8503,7 +8636,11 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   async function confirmShrinkage({ qty, reason, note, authorizedBy }) {
     const product = shrinking;
     const latestProducts = await loadJSON("products-catalog", products);
-    const np = latestProducts.map(p => p.id === product.id ? { ...p, stock: Math.max(0, p.stock - qty) } : p);
+    const np = latestProducts.map(p => {
+      if (p.id !== product.id) return p;
+      const nextStock = Math.max(0, p.stock - qty);
+      return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+    });
     const latestMovements = await loadJSON("movements-log", movements);
     const nm = [{
       id: uid("mov"), date: new Date().toISOString(), type: "egreso",
@@ -8533,6 +8670,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
         price: Number(r.price) || existing?.price || 0,
         cost: Number(r.cost) || existing?.cost || 0,
         stock: r.stock !== "" && r.stock !== undefined ? Number(r.stock) : (existing?.stock || 0),
+        stockZeroSince: nextStockZeroSince(existing?.stock, existing?.stockZeroSince, r.stock !== "" && r.stock !== undefined ? Number(r.stock) : (existing?.stock || 0)),
         minStock: existing?.minStock ?? 5,
       };
       byBarcode.set(bc, item);
@@ -8571,6 +8709,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
           <AlertTriangle size={15} /> {lowStock} producto(s) con stock bajo o agotado
         </div>
       )}
+      {role === "admin" && <StaleStockPanel products={products} setProducts={setProducts} session={session} toast={toast} />}
 
       {searchResults ? (
         <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -8783,10 +8922,92 @@ function ShrinkageSummaryModal({ movements, onClose }) {
 /* ---------------------------------------------------------
    FACTURAS
 --------------------------------------------------------- */
+/* Resumen para fiscalización: solo ventas con boleta emitida de verdad —
+   débito y crédito la emiten siempre; efectivo y transferencia solo cuando
+   quedó marcado "Sí, con boleta" al cobrar. Sirve para responder rápido si el
+   SII pide el detalle de un período. */
+function FiscalSummaryModal({ sales, onClose }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+
+  const conBoleta = useMemo(
+    () => sales.filter(s => s.paymentMethod === "Débito" || s.paymentMethod === "Crédito" || s.boletaEmitida === true),
+    [sales]
+  );
+
+  const enRango = useMemo(() => {
+    return conBoleta
+      .filter(s => {
+        const d = s.date.slice(0, 10);
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+        return true;
+      })
+      .sort((a, b) => a.invoiceNumber - b.invoiceNumber);
+  }, [conBoleta, from, to]);
+
+  const totalMonto = enRango.reduce((a, s) => a + s.total, 0);
+  const porMetodo = useMemo(() => {
+    const m = {};
+    enRango.forEach(s => {
+      m[s.paymentMethod] = m[s.paymentMethod] || { count: 0, total: 0 };
+      m[s.paymentMethod].count++;
+      m[s.paymentMethod].total += s.total;
+    });
+    return m;
+  }, [enRango]);
+
+  return (
+    <Modal title="Resumen de ventas con boleta (fiscalización)" onClose={onClose}>
+      <div id="fiscal-summary-print">
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <Field label="Desde"><input type="date" value={from} onChange={e => setFrom(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+          <Field label="Hasta"><input type="date" value={to} onChange={e => setTo(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+        </div>
+        <p className="text-xs mb-3" style={{ color: C.gray }}>Deja las fechas vacías para ver todo el historial. Incluye solo boletas efectivamente emitidas: débito y crédito siempre cuentan; efectivo y transferencia solo si quedaron marcadas con boleta.</p>
+
+        <div className="rounded-lg p-3 mb-3" style={{ background: C.ink }}>
+          <div className="flex justify-between text-sm"><span style={{ color: C.grayLight }}>Boletas emitidas</span><span className="font-mono font-semibold" style={{ color: "#fff" }}>{enRango.length}</span></div>
+          <div className="flex justify-between text-sm"><span style={{ color: C.grayLight }}>Monto total</span><span className="font-mono font-semibold" style={{ color: C.brass }}>{formatCLP(totalMonto)}</span></div>
+          {Object.keys(porMetodo).length > 0 && (
+            <div className="pt-2 mt-2 space-y-1" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
+              {Object.entries(porMetodo).map(([m, v]) => (
+                <div key={m} className="flex justify-between text-xs"><span style={{ color: C.grayLight }}>{m} ({v.count})</span><span className="font-mono" style={{ color: "#fff" }}>{formatCLP(v.total)}</span></div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {enRango.length === 0 ? (
+          <EmptyState icon={FileText} title="Sin boletas en este rango" hint="Ajusta las fechas, o revisa que las ventas en efectivo/transferencia tengan boleta marcada." />
+        ) : (
+          <div className="rounded-lg overflow-hidden mb-2" style={{ border: `1.5px solid ${C.paperLine}` }}>
+            <div className="max-h-72 overflow-y-auto divide-y" style={{ borderColor: C.paperLine }}>
+              {enRango.map(s => (
+                <div key={s.id} className="flex justify-between px-3 py-2 text-xs">
+                  <span style={{ color: C.ink }}>Boleta #{s.invoiceNumber} · {formatDate(s.date)} · {s.paymentMethod}</span>
+                  <span className="font-mono" style={{ color: C.gray }}>{formatCLP(s.total)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-2 mt-2">
+        <Btn variant="ghost" full onClick={onClose}>Cerrar</Btn>
+        <Btn full icon={Printer} onClick={() => window.print()}>Imprimir</Btn>
+      </div>
+      <style>{`@media print { body * { visibility: hidden; } #fiscal-summary-print, #fiscal-summary-print * { visibility: visible; } #fiscal-summary-print { position: fixed; top: 0; left: 0; width: 100%; } }`}</style>
+    </Modal>
+  );
+}
+
 function InvoicesView({ sales, settings }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [viewing, setViewing] = useState(null);
+  const [fiscalOpen, setFiscalOpen] = useState(false);
   const pageSize = 20;
 
   const filtered = useMemo(() => {
@@ -8799,9 +9020,12 @@ function InvoicesView({ sales, settings }) {
 
   return (
     <div>
-      <div className="relative mb-3 max-w-sm">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
-        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por N° boleta, vendedor o cliente…" className={`${inputCls} pl-9`} style={inputStyle()} />
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="relative max-w-sm flex-1">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por N° boleta, vendedor o cliente…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <Btn variant="ghost" icon={FileText} onClick={() => setFiscalOpen(true)}>SII</Btn>
       </div>
       <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         {pageItems.length === 0 ? (
@@ -8815,6 +9039,7 @@ function InvoicesView({ sales, settings }) {
                   <div className="text-xs" style={{ color: C.gray }}>{formatDate(s.date)} · {s.seller}{s.customer ? ` · ${s.customer}` : ""}</div>
                 </div>
                 <div className="flex items-center gap-3">
+                  {s.boletaEmitida === false && <Badge tone="rust">sin boleta</Badge>}
                   <Badge tone="gray">{s.paymentMethod}</Badge>
                   <span className="font-mono font-semibold text-sm" style={{ color: C.green }}>{formatCLP(s.total)}</span>
                 </div>
@@ -8825,6 +9050,7 @@ function InvoicesView({ sales, settings }) {
       </div>
       <Pager page={page} setPage={setPage} total={filtered.length} pageSize={pageSize} />
       {viewing && <ReceiptModal sale={viewing} settings={settings} onClose={() => setViewing(null)} />}
+      {fiscalOpen && <FiscalSummaryModal sales={sales} onClose={() => setFiscalOpen(false)} />}
     </div>
   );
 }
@@ -9402,7 +9628,7 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
     const latestProducts = await loadJSON("products-catalog", products);
     const newProducts = latestProducts.map(p => {
       const item = items.find(i => i.productId === p.id);
-      return item ? { ...p, stock: item.counted } : p;
+      return item ? { ...p, stock: item.counted, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, item.counted) } : p;
     });
     const diffItems = items.filter(i => i.diff !== 0);
     const latestMovements = await loadJSON("movements-log", movements);
@@ -9543,7 +9769,7 @@ function TransformInputRow({ row, products, onChange, onRemove, canRemove }) {
     <div className="flex flex-wrap items-center gap-2 mb-2">
       <ProductSearchSelect products={withStock} value={row.productId} onSelect={id => onChange({ ...row, productId: id })} placeholder="Escribe el nombre del producto…" />
       <input type="number" step={product?.unitType === "peso" ? "0.001" : "1"} value={row.qty} onChange={e => onChange({ ...row, qty: e.target.value })} placeholder="Cantidad" className={`${inputCls} w-28 font-mono text-sm`} style={inputStyle()} />
-      {product && <span className="text-xs font-mono w-24 text-right" style={{ color: C.gray }}>{formatCLP(product.price)}{product.unitType === "peso" ? "/kg" : ""}</span>}
+      {product && <span className="text-xs font-mono w-24 text-right" style={{ color: C.gray }}>{formatCLP(product.cost)}{product.unitType === "peso" ? "/kg" : ""}</span>}
       {canRemove && <button onClick={onRemove} style={{ color: C.rust }}><Trash2 size={16} /></button>}
     </div>
   );
@@ -9574,15 +9800,16 @@ function TransformationsHistory({ log }) {
   );
 }
 
-function TransformView({ products, setProducts, movements, setMovements, settings, setSettings, session, toast }) {
+function TransformView({ products, setProducts, movements, setMovements, settings, setSettings, session, role, toast }) {
+  const isAdmin = (role || session.role) === "admin";
   const [inputs, setInputs] = useState([{ productId: "", qty: "" }]);
   const [outputMode, setOutputMode] = useState("existing");
   const [outputProductId, setOutputProductId] = useState("");
   const [newOutputName, setNewOutputName] = useState("");
   const [newOutputCategory, setNewOutputCategory] = useState("");
   const [qtyOutput, setQtyOutput] = useState("");
-  const [materialsCost, setMaterialsCost] = useState(settings.transformMaterialsCost ?? 100);
-  const [fixedCost, setFixedCost] = useState(settings.transformFixedCost ?? 0);
+  const [additionalCost, setAdditionalCost] = useState(settings.transformCostoAdicional ?? 280);
+  const [editingCost, setEditingCost] = useState(false);
   const [applyPrice, setApplyPrice] = useState(true);
   const [finalPrice, setFinalPrice] = useState("");
   const [priceEdited, setPriceEdited] = useState(false);
@@ -9601,12 +9828,11 @@ function TransformView({ products, setProducts, movements, setMovements, setting
   const validInputs = inputs.filter(r => r.productId && Number(r.qty) > 0);
   const totalInputCost = validInputs.reduce((sum, r) => {
     const p = products.find(x => x.id === r.productId);
-    return sum + (p ? p.price * Number(r.qty) : 0);
+    return sum + (p ? p.cost * Number(r.qty) : 0);
   }, 0);
   const qtyOutNum = Number(qtyOutput) || 0;
-  const totalMaterialsCost = (Number(materialsCost) || 0) * qtyOutNum;
-  const totalFixedCost = Number(fixedCost) || 0;
-  const totalCost = totalInputCost + totalMaterialsCost + totalFixedCost;
+  const totalAdditionalCost = Number(additionalCost) || 0;
+  const totalCost = totalInputCost + totalAdditionalCost;
   const costPerUnit = qtyOutNum > 0 ? totalCost / qtyOutNum : 0;
   const recommendedPrice = Math.round(costPerUnit / 10) * 10;
   // El precio se puede ajustar a mano — el calculado es solo el punto de
@@ -9631,7 +9857,11 @@ function TransformView({ products, setProducts, movements, setMovements, setting
       let np = [...latestProducts];
 
       validInputs.forEach(r => {
-        np = np.map(p => p.id === r.productId ? { ...p, stock: Math.max(0, p.stock - Number(r.qty)) } : p);
+        np = np.map(p => {
+          if (p.id !== r.productId) return p;
+          const nextStock = Math.max(0, p.stock - Number(r.qty));
+          return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+        });
       });
 
       const now = new Date().toISOString();
@@ -9641,7 +9871,7 @@ function TransformView({ products, setProducts, movements, setMovements, setting
       if (outputMode === "new") {
         const newProd = {
           id: uid("prod"), barcode: `INT-${Date.now()}`, name: upperField(newOutputName), category: upperField(newOutputCategory) || "PREPARADOS",
-          price: finalPriceNum, cost: costPerUnit, stock: qtyOutNum, minStock: 3, supplierId: null,
+          price: finalPriceNum, cost: costPerUnit, stock: qtyOutNum, stockZeroSince: qtyOutNum > 0 ? null : now, minStock: 3, supplierId: null,
           unitType: "unidad", quickAccess: true, priceApproval: null,
           priceHistory: [{ date: now, cost: costPerUnit, price: finalPriceNum }],
         };
@@ -9651,28 +9881,28 @@ function TransformView({ products, setProducts, movements, setMovements, setting
         np = np.map(p => {
           if (p.id !== outputProductId) return p;
           const newPrice = applyPrice ? finalPriceNum : p.price;
-          return { ...p, stock: p.stock + qtyOutNum, cost: costPerUnit, price: newPrice, priceHistory: pushPriceHistory(p.priceHistory, costPerUnit, newPrice) };
+          return { ...p, stock: p.stock + qtyOutNum, cost: costPerUnit, price: newPrice, priceHistory: pushPriceHistory(p.priceHistory, costPerUnit, newPrice), stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + qtyOutNum) };
         });
       }
 
       const latestMovements = await loadJSON("movements-log", movements);
-      const nm = (totalMaterialsCost + totalFixedCost) > 0 ? [{
+      const nm = totalAdditionalCost > 0 ? [{
         id: uid("mov"), date: now, type: "egreso",
-        concept: `Transformación a ${finalOutputName}: materiales y costo fijo`,
-        amount: totalMaterialsCost + totalFixedCost, category: "Transformación de productos", auto: true,
+        concept: `Transformación a ${finalOutputName}: costos adicionales`,
+        amount: totalAdditionalCost, category: "Transformación de productos", auto: true,
       }, ...latestMovements] : latestMovements;
 
       const latestLog = await loadJSON("transformations-log", log);
       const record = {
         id: uid("transf"), date: now,
-        inputs: validInputs.map(r => { const p = products.find(x => x.id === r.productId); return { productId: r.productId, name: p.name, qty: Number(r.qty), priceEach: p.price }; }),
+        inputs: validInputs.map(r => { const p = products.find(x => x.id === r.productId); return { productId: r.productId, name: p.name, qty: Number(r.qty), costEach: p.cost }; }),
         outputProductId: finalOutputId, outputName: finalOutputName, qtyOutput: qtyOutNum,
-        materialsCostPerUnit: Number(materialsCost) || 0, fixedCost: totalFixedCost,
+        additionalCost: totalAdditionalCost,
         totalCost, costPerUnit, recommendedPrice, appliedPrice: finalPriceNum, performedBy: session.name,
       };
       const nl = [record, ...latestLog];
 
-      const ns = { ...settings, transformMaterialsCost: Number(materialsCost) || 0, transformFixedCost: Number(fixedCost) || 0 };
+      const ns = { ...settings, transformCostoAdicional: Number(additionalCost) || 0 };
 
       setProducts(np); setMovements(nm); setLog(nl); setSettings(ns);
       // El producto de salida puede ser nuevo, y la transformación lo referencia:
@@ -9686,7 +9916,7 @@ function TransformView({ products, setProducts, movements, setMovements, setting
       ]);
 
       setInputs([{ productId: "", qty: "" }]);
-      setOutputProductId(""); setNewOutputName(""); setNewOutputCategory(""); setQtyOutput(""); setPriceEdited(false); setConfirmedLossTransform(false);
+      setOutputProductId(""); setNewOutputName(""); setNewOutputCategory(""); setQtyOutput(""); setPriceEdited(false); setConfirmedLossTransform(false); setEditingCost(false);
       toast("Transformación registrada", "success");
     } finally {
       setSaving(false);
@@ -9695,7 +9925,7 @@ function TransformView({ products, setProducts, movements, setMovements, setting
 
   return (
     <div className="max-w-2xl">
-      <p className="text-xs mb-4" style={{ color: C.gray }}>Para productos que cambian de forma dentro del local (ej. lechugas → ensaladas). El precio recomendado NO lleva el margen habitual del 19%+30% — ya viene incluido en el precio de venta de los insumos que uses.</p>
+      <p className="text-xs mb-4" style={{ color: C.gray }}>Para productos que cambian de forma dentro del local (ej. lechugas → ensaladas). El precio recomendado se calcula sobre el costo real de los insumos más los costos adicionales — no lleva margen agregado, revisa si conviene aplicar el margen habitual del 19%+30% antes de confirmar.</p>
 
       <div className="rounded-xl p-4 mb-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="text-sm font-semibold mb-2" style={{ color: C.ink }}>1. Productos que entran a transformación</div>
@@ -9723,18 +9953,30 @@ function TransformView({ products, setProducts, movements, setMovements, setting
         <Field label="Unidades resultantes"><input type="number" value={qtyOutput} onChange={e => setQtyOutput(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. 6" /></Field>
 
         <div className="text-sm font-semibold mt-2 mb-2" style={{ color: C.ink }}>3. Costos adicionales</div>
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Materiales por unidad (bolsas, guantes...)"><input type="number" value={materialsCost} onChange={e => setMaterialsCost(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} /></Field>
-          <Field label="Costo fijo de esta tanda (agua, luz, gas)"><input type="number" value={fixedCost} onChange={e => setFixedCost(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0 por ahora" /></Field>
-        </div>
+        {!editingCost || !isAdmin ? (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs" style={{ color: C.gray }}>Bolsas, guantes, agua, luz, gas y demás gastos de transformar — se aplica automático, sin preguntar cada vez.</p>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-sm font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(Number(additionalCost) || 0)}</span>
+              {isAdmin && <button type="button" onClick={() => setEditingCost(true)} className="text-xs font-medium underline" style={{ color: C.green }}>Editar</button>}
+            </div>
+          </div>
+        ) : (
+          <Field label="Costos adicionales de esta tanda">
+            <div className="flex items-center gap-2">
+              <input autoFocus type="number" value={additionalCost} onChange={e => setAdditionalCost(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} />
+              <button type="button" onClick={() => setEditingCost(false)} className="text-xs font-medium underline shrink-0" style={{ color: C.gray }}>Listo</button>
+            </div>
+            <p className="text-[11px] mt-1" style={{ color: C.gray }}>Este monto queda como el nuevo valor automático para la próxima vez.</p>
+          </Field>
+        )}
       </div>
 
       {qtyOutNum > 0 && validInputs.length > 0 && (
         <div className="rounded-xl p-4 mb-4" style={{ background: C.ink }}>
           <div className="space-y-1.5 text-sm">
             <div className="flex justify-between"><span style={{ color: C.grayLight }}>Costo de insumos ({validInputs.length})</span><span className="font-mono" style={{ color: C.paper }}>{formatCLP(totalInputCost)}</span></div>
-            <div className="flex justify-between"><span style={{ color: C.grayLight }}>Materiales ({qtyOutNum} × {formatCLP(Number(materialsCost) || 0)})</span><span className="font-mono" style={{ color: C.paper }}>{formatCLP(totalMaterialsCost)}</span></div>
-            <div className="flex justify-between"><span style={{ color: C.grayLight }}>Costo fijo</span><span className="font-mono" style={{ color: C.paper }}>{formatCLP(totalFixedCost)}</span></div>
+            <div className="flex justify-between"><span style={{ color: C.grayLight }}>Costos adicionales</span><span className="font-mono" style={{ color: C.paper }}>{formatCLP(totalAdditionalCost)}</span></div>
             <div className="flex justify-between pt-1.5" style={{ borderTop: `1px dashed ${C.inkSoft}` }}><span style={{ color: C.grayLight }}>Costo total</span><span className="font-mono font-semibold" style={{ color: C.paper }}>{formatCLP(totalCost)}</span></div>
             <div className="flex justify-between"><span style={{ color: C.grayLight }}>Costo por unidad resultante</span><span className="font-mono font-semibold" style={{ color: C.brass }}>{formatCLP(costPerUnit)}</span></div>
           </div>
@@ -10468,6 +10710,7 @@ const GRUPOS = {
       { id: "inventario", label: "Inventario", icon: Package },
       { id: "recepcion", label: "Recepción", icon: Truck },
       { id: "conteos", label: "Conteos", icon: ClipboardList },
+      { id: "transformar", label: "Transformar", icon: Blend },
     ]},
   ],
   admin: [
@@ -10999,7 +11242,7 @@ export default function SistemaVentas() {
         {tab === "analisis" && session.role === "admin" && <AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
         {tab === "ajustes" && session.role === "admin" && <SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} />}
         {tab === "usuarios" && session.role === "admin" && <UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} />}
-        {tab === "transformar" && session.role === "admin" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
+        {tab === "transformar" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={session.role} toast={toast} />}
         {tab === "conteos" && <InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={session.role} toast={toast} />}
         </main>
       </div>
