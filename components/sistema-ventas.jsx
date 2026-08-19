@@ -5293,7 +5293,7 @@ async function analyzeInvoiceImage(attachments) {
 
 const MARCELITA_BASE_PROMPT = `Eres "Marcelita", la asistente virtual del sistema de ventas e inventario de este negocio (un almacén/negocio de venta al por menor en Chile). Tu tono es cercano, cálido y directo, como una compañera de trabajo que conoce bien el sistema — sin ser empalagosa ni demasiado formal.
 
-Ayudas con tres cosas principales:
+Ayudas con varias cosas:
 1. Dudas sobre cómo usar el sistema. Estas son sus secciones:
    - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, consumo interno autorizado con PIN.
    - Caja: apertura y cierre de caja individual por persona, retiros y refuerzos de efectivo, cuadratura al cierre.
@@ -5305,11 +5305,13 @@ Ayudas con tres cosas principales:
    - Análisis (solo administradores): productos más vendidos, productos de bajo movimiento, alertas de stock, ranking de proveedores.
    - Ajustes (solo administradores): nombre del negocio, PIN de administrador, IVA.
 
-2. Búsqueda y comparación de precios de productos que NO están en el inventario local del negocio. Cuando esto pase, usa la herramienta de búsqueda web para encontrar el producto en tiendas online chilenas (ej. supermercados, retail, tiendas especializadas) y entrega una comparación clara y breve: nombre del producto, 2-4 tiendas con su precio aproximado, para que la persona pueda decidir rápido mientras atiende a un cliente. Sé breve — esto se usa en medio de una atención, no es momento para respuestas largas.
+2. Consultas de stock, precio o disponibilidad de productos QUE SÍ están en el inventario del negocio (ej. "cuánto stock tengo de tomate", "qué precio tiene la cerveza"). SÍ tienes acceso al inventario real: en el contexto de cada mensaje se te entregan los productos o la categoría que calzan con la consulta, con su stock y precio reales. Respóndele a la persona con esos datos exactos. Nunca digas que no tienes acceso al inventario o que no puedes consultarlo en tiempo real — si el contexto no trae ningún producto que calce, es que no se identificó bien el nombre: pide que lo aclare, no que asumas que no tienes esa capacidad.
 
-3. Listados de compra por categoría (ej. "hazme un listado de lo que no queda de útiles de aseo"). Cuando el usuario pida esto, el sistema ya te entrega el listado REAL calculado desde el inventario en el contexto de este mensaje — tu trabajo es solo presentarlo de forma clara y ordenada (como una lista de compra), SIN inventar, agregar ni quitar productos del listado que te pasaron. Si el contexto te dice que no se identificó la categoría, pide que la aclare. Si te dice que no falta nada de esa categoría, dilo con confianza, no inventes una lista igual.
+3. Búsqueda y comparación de precios de productos que NO están en el inventario local del negocio. Cuando esto pase, usa la herramienta de búsqueda web para encontrar el producto en tiendas online chilenas (ej. supermercados, retail, tiendas especializadas) y entrega una comparación clara y breve: nombre del producto, 2-4 tiendas con su precio aproximado, para que la persona pueda decidir rápido mientras atiende a un cliente. Sé breve — esto se usa en medio de una atención, no es momento para respuestas largas.
 
-4. Programar conteos de inventario (solo si tienes la herramienta "programar_conteo" disponible — se te da solo a administradores). Úsala cuando te pidan agendar, programar o asignar un conteo a alguien (ej. "agéndale a Carla un conteo de bebidas para el viernes"). El contexto de este mensaje te da la lista real de personas del equipo y de categorías — usa esos nombres EXACTOS, nunca inventes uno. Si falta la persona, la categoría o la fecha, o no estás segura de a cuál se refieren, pregunta primero en vez de adivinar; no llames la herramienta con datos dudosos. Si quien te escribe no es administrador y pide esto, explícale que solo un administrador puede programar conteos.
+4. Listados de compra por categoría (ej. "hazme un listado de lo que no queda de útiles de aseo"). Cuando el usuario pida esto, el sistema ya te entrega el listado REAL calculado desde el inventario en el contexto de este mensaje — tu trabajo es solo presentarlo de forma clara y ordenada (como una lista de compra), SIN inventar, agregar ni quitar productos del listado que te pasaron. Si el contexto te dice que no se identificó la categoría, pide que la aclare. Si te dice que no falta nada de esa categoría, dilo con confianza, no inventes una lista igual.
+
+5. Programar conteos de inventario (solo si tienes la herramienta "programar_conteo" disponible — se te da solo a administradores). Úsala cuando te pidan agendar, programar o asignar un conteo a alguien (ej. "agéndale a Carla un conteo de bebidas para el viernes"). El contexto de este mensaje te da la lista real de personas del equipo y de categorías — usa esos nombres EXACTOS, nunca inventes uno. Si falta la persona, la categoría o la fecha, o no estás segura de a cuál se refieren, pregunta primero en vez de adivinar; no llames la herramienta con datos dudosos. Si quien te escribe no es administrador y pide esto, explícale que solo un administrador puede programar conteos.
 
 Responde siempre en español de Chile, de forma breve y práctica (esto se usa en el mesón, con el cliente esperando). No inventes datos del sistema que no estén en esta descripción.`;
 
@@ -10486,6 +10488,44 @@ function ChatBubble({ msg, onConfirm, onCancel }) {
 
 const PURCHASE_LIST_KEYWORDS = ["listado", "lista", "compra", "comprar", "reponer", "reposicion", "reposición", "falta", "faltan", "queden", "quedan", "acaban", "acabando", "agotando", "agotan", "bajo stock", "stock bajo", "sin stock", "pedido"];
 
+// El emparejamiento anterior solo miraba si el NOMBRE del producto contenía
+// la palabra completa de la consulta ("tomate".includes("tomates") es falso),
+// así que cualquier plural/singular distinto ya rompía el calce y Marcelita
+// terminaba diciendo que no tenía acceso al inventario. Esto compara en
+// ambas direcciones y sin la "s"/"es" final, para que "tomates" calce con
+// "Tomate" y viceversa.
+function stemWord(w) {
+  if (w.length > 4 && w.endsWith("es")) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s")) return w.slice(0, -1);
+  return w;
+}
+
+// Busca productos reales del inventario que calcen con la consulta, primero
+// por nombre y, si no hay ningún producto parecido, por categoría (ej.
+// "cuánto stock tengo de bebidas" no nombra ningún producto puntual, pero sí
+// una categoría real) — así Marcelita puede responder preguntas de stock
+// tanto de un producto puntual como de una categoría completa.
+function findLocalMatches(text, products) {
+  const qWords = normalize(text).split(" ").filter(w => w.length > 2).map(stemWord);
+  if (qWords.length === 0) return { items: [], category: null };
+
+  const productMatches = products.filter(p => {
+    const nameWords = normalize(p.name).split(" ").map(stemWord);
+    return qWords.some(qw => nameWords.some(nw => nw.includes(qw) || qw.includes(nw)));
+  }).slice(0, 8);
+  if (productMatches.length > 0) return { items: productMatches, category: null };
+
+  const categories = [...new Set(products.map(p => p.category).filter(Boolean))];
+  const matchedCategory = categories.find(c => {
+    const catWords = normalize(c).split(" ").map(stemWord);
+    return qWords.some(qw => catWords.some(cw => cw.includes(qw) || qw.includes(cw)));
+  });
+  if (matchedCategory) {
+    return { items: products.filter(p => p.category === matchedCategory).slice(0, 8), category: matchedCategory };
+  }
+  return { items: [], category: null };
+}
+
 // Detecta si el mensaje pide un listado de compra por categoría (ej. "hazme
 // un listado de lo que no queda de útiles de aseo") y, si es así, calcula el
 // listado real desde el inventario — nunca lo inventa la IA. Se considera
@@ -10604,11 +10644,10 @@ function MarcelitaChat({ products, session, role, users, counts, setCounts, toas
       if (purchaseListContext) {
         localContext = purchaseListContext;
       } else {
-        const q = normalize(text);
-        const localMatches = products.filter(p => q.split(" ").some(word => word.length > 2 && normalize(p.name).includes(word))).slice(0, 5);
-        localContext = localMatches.length > 0
-          ? `Se encontraron estos productos parecidos en el inventario local: ${localMatches.map(p => `${p.name} (${formatCLP(p.price)}${p.unitType === "peso" ? "/kg" : ""}, stock ${p.stock})`).join("; ")}. Si el usuario pregunta por algo similar a esto, respóndele con estos datos reales en vez de buscar en internet.`
-          : `No se encontró ningún producto parecido en el inventario local. Si el usuario está preguntando por un producto para vender, usa la búsqueda web para comparar precios en tiendas online chilenas.`;
+        const localFound = findLocalMatches(text, products);
+        localContext = localFound.items.length > 0
+          ? `Se encontraron estos productos ${localFound.category ? `de la categoría "${localFound.category}"` : "parecidos"} en el inventario local: ${localFound.items.map(p => `${p.name} (${formatCLP(p.price)}${p.unitType === "peso" ? "/kg" : ""}, stock ${p.stock})`).join("; ")}. Si el usuario pregunta por su stock, precio o disponibilidad, respóndele con estos datos reales — nunca digas que no tienes acceso al inventario cuando aquí hay datos.`
+          : `No se encontró ningún producto ni categoría parecida en el inventario local. Si el usuario pregunta por un producto que el negocio podría vender pero no tiene cargado, usa la búsqueda web para comparar precios en tiendas online chilenas. Si en cambio pregunta por algo del inventario que no identificaste bien, pídele que aclare el nombre exacto del producto o categoría — no digas que no tienes acceso al inventario.`;
       }
       if (canScheduleCounts) {
         localContext += ` Usuarios reales del equipo para asignar conteos: ${users.map(u => u.name).join(", ") || "ninguno cargado"}. Categorías reales de inventario para conteos: ${categories.join(", ") || "ninguna cargada"}.`;
