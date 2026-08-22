@@ -17,6 +17,8 @@ import {
   olvidarInstantaneas,
   verificarPin,
   cambiarPin,
+  identificarPorPin,
+  registrarConteoInventarioGeneral,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -33,7 +35,7 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal
+  MoreHorizontal, CreditCard, UserPlus, History, Bell
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -41,46 +43,55 @@ import {
 
 /* ---------------------------------------------------------
    PALETA / TOKENS DE DISEÑO
-   Inspirado en el libro de caja y la ferretería de barrio:
-   tinta verde botella, papel manila, latón de caja registradora.
---------------------------------------------------------- */
+   La misma paleta del sitio público ("Plato de barrio"): papel tostado,
+   tinta casi negra, verde y latón de almacén de barrio, azul rey de la
+   insignia del logo. Antes la intranet tenía sus propios tonos (un slate
+   azulado, más "panel de control" que almacén); se reemplazan aquí mismo
+   —cada pantalla sigue leyendo C.xxx, así que el cambio de identidad no
+   exige tocar cada pantalla una por una. Los tonos se ajustaron apenas lo
+   necesario frente al sitio público para seguir cumpliendo AA (contraste
+   4.5:1 en texto normal): esta es una herramienta de trabajo de varias
+   horas al día, así que no vale la pena resignar legibilidad por igualar
+   un matiz al pixel. */
 const C = {
   // Texto y superficies oscuras
-  ink: "#0f172a",        // texto principal · 16.9:1 sobre blanco
-  inkSoft: "#1e293b",    // superficies oscuras (barra lateral, totales)
+  ink: "#12140f",        // texto principal · 18.5:1 sobre blanco (--ink del sitio)
+  inkSoft: "#2b2118",    // superficies oscuras (barra lateral, totales) · --brown del sitio
 
   // Superficies claras
-  paper: "#f5f6f8",      // fondo de la aplicación
-  paperDark: "#eef1f5",  // relleno suave: filas, chips, cajas de resumen
-  paperLine: "#e2e8f0",  // bordes y separadores
+  paper: "#faf9f4",      // fondo de la aplicación · --paper del sitio
+  paperDark: "#f0ece0",  // relleno suave: filas, chips, cajas de resumen · --paper-dark
+  paperLine: "rgba(18,20,15,.12)", // bordes y separadores · variante de --line
 
   // Verde: color de acción y de confirmación
-  green: "#15803d",      // 4.9:1 sobre blanco · 4.9:1 con texto blanco encima
-  greenDark: "#166534",  // 6.9:1 sobre blanco
-  greenSoft: "#f0fdf4",  // fondo de estados positivos
+  green: "#1a6b41",      // 6.5:1 sobre blanco · 6.5:1 con texto blanco encima (--green-dark del sitio: el --green claro del sitio no llega a 4.5:1)
+  greenDark: "#124b2e",  // 10.1:1 sobre blanco
+  greenSoft: "#e8f0ec",  // fondo de estados positivos
 
-  // Rojo: alertas, mermas, egresos
-  rust: "#dc2626",       // 4.5:1 en ambos sentidos
-  rustSoft: "#fef2f2",
+  // Rojo/terracota: alertas, mermas, egresos — el --red del sitio
+  rust: "#c93b5a",       // 4.9:1 en ambos sentidos
+  rustSoft: "#faebee",
 
-  // Ámbar: pendientes y avisos. El tono de fondo y el de texto son
-  // distintos a propósito: un mismo ámbar no puede cumplir contraste
-  // como fondo con texto oscuro y como texto sobre blanco a la vez.
-  brass: "#fbbf24",      // fondo · 9.4:1 con texto tinta encima
-  brassText: "#b45309",  // texto · 4.6:1 sobre blanco
-  brassSoft: "#fffbeb",
+  // Dorado: pendientes y avisos (el --gold del sitio). El tono de fondo y
+  // el de texto son distintos a propósito: un mismo dorado no puede
+  // cumplir contraste como fondo con texto oscuro y como texto sobre
+  // blanco a la vez.
+  brass: "#e2cb8a",      // fondo · 11.6:1 con texto tinta encima
+  brassText: "#8d701d",  // texto · 4.7:1 sobre blanco
+  brassSoft: "#fbf7ee",
 
-  // Grises de apoyo
-  gray: "#64748b",       // texto secundario · 4.8:1 sobre blanco
-  grayLight: "#94a3b8",  // texto terciario, solo sobre fondos oscuros
+  // Grises de apoyo — versión más cálida (--gray del sitio, oscurecido lo
+  // justo para volver a 4.5:1 como texto secundario)
+  gray: "#756e60",       // texto secundario · 5.1:1 sobre blanco
+  grayLight: "#8a8271",  // texto terciario, solo sobre fondos oscuros (--gray tal cual del sitio)
 
-  // Azul: información neutra
-  info: "#2563eb",
-  infoSoft: "#eff6ff",
+  // Azul rey: el de la insignia del logo y los CTA del sitio público
+  info: "#2541d6",
+  infoSoft: "#eef0fc",
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 /* Escala tipográfica. El mínimo es 14px: por debajo de eso el texto cansa en
    una jornada completa, y en el teléfono cualquier campo bajo 16px hace que
@@ -93,7 +104,7 @@ input, select, textarea { font-size: 16px !important; }
 /* Los números de dinero y cantidad van en cifras de ancho fijo, para que las
    columnas queden alineadas y no bailen al actualizarse. */
 .font-mono, table td, .tabular {
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -105,7 +116,7 @@ button { touch-action: manipulation; }
 /* Foco siempre visible: es la única pista que tiene quien navega con teclado
    —o con el lector de código— de dónde está parado. */
 *:focus-visible {
-  outline: 2px solid ${"#15803d"};
+  outline: 2px solid ${C.green};
   outline-offset: 2px;
   border-radius: 6px;
 }
@@ -123,8 +134,8 @@ button:not(:disabled):active { transform: scale(.98); }
 
 /* Barras de desplazamiento discretas */
 ::-webkit-scrollbar { height: 10px; width: 10px; }
-::-webkit-scrollbar-thumb { background: ${"#cbd5e1"}; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: ${"#94a3b8"}; background-clip: content-box; }
+::-webkit-scrollbar-thumb { background: ${"#ddd6c8"}; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: ${"#c7bfaf"}; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 `;
 
@@ -5295,8 +5306,8 @@ const MARCELITA_BASE_PROMPT = `Eres "Marcelita", la asistente virtual del sistem
 
 Ayudas con varias cosas:
 1. Dudas sobre cómo usar el sistema. Estas son sus secciones:
-   - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, consumo interno autorizado con PIN.
-   - Caja: apertura y cierre de caja individual por persona, retiros y refuerzos de efectivo, cuadratura al cierre.
+   - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, consumo interno autorizado con PIN. Antes de confirmar cada venta se pide elegir quién la realiza e ingresar su PIN de vendedor (ese PIN se configura por persona en Usuarios y es distinto del PIN de administrador de Ajustes) —la caja es una sola compartida por todos, así que esto es lo que deja saber a quién adjudicar cada venta.
+   - Caja: una sola caja compartida por todo el equipo (no una por persona) — cualquiera cobra en ella una vez abierta, retiros y refuerzos de efectivo, y al cerrar la cuadratura muestra un desglose de cuánto vendió cada vendedor.
    - Boletas: historial de ventas con número correlativo único.
    - Inventario: catálogo de productos, alertas de stock bajo, reposición de stock, registro de mermas (pérdidas/robos) con autorización de administrador, productos de "acceso rápido" sin código de barras.
    - Recepción: ingreso de mercadería nueva, con foto de factura/boleta obligatoria (o "entrada libre" como excepción autorizada), lectura automática por IA de facturas de proveedores, precios sugeridos que los administradores deben aprobar si los crea un vendedor.
@@ -5407,20 +5418,20 @@ function inputStyle(focus) {
 
 function Btn({ children, onClick, variant = "primary", full, disabled, type = "button", icon: Icon, size = "md" }) {
   const base = "inline-flex items-center justify-center gap-2 rounded-lg font-semibold transition disabled:opacity-40 disabled:cursor-not-allowed active:scale-[.98]";
-  const sizes = size === "sm" ? "px-3 py-2 text-sm" : "px-5 py-3 text-base";
+  const sizes = size === "sm" ? "px-3 py-2 text-sm" : size === "lg" ? "px-6 py-4 text-lg" : "px-5 py-3 text-base";
   const variants = {
     primary: { background: C.green, color: "#fff" },
     dark: { background: C.ink, color: C.paper },
     ghost: { background: "transparent", color: C.ink, border: `1.5px solid ${C.paperLine}` },
     // Para usar sobre fondo oscuro: el contorno normal lleva texto tinta y
     // ahí queda negro sobre negro, invisible.
-    ghostClaro: { background: "transparent", color: "#e2e8f0", border: "1.5px solid rgba(255,255,255,.25)" },
+    ghostClaro: { background: "transparent", color: "#e8e0d0", border: "1.5px solid rgba(255,255,255,.25)" },
     danger: { background: C.rustSoft, color: C.rust },
     rust: { background: C.rust, color: "#fff" },
   };
   return (
     <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${sizes} ${full ? "w-full" : ""}`} style={variants[variant]}>
-      {Icon && <Icon size={size === "sm" ? 16 : 19} />}
+      {Icon && <Icon size={size === "sm" ? 16 : size === "lg" ? 22 : 19} />}
       {children}
     </button>
   );
@@ -5613,6 +5624,87 @@ function LoginScreen({ users, businessName, businessLogo, onLogin, toast }) {
   );
 }
 
+/* La caja compartida vive todo el día en modo "Vender" — identificando cada
+   venta por PIN, sin usuario y contraseña. Cuando alguien necesita revisar
+   Administración de verdad, este modal cambia la sesión real de Supabase Auth
+   a la cuenta de un administrador (el mismo mecanismo que LoginScreen, no un
+   simple interruptor de pantalla): las políticas de la base exigen que quien
+   escribe en tablas como cliente, producto o perfil sea admin de verdad —
+   ninguna bandera solo-de-pantalla alcanzaría para que esas escrituras
+   pasaran. El costo de este cambio de sesión es mínimo: desde la migración
+   0010 cualquier miembro del equipo puede vender, y desde la 0013 cada venta
+   se adjudica por PIN — a quién pertenezca la sesión de fondo ya no afecta a
+   quién quedó registrado como vendedor de cada boleta. */
+function AdminGateModal({ onClose, onEnter, toast }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [entrando, setEntrando] = useState(false);
+
+  async function submit() {
+    if (!username.trim() || !password) return toast("Ingresa tu usuario y contraseña de administrador", "error");
+    if (entrando) return;
+    setEntrando(true);
+    try {
+      const sb = obtenerCliente();
+      const usuario = username.trim().toLowerCase();
+      const { data, error } = await sb.auth.signInWithPassword({
+        email: `${usuario}@elgalpon.local`,
+        password,
+      });
+      if (error || !data?.user) {
+        // La contraseña no calzó: signInWithPassword no llega a tocar la
+        // sesión que ya había, así que quien estaba vendiendo sigue
+        // identificado igual que antes de intentar entrar aquí.
+        return toast("Usuario o contraseña incorrectos", "error");
+      }
+      await cargarCatalogos({ forzar: true });
+      const { data: perfil } = await sb
+        .from("perfil").select("id,nombre,usuario,rol,activo").eq("id", data.user.id).maybeSingle();
+
+      if (!perfil?.activo || perfil.rol !== "admin") {
+        // Esta cuenta sí existe y la contraseña era correcta, pero no es de
+        // administrador (o está dada de baja) — y el inicio de sesión ya
+        // reemplazó la sesión de la caja por esta. No hay forma de volver a
+        // la de quien vendía sin su contraseña, así que se cierra del todo:
+        // la próxima persona entra de nuevo, normal, desde la pantalla de
+        // ingreso.
+        await sb.auth.signOut();
+        olvidarInstantaneas();
+        toast(
+          perfil?.activo
+            ? "Esa cuenta no es de administrador. La sesión se cerró — vuelve a entrar."
+            : "Esa cuenta no está activa. La sesión se cerró — vuelve a entrar.",
+          "error"
+        );
+        onEnter(null);
+        return;
+      }
+
+      fijarUsuarioActual(perfil.id);
+      onEnter({ role: perfil.rol, name: perfil.nombre, username: perfil.usuario, userId: perfil.id });
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo entrar al panel de administración"), "error");
+    } finally {
+      setEntrando(false);
+    }
+  }
+
+  return (
+    <Modal title="Panel de administración" onClose={onClose}>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Entra con tu usuario y contraseña de administrador. La caja sigue funcionando igual — al terminar, usa "Volver a vender" para salir del panel sin cerrar nada.
+      </p>
+      <Field label="Usuario de administrador">
+        <input autoFocus value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Ej. fran" />
+      </Field>
+      <Field label="Contraseña">
+        <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
+      </Field>
+      <Btn full onClick={submit} icon={Lock} disabled={entrando}>{entrando ? "Entrando…" : "Entrar al panel"}</Btn>
+    </Modal>
+  );
+}
+
 /* ---------------------------------------------------------
    POS — VENDER
 --------------------------------------------------------- */
@@ -5723,7 +5815,57 @@ function QuickCatalogPanel({ products, onAdd }) {
   );
 }
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, session, toast, role }) {
+/* La caja es una sola y la comparte todo el equipo, así que el login no basta
+   para saber quién hizo cada venta. Antes de cobrar se pide elegir el nombre
+   e ingresar el PIN DE VENDEDOR de esa persona (se configura en Usuarios,
+   por persona) — ojo, es distinto del PIN de administrador de Ajustes, que
+   es uno solo y sirve para otra cosa (autorizar mermas, precios, etc). Recién
+   con el PIN de vendedor confirmado se registra la venta a su nombre. */
+function IdentifySellerModal({ onClose, onConfirm }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  // A propósito no recibe la lista de usuarios ni pide elegir un nombre:
+  // toda la gracia de la caja compartida es escribir SOLO el PIN. Quién es
+  // lo decide el servidor (galpon.identificar_por_pin, migración 0013),
+  // comparando contra los hashes — nunca se compara en el navegador.
+  async function submit() {
+    if (checking) return;
+    const limpio = pin.trim();
+    if (limpio.length < 4) return setError("Ingresa tu PIN de vendedor");
+    setChecking(true);
+    setError("");
+    try {
+      const persona = await identificarPorPin(limpio);
+      if (!persona) {
+        setError("PIN incorrecto. Si es tu primer día, pide a un administrador que te asigne uno en Usuarios.");
+        setPin("");
+        return;
+      }
+      onConfirm(persona);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <Modal title="¿Quién realiza esta venta?" onClose={onClose}>
+      <Field label="Tu PIN de vendedor">
+        <input
+          autoFocus type="password" inputMode="numeric" maxLength={6}
+          value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, "")); setError(""); }}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono text-center text-lg tracking-widest`} style={inputStyle()} placeholder="••••"
+        />
+      </Field>
+      {error && <p className="text-xs mb-3" style={{ color: C.rust }}>{error}</p>}
+      <Btn full icon={Check} onClick={submit} disabled={checking}>{checking ? "Comprobando…" : "Confirmar e identificar"}</Btn>
+    </Modal>
+  );
+}
+
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -5738,6 +5880,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [consumptionTicket, setConsumptionTicket] = useState(null);
   const inputRef = useRef(null);
 
+  // La caja es común para todo el equipo, así que antes de cobrar cada venta
+  // se pide identificar quién la está haciendo, escribiendo solo su PIN de
+  // vendedor (migración 0013) — sin eso no se sabría a quién adjudicarle la
+  // venta para el desglose del cierre de caja. No hace falta recordar a la
+  // última persona: cada quien escribe su propio PIN en cada venta.
+  const [identifyOpen, setIdentifyOpen] = useState(false);
+
+  // Fiado: solo se pide un cliente cuando la forma de pago es "Fiado" — el
+  // resto de las ventas sigue exactamente igual que siempre.
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [quickCustomerOpen, setQuickCustomerOpen] = useState(false);
+
   useEffect(() => { inputRef.current?.focus(); }, []);
 
   const nameMatches = useMemo(() => {
@@ -5745,6 +5900,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     const q = normalize(nameQuery);
     return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q)).slice(0, 8);
   }, [nameQuery, products]);
+
+  const customerMatches = useMemo(() => {
+    if (customerQuery.trim().length < 1) return [];
+    const q = normalize(customerQuery);
+    return customers.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q)).slice(0, 6);
+  }, [customerQuery, customers]);
+
+  function customerBalance(customerId) {
+    return customerLedger.reduce((s, m) => {
+      if (m.customerId !== customerId) return s;
+      return s + (m.type === "cargo" ? m.amount : -m.amount);
+    }, 0);
+  }
 
   const [weightPromptProduct, setWeightPromptProduct] = useState(null);
 
@@ -5769,7 +5937,22 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         return prev.map(i => i.productId === product.id ? { ...i, qty: i.qty + 1 } : i);
       }
       if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
-      return [...prev, { productId: product.id, barcode: product.barcode, name: product.name, price: product.price, cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad" }];
+      // Si a este producto le queda stock de antes de su última baja de precio,
+      // TODA la línea se cobra al precio viejo (nunca se mezclan dos precios
+      // distintos del mismo producto en una boleta, para no confundir al
+      // cliente) — ver unitsStillAtOldPrice más abajo en el archivo. Si la
+      // cantidad que se termine llevando supera lo que en rigor correspondía
+      // al precio viejo, ese excedente queda registrado en checkout() como
+      // ganancia extra, no como error ni como pérdida.
+      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems);
+      return [...prev, {
+        productId: product.id, barcode: product.barcode, name: product.name,
+        price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
+        cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
+        isOldPriceLine: !!oldPriceInfo,
+        maxOldPriceQty: oldPriceInfo?.qty ?? 0,
+        newPrice: oldPriceInfo?.newPrice ?? product.price,
+      }];
     });
   }
 
@@ -5815,8 +5998,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const boletaAutomatica = payment === "Débito" || payment === "Crédito";
   const boletaEmitidaFinal = boletaAutomatica ? true : boletaEmitida;
 
-  async function checkout() {
+  async function checkout(seller) {
     if (cart.length === 0) return;
+    if (!seller?.id) return;
+    if (payment === "Fiado" && !selectedCustomer) return;
     // Se relee todo desde el almacenamiento justo antes de confirmar (en vez de
     // confiar en el estado local, que puede tener hasta unos segundos de rezago
     // por la sincronización entre dispositivos). Esto reduce al mínimo la ventana
@@ -5837,9 +6022,25 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       id: uid("sale"),
       invoiceNumber: finalInvoiceNumber,
       date: new Date().toISOString(),
-      seller: session.name,
-      customer: null,
-      items: cart.map(i => ({ productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty, price: i.price, cost: i.cost, unitType: i.unitType })),
+      seller: seller.name,
+      // El id real del perfil que se identificó con su PIN — lo que
+      // finalmente decide a quién se le adjudica la venta en la base
+      // (galpon.venta.vendedor_id), sin depender de buscar por nombre.
+      sellerId: seller.id,
+      customer: payment === "Fiado" ? selectedCustomer.name : null,
+      customerId: payment === "Fiado" ? selectedCustomer.id : null,
+      items: cart.map(i => {
+        const base = { productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty, price: i.price, cost: i.cost, unitType: i.unitType };
+        if (!i.isOldPriceLine) return base;
+        // Se cobró TODO al precio anterior para no mezclar dos precios en la
+        // misma boleta. Si la cantidad superó lo que en rigor quedaba a ese
+        // precio, el excedente no es un error ni una pérdida: es ganancia
+        // extra sobre lo esperado, y queda registrada así para quien revise
+        // Análisis después — ver buildOldPriceSalesLog más abajo.
+        const extraQty = Math.max(0, i.qty - (i.maxOldPriceQty || 0));
+        const extraProfit = extraQty * (i.price - i.newPrice);
+        return { ...base, oldPriceApplied: true, oldPrice: i.price, newPrice: i.newPrice, extraQty, extraProfit };
+      }),
       total,
       paymentMethod: payment,
       boletaEmitida: boletaEmitidaFinal,
@@ -5862,13 +6063,30 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     await saveJSON("sales-log", newSales);
 
     const numeroReal = sale.invoiceNumber;
-    const asiento = { id: uid("mov"), date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal, saleId: sale.id };
-    const movimientosFinales = [asiento, ...latestMovements];
-    setMovements(movimientosFinales);
-    await saveJSON("movements-log", movimientosFinales);
+    // Una venta fiada todavía no es plata en caja: no genera el ingreso de
+    // "Venta" de inmediato. Queda como deuda en el libro de fiado (más abajo)
+    // y el ingreso real se registra recién cuando el cliente la abone — ver
+    // registerPayment en ClientesView. El resto de las formas de pago sigue
+    // exactamente igual que siempre.
+    if (payment !== "Fiado") {
+      const asiento = { id: uid("mov"), date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal, saleId: sale.id };
+      const movimientosFinales = [asiento, ...latestMovements];
+      setMovements(movimientosFinales);
+      await saveJSON("movements-log", movimientosFinales);
+    } else {
+      const latestLedger = await loadJSON("customer-ledger", customerLedger);
+      const cargo = {
+        id: uid("cliemov"), customerId: selectedCustomer.id, type: "cargo",
+        amount: total, date: sale.date, saleId: sale.id, paymentMethod: null, note: "",
+      };
+      const newLedger = [cargo, ...latestLedger];
+      setCustomerLedger(newLedger);
+      await saveJSON("customer-ledger", newLedger);
+    }
 
     setReceipt(sale);
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(true);
+    setSelectedCustomer(null); setCustomerQuery("");
     toast(`Venta #${numeroReal} registrada`, "success");
     setTimeout(() => inputRef.current?.focus(), 50);
   }
@@ -5909,6 +6127,29 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     toast("Consumo interno registrado, stock actualizado", "success");
   }
 
+  // Sin caja abierta no se puede empezar a vender: una venta que ocurriera
+  // antes de la apertura quedaría fuera de shiftSalesList (CajaView filtra
+  // por fecha desde openedAt) y el efectivo esperado del cierre no
+  // cuadraría contra lo que de verdad hay en el cajón. Se bloquea toda la
+  // pestaña Vender —no solo el botón de cobrar— para que quede claro que
+  // el primer paso del turno es abrir la caja, no armar un carrito.
+  if (openShifts.length === 0) {
+    return (
+      <div className="max-w-md mx-auto">
+        <div className="rounded-xl p-5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="flex items-center gap-2.5 mb-4">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: C.rustSoft }}><Lock size={18} style={{ color: C.rust }} /></div>
+            <div>
+              <h3 className="font-semibold text-sm" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Primero hay que abrir la caja</h3>
+              <p className="text-xs" style={{ color: C.gray }}>Todavía no se abrió el turno — sin eso no se puede cuadrar el efectivo al cerrar. Ingresa la dotación inicial en Caja para empezar a vender.</p>
+            </div>
+          </div>
+          <Btn full icon={Unlock} onClick={() => setTab("caja")}>Ir a Caja</Btn>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Barra de captura. Es lo primero que toca el operador en cada venta —el
@@ -5919,7 +6160,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           <div className="relative">
             <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
             <input
-              ref={inputRef} value={barcode} onChange={e => setBarcode(e.target.value)}
+              ref={inputRef} value={barcode}
+              onChange={e => {
+                const val = e.target.value;
+                setBarcode(val);
+                // El lector de código de barras "escribe" el código completo y de
+                // inmediato en este campo. En vez de esperar a que además mande un
+                // Enter (que algunos lectores ni siquiera envían), apenas lo tipeado
+                // calza exacto con el código de un producto lo mandamos al carrito
+                // solo. Si no calza con nada, se sigue esperando el Enter —así no
+                // se dispara a mitad de tipeo cuando alguien escribe el código a mano.
+                const clean = val.trim();
+                if (clean && products.some(p => p.barcode === clean)) handleScan(val);
+              }}
               onKeyDown={e => { if (e.key === "Enter") handleScan(barcode); }}
               placeholder="Escanea o escribe el código de barras…"
               aria-label="Código de barras"
@@ -5973,6 +6226,14 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           <header className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
             <ShoppingCart size={17} style={{ color: C.green }} />
             <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Venta en curso</h2>
+            {/* Parpadeo simple para que se note, de un vistazo, que la caja está
+                sincronizándose en vivo con las demás (el ciclo de 15s de más
+                abajo en el archivo) — no es un estado de conexión verificado en
+                tiempo real, solo la señal visual de que esto no es estático. */}
+            <span className="flex items-center gap-1" title="Se sincroniza en vivo con las demás cajas">
+              <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: C.rust }} />
+              <span className="text-[10px] font-bold tracking-wide" style={{ color: C.rust }}>EN VIVO</span>
+            </span>
             {cart.length > 0 && (
               <>
                 <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ background: C.greenSoft, color: C.greenDark }}>{cart.length}</span>
@@ -5995,7 +6256,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold leading-snug" style={{ color: C.ink }}>{i.name}</div>
-                    <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(i.price)} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                    {i.isOldPriceLine ? (
+                      <div className="text-xs font-mono mt-0.5" style={{ color: "#8a6a1f" }}>
+                        {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
+                      </div>
+                    ) : (
+                      <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(i.price)} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                    )}
                   </div>
                   <button onClick={() => removeItem(i.productId)} aria-label={`Quitar ${i.name}`} className="flex items-center justify-center min-w-[44px] rounded-lg" style={{ color: C.rust }}><Trash2 size={18} /></button>
                 </div>
@@ -6041,11 +6308,62 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                     key={m} onClick={() => { setPayment(m); if (m !== "Efectivo") setCashReceived(""); }}
                     aria-pressed={payment === m}
                     className="px-2 rounded-lg text-sm font-semibold transition"
-                    style={payment === m ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e2e8f0" }}
+                    style={payment === m ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e8e0d0" }}
                   >{m}</button>
                 ))}
+                <button
+                  onClick={() => { setPayment("Fiado"); setCashReceived(""); }}
+                  aria-pressed={payment === "Fiado"}
+                  className="col-span-2 px-2 py-2 rounded-lg text-sm font-semibold transition flex items-center justify-center gap-1.5"
+                  style={payment === "Fiado" ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e8e0d0" }}
+                ><CreditCard size={15} />Fiado (queda debiendo)</button>
               </div>
             </div>
+
+            {payment === "Fiado" && (
+              <div className="rounded-lg p-3 space-y-2" style={{ background: C.inkSoft }}>
+                {selectedCustomer ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold truncate" style={{ color: "#fff" }}>{selectedCustomer.name}</div>
+                        <div className="text-xs font-mono" style={{ color: C.grayLight }}>
+                          Debe hoy: {formatCLP(customerBalance(selectedCustomer.id))}
+                        </div>
+                      </div>
+                      <button onClick={() => { setSelectedCustomer(null); setCustomerQuery(""); }} className="text-xs font-semibold flex-shrink-0" style={{ color: C.brass }}>Cambiar</button>
+                    </div>
+                    {selectedCustomer.creditLimit != null && (customerBalance(selectedCustomer.id) + total) > selectedCustomer.creditLimit && (
+                      <p className="text-[11px] mt-1.5" style={{ color: "#fca5a5" }}>
+                        Con esta venta quedaría debiendo {formatCLP(customerBalance(selectedCustomer.id) + total)}, sobre su límite de {formatCLP(selectedCustomer.creditLimit)}. Se puede igual completar la venta.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-xs block mb-1.5" style={{ color: C.grayLight }} htmlFor="pos-cliente">¿A quién se le fía?</label>
+                    <div className="relative">
+                      <input
+                        id="pos-cliente" value={customerQuery} onChange={e => setCustomerQuery(e.target.value)}
+                        placeholder="Busca por nombre o teléfono…"
+                        className={`${inputCls} pl-3`} style={inputStyle()}
+                      />
+                      {customerMatches.length > 0 && (
+                        <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                          {customerMatches.map(c => (
+                            <button key={c.id} onClick={() => { setSelectedCustomer(c); setCustomerQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                              <span className="truncate" style={{ color: C.ink }}>{c.name}{c.phone ? ` · ${c.phone}` : ""}</span>
+                              <span className="font-mono text-xs flex-shrink-0" style={{ color: C.gray }}>debe {formatCLP(customerBalance(c.id))}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={() => setQuickCustomerOpen(true)} className="mt-2 text-xs font-semibold flex items-center gap-1" style={{ color: C.brass }}><UserPlus size={13} />Nuevo cliente</button>
+                  </div>
+                )}
+              </div>
+            )}
 
             {boletaAutomatica ? (
               <p className="text-[11px]" style={{ color: C.grayLight }}>Con {payment.toLowerCase()} la boleta se emite automáticamente.</p>
@@ -6058,7 +6376,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       key={String(o.v)} onClick={() => setBoletaEmitida(o.v)}
                       aria-pressed={boletaEmitida === o.v}
                       className="px-2 py-2 rounded-lg text-sm font-semibold transition"
-                      style={boletaEmitida === o.v ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e2e8f0" }}
+                      style={boletaEmitida === o.v ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e8e0d0" }}
                     >{o.l}</button>
                   ))}
                 </div>
@@ -6083,7 +6401,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               </div>
             )}
 
-            <Btn full onClick={checkout} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0)} icon={Check}>Cobrar y emitir</Btn>
+            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0) || (payment === "Fiado" && !selectedCustomer)} icon={Check}>Cobrar y emitir</Btn>
 
             {role === "admin" && (
               <div className="pt-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
@@ -6097,12 +6415,18 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
       {weightPromptProduct && <WeightPromptModal product={weightPromptProduct} onClose={() => setWeightPromptProduct(null)} onConfirm={confirmWeight} />}
       {scannerOpen && <CameraScanner onDetect={handleScan} onClose={() => setScannerOpen(false)} />}
+      {identifyOpen && (
+        <IdentifySellerModal
+          onClose={() => setIdentifyOpen(false)}
+          onConfirm={(seller) => { setIdentifyOpen(false); checkout(seller); }}
+        />
+      )}
       {quickAdd && <ProductModal initial={quickAdd} onClose={() => setQuickAdd(null)} onSave={async (p) => {
         const latest = await loadJSON("products-catalog", products);
         const np = [...latest, { ...p, stockZeroSince: p.stock > 0 ? null : new Date().toISOString() }];
         setProducts(np); await saveJSON("products-catalog", np, { origen: "carga_inicial" });
         setQuickAdd(null); toast("Producto creado", "success");
-      }} products={products} suppliers={suppliers} role={role} session={session} />}
+      }} products={products} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} role={role} session={session} toast={toast} />}
       {receipt && <ReceiptModal sale={receipt} settings={settings} onClose={() => { setReceipt(null); setTimeout(() => inputRef.current?.focus(), 50); }} />}
       {consumptionOpen && (
         <ConsumptionAuthModal
@@ -6114,6 +6438,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         />
       )}
       {consumptionTicket && <ConsumptionTicketModal ticket={consumptionTicket} settings={settings} onClose={() => setConsumptionTicket(null)} />}
+      {quickCustomerOpen && (
+        <CustomerModal
+          quick
+          onClose={() => setQuickCustomerOpen(false)}
+          onSave={async (c) => {
+            const latest = await loadJSON("customers", customers);
+            const nc = [...latest, c];
+            setCustomers(nc); await saveJSON("customers", nc);
+            setSelectedCustomer(c); setQuickCustomerOpen(false);
+            toast("Cliente registrado", "success");
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -6191,6 +6528,10 @@ function ReceiptModal({ sale, settings, onClose }) {
           <div className="text-xs" style={{ color: C.gray }}>Vendedor: {sale.seller}{sale.customer ? ` · Cliente: ${sale.customer}` : ""}</div>
         </div>
         <div className="space-y-1.5">
+          {/* Al cliente siempre se le muestra un único precio por línea, aunque
+              detrás se haya decidido cobrar todo al precio anterior para no
+              mezclar dos precios en la misma boleta — esa aclaración (y la
+              ganancia extra que a veces deja) queda para Análisis, no acá. */}
           {sale.items.map((i, idx) => (
             <div key={idx} className="flex justify-between text-xs">
               <span>{i.unitType === "peso" ? `${i.qty} kg` : `${i.qty}×`} {i.name}</span>
@@ -6207,6 +6548,9 @@ function ReceiptModal({ sale, settings, onClose }) {
           )}
           <div className="flex justify-between text-base font-semibold pt-1"><span>Total</span><span>{formatCLP(sale.total)}</span></div>
           <div className="text-xs pt-1" style={{ color: C.gray }}>Pago: {sale.paymentMethod}</div>
+          {sale.paymentMethod === "Fiado" && (
+            <div className="text-xs" style={{ color: "#8a6a1f" }}>Fiado — pendiente de pago{sale.customer ? ` (${sale.customer})` : ""}</div>
+          )}
           {sale.boletaEmitida === false && <div className="text-xs" style={{ color: C.rust }}>Sin boleta emitida</div>}
         </div>
       </div>
@@ -6222,7 +6566,17 @@ function ReceiptModal({ sale, settings, onClose }) {
 /* ---------------------------------------------------------
    PRODUCTO — MODAL CREAR / EDITAR
 --------------------------------------------------------- */
-function ProductModal({ initial, onClose, onSave, products, suppliers = [], role, session }) {
+function ProductModal({ initial, onClose, onSave, products, suppliers = [], setSuppliers, categories = [], role, session, toast }) {
+  const sortedCategories = useMemo(
+    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    [categories]
+  );
+  // Igual que en DraftRow (Recepción): elegir de una lista evita secciones
+  // duplicadas por un error de tipeo, pero se puede escribir una nueva a
+  // propósito — la migración 0007 dejó abierto que cualquiera del equipo cree
+  // una sección al recibir mercadería nueva, y eso no cambia acá.
+  const [addingCategory, setAddingCategory] = useState(() => sortedCategories.length === 0);
+  const [quickAddSupplier, setQuickAddSupplier] = useState(false);
   const [form, setForm] = useState({
     id: initial?.id || uid("prod"),
     barcode: initial?.barcode || "",
@@ -6284,6 +6638,14 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], role
   const showMarginWarning = !needsApproval && newPriceNum > 0 && (sellsAtLoss || (priceDropping && marginPct !== null && marginPct < 15));
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); if (k === "price") setConfirmedLoss(false); }
+  async function saveQuickSupplier(s) {
+    const latest = await loadJSON("suppliers", suppliers);
+    const ns = [...latest, s];
+    setSuppliers(ns); await saveJSON("suppliers", ns);
+    setQuickAddSupplier(false);
+    set("supplierId", s.id);
+    if (toast) toast("Proveedor registrado", "success");
+  }
   function submit() {
     if (!form.name.trim()) return;
     if (quickMode && !form.category.trim()) return;
@@ -6325,11 +6687,41 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], role
       )}
       {!quickMode && <Field label="Código de barras"><input value={form.barcode} onChange={e => set("barcode", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Se genera uno si lo dejas vacío" /></Field>}
       <Field label="Nombre"><input autoFocus value={form.name} onChange={e => set("name", e.target.value)} className={inputCls} style={{ ...inputStyle(), textTransform: "uppercase" }} /></Field>
-      <Field label={quickMode ? "Categoría (obligatoria — define el botón)" : "Categoría"}><input value={form.category} onChange={e => set("category", e.target.value)} className={inputCls} style={{ ...inputStyle(), textTransform: "uppercase" }} placeholder="Ej. Verduras, Frutas, Útiles de aseo, Medicamentos, Cecinas y quesos…" /></Field>
+      <Field label={quickMode ? "Categoría (obligatoria — define el botón)" : "Categoría"}>
+        {addingCategory ? (
+          <div className="flex gap-1.5">
+            <input autoFocus={sortedCategories.length > 0} value={form.category} onChange={e => set("category", e.target.value)} className={inputCls} style={{ ...inputStyle(), textTransform: "uppercase" }} placeholder="Ej. Verduras, Frutas, Útiles de aseo, Medicamentos, Cecinas y quesos…" />
+            {sortedCategories.length > 0 && (
+              <button type="button" onClick={() => setAddingCategory(false)} className="px-3 rounded-lg text-xs font-medium whitespace-nowrap" style={{ background: C.paperDark, color: C.gray }}>Elegir de la lista</button>
+            )}
+          </div>
+        ) : (
+          <select
+            value={sortedCategories.some(c => c.name === form.category) ? form.category : (form.category ? "__keep__" : "")}
+            onChange={e => {
+              if (e.target.value === "__new__") { setAddingCategory(true); set("category", ""); }
+              else if (e.target.value !== "__keep__") set("category", e.target.value);
+            }}
+            className={inputCls} style={inputStyle()}
+          >
+            <option value="">Elige una sección…</option>
+            {form.category && !sortedCategories.some(c => c.name === form.category) && (
+              <option value="__keep__">{form.category} (ya no está en la lista)</option>
+            )}
+            {sortedCategories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+            <option value="__new__">+ Nueva categoría…</option>
+          </select>
+        )}
+      </Field>
       <Field label="Proveedor (opcional)">
-        <select value={form.supplierId} onChange={e => set("supplierId", e.target.value)} className={inputCls} style={inputStyle()}>
+        <select
+          value={form.supplierId}
+          onChange={e => { if (e.target.value === "__new__") setQuickAddSupplier(true); else set("supplierId", e.target.value); }}
+          className={inputCls} style={inputStyle()}
+        >
           <option value="">Sin proveedor asignado</option>
           {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {role === "admin" && setSuppliers && <option value="__new__">+ Nuevo proveedor…</option>}
         </select>
       </Field>
       <Field label="Se vende">
@@ -6415,6 +6807,7 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], role
         </label>
       )}
       <Btn full onClick={submit} icon={Check} disabled={(quickMode && !form.category.trim()) || (showMarginWarning && !confirmedLoss)}>Guardar</Btn>
+      {quickAddSupplier && <SupplierModal initial={null} onClose={() => setQuickAddSupplier(false)} onSave={saveQuickSupplier} />}
     </Modal>
   );
 }
@@ -6578,9 +6971,18 @@ function ApprovalsPanel({ products, setProducts, toast }) {
   );
 }
 
-function DraftRow({ item, onChange, onRemove, role, products }) {
+function DraftRow({ item, onChange, onRemove, role, products, categories = [] }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
   const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
+  const sortedCategories = useMemo(
+    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    [categories]
+  );
+  // Igual que en ProductModal: elegir de la lista evita categorías duplicadas
+  // por un error de tipeo, pero se puede escribir una nueva a propósito — la
+  // migración 0007 dejó abierto que cualquiera del equipo cree una sección al
+  // recibir mercadería nueva, y eso no cambia.
+  const [addingCategory, setAddingCategory] = useState(() => categories.length === 0);
   return (
     <div className="px-4 py-3 flex flex-wrap items-center gap-2.5" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
       <div className="flex-1 min-w-[180px]">
@@ -6588,7 +6990,30 @@ function DraftRow({ item, onChange, onRemove, role, products }) {
           <div className="flex flex-col gap-1.5">
             <input value={item.name} onChange={e => onChange({ ...item, name: e.target.value })} placeholder="Nombre del producto" className={`${inputCls} text-sm`} style={inputStyle()} />
             <div className="flex gap-1.5">
-              <input value={item.category} onChange={e => onChange({ ...item, category: e.target.value })} placeholder="Categoría" className={`${inputCls} text-xs`} style={inputStyle()} />
+              {addingCategory ? (
+                <div className="flex-1 flex gap-1">
+                  <input autoFocus={sortedCategories.length > 0} value={item.category} onChange={e => onChange({ ...item, category: e.target.value })} placeholder="Categoría nueva" className={`${inputCls} text-xs`} style={inputStyle()} />
+                  {sortedCategories.length > 0 && (
+                    <button type="button" onClick={() => setAddingCategory(false)} className="px-2 rounded-md text-[10px] font-medium whitespace-nowrap" style={{ background: C.paperDark, color: C.gray }}>Lista</button>
+                  )}
+                </div>
+              ) : (
+                <select
+                  value={sortedCategories.some(c => c.name === item.category) ? item.category : (item.category ? "__keep__" : "")}
+                  onChange={e => {
+                    if (e.target.value === "__new__") { setAddingCategory(true); onChange({ ...item, category: "" }); }
+                    else if (e.target.value !== "__keep__") onChange({ ...item, category: e.target.value });
+                  }}
+                  className={`${inputCls} text-xs flex-1`} style={inputStyle()}
+                >
+                  <option value="">Categoría…</option>
+                  {item.category && !sortedCategories.some(c => c.name === item.category) && (
+                    <option value="__keep__">{item.category}</option>
+                  )}
+                  {sortedCategories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                  <option value="__new__">+ Nueva categoría…</option>
+                </select>
+              )}
               <input value={item.barcode} onChange={e => onChange({ ...item, barcode: e.target.value })} placeholder="Código de barras (opcional)" className={`${inputCls} text-xs font-mono`} style={inputStyle()} />
             </div>
             <div className="flex gap-1">
@@ -6626,13 +7051,21 @@ function DraftRow({ item, onChange, onRemove, role, products }) {
   );
 }
 
-function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, role, session, toast }) {
+// Con qué se paga una recepción de mercadería. "Crédito con el proveedor"
+// es la única que no saca plata de caja en el acto: en vez de eso abre un
+// cargo en el libro de crédito de ese proveedor (migración 0014), igual que
+// "Fiado" en el POS pero en sentido contrario — acá quien queda debiendo es
+// el negocio, no el cliente.
+const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Crédito con el proveedor"];
+
+function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast }) {
   const [subTab, setSubTab] = useState("manual");
   const [draftItems, setDraftItems] = useState([]);
   const [supplier, setSupplier] = useState("");
   const [supplierId, setSupplierId] = useState(null);
   const [supplierQuery, setSupplierQuery] = useState("");
   const [quickAddSupplier, setQuickAddSupplier] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState("Efectivo");
   const [refNumber, setRefNumber] = useState("");
   const [nameQuery, setNameQuery] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -6778,13 +7211,20 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
     }
+    const isCredito = paymentMethod === "Crédito con el proveedor";
+    // Sin un proveedor registrado no hay a quién cargarle la deuda: el libro
+    // de crédito necesita un proveedor_id real, no solo un nombre escrito.
+    if (isCredito && !supplierId) {
+      return toast("Para recibir a crédito, el proveedor debe estar registrado — elígelo de la lista o regístralo primero", "error");
+    }
     // Se relee lo más reciente del almacenamiento justo antes de guardar, para
     // no partir de una copia local que otro dispositivo ya haya dejado atrás.
-    const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems] = await Promise.all([
+    const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems, latestSupplierLedger] = await Promise.all([
       loadJSON("products-catalog", products),
       loadJSON("movements-log", movements),
       loadJSON("invoices-index", invoicesIndex),
       loadJSON("purchase-items-log", purchaseItems),
+      loadJSON("supplier-ledger", supplierLedger),
     ]);
     const date = new Date().toISOString();
     let newProducts = [...latestProducts];
@@ -6831,7 +7271,11 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const invoiceId = uid("inv");
     const supplierName = supplier.trim() || "Sin proveedor";
 
-    const newMovements = [{
+    // A crédito: la mercadería entra igual, pero la plata no sale de caja
+    // todavía — no hay egreso que registrar en el acto. En su lugar se abre
+    // un cargo en el libro de crédito del proveedor (más abajo), el mismo
+    // criterio que una venta fiada no genera un ingreso hasta que se abona.
+    const newMovements = isCredito ? latestMovements : [{
       id: uid("mov"), date, type: "egreso",
       concept: freeEntry
         ? `Entrada libre (sin boleta/factura): ${freeEntryReason.trim()}${supplier.trim() ? ` — ${supplierName}` : ""}`
@@ -6849,8 +7293,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       registeredBy: session.name,
       noDocument: freeEntry,
       reason: freeEntry ? freeEntryReason.trim() : null,
+      paymentMethod,
     };
     const newInvoicesIndex = [invoiceRecord, ...latestInvoicesIndex];
+
+    const newSupplierLedger = isCredito ? [{
+      id: uid("provmov"), supplierId, type: "cargo",
+      amount: totalGross, date, invoiceId, paymentMethod: null, note: "",
+    }, ...latestSupplierLedger] : latestSupplierLedger;
 
     const newPurchaseItems = [
       ...draftItems.map(item => ({
@@ -6868,19 +7318,29 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
     setProducts(newProducts); setMovements(newMovements);
     setInvoicesIndex(newInvoicesIndex); setPurchaseItems(newPurchaseItems);
+    setSupplierLedger(newSupplierLedger);
     // El orden importa: las líneas de compra, las fotos y el asiento de caja
     // apuntan al documento, así que el documento va primero. Antes se guardaba
     // todo en paralelo porque no había relaciones que respetar.
     await saveJSON("invoices-index", newInvoicesIndex);
     await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
     await saveJSON("purchase-items-log", newPurchaseItems);
-    await saveJSON("movements-log", newMovements);
+    // A crédito no hay egreso nuevo que guardar (newMovements quedó igual a
+    // lo que ya había): se guarda el cargo en el libro de crédito en su
+    // lugar. Al contado/transferencia es al revés — no hay ledger que tocar.
+    if (isCredito) await saveJSON("supplier-ledger", newSupplierLedger);
+    else await saveJSON("movements-log", newMovements);
     if (!freeEntry) {
       await saveJSON(`invoice-image:${invoiceId}`, { pages: invoiceFiles.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })) });
     }
 
-    toast(freeEntry ? "Entrada libre registrada — queda marcada como excepción sin documento" : `Recepción registrada y factura catalogada${role !== "admin" ? " · precios a la espera de aprobación" : ""}`, "success");
-    setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber(""); setInvoiceFiles([]); setFreeEntry(false); setFreeEntryReason("");
+    toast(
+      freeEntry
+        ? "Entrada libre registrada — queda marcada como excepción sin documento"
+        : `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}`,
+      "success"
+    );
+    setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber(""); setInvoiceFiles([]); setFreeEntry(false); setFreeEntryReason(""); setPaymentMethod("Efectivo");
   }
 
 
@@ -6910,6 +7370,29 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             )}
           </div>
           <Field label="N° de factura o boleta (opcional)"><input value={refNumber} onChange={e => setRefNumber(e.target.value)} disabled={freeEntry} className={`${inputCls} font-mono`} style={{ ...inputStyle(), opacity: freeEntry ? 0.5 : 1 }} placeholder="Ej. 001234" /></Field>
+        </div>
+
+        <div className="mb-3">
+          <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Cómo se pagó esta recepción?</div>
+          <div className="flex gap-1.5">
+            {SUPPLIER_PAYMENT_METHODS.map(m => (
+              <button
+                key={m}
+                onClick={() => setPaymentMethod(m)}
+                className="flex-1 py-2 rounded-lg text-xs font-medium"
+                style={paymentMethod === m
+                  ? { background: m === "Crédito con el proveedor" ? C.brass : C.ink, color: m === "Crédito con el proveedor" ? C.brassText : C.paper }
+                  : { background: C.paperDark, color: C.gray }}
+              >
+                {m === "Crédito con el proveedor" ? "Crédito con proveedor" : m}
+              </button>
+            ))}
+          </div>
+          {paymentMethod === "Crédito con el proveedor" && (
+            <p className="text-[11px] mt-1.5" style={{ color: C.brassText }}>
+              La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"} hasta que se le pague — ver Proveedores.
+            </p>
+          )}
         </div>
 
         <label className="flex items-start gap-2.5 rounded-lg px-3 py-2.5 mb-3 cursor-pointer" style={{ background: freeEntry ? C.rustSoft : C.paperDark, border: `1.5px solid ${freeEntry ? C.rust : C.paperLine}` }}>
@@ -7016,7 +7499,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </div>
           <div>
             {draftItems.map(item => (
-              <DraftRow key={item.tempId} item={item} role={role} products={products} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} />
+              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} />
             ))}
           </div>
         </div>
@@ -7044,12 +7527,15 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
 /* ---------------------------------------------------------
    CAJA — APERTURA, RETIROS Y CIERRE
-   Una sola caja compartida por turno. Al abrir se registra la
-   dotación inicial; las ventas en efectivo del turno se suman solas
-   (se filtran por fecha desde la apertura); los retiros se descuentan;
-   al cerrar se compara el efectivo esperado contra el contado.
+   Una sola caja compartida por todo el equipo (no una por persona): quien
+   abre registra la dotación inicial y desde ahí cualquier vendedor puede
+   cobrar. Cada venta ya sabe quién la hizo —cada uno entra con su propia
+   cuenta—, así que las ventas del turno se suman todas (se filtran solo por
+   fecha desde la apertura, sin importar quién vendió) y al cerrar se arma un
+   desglose de cuánto vendió cada persona, además de comparar el efectivo
+   esperado contra el contado para la cuadratura común.
 --------------------------------------------------------- */
-const PAYMENT_METHODS = ["Efectivo", "Débito", "Crédito", "Transferencia"];
+const PAYMENT_METHODS = ["Efectivo", "Débito", "Crédito", "Transferencia", "Fiado"];
 
 function WithdrawalModal({ onClose, onConfirm }) {
   const [amount, setAmount] = useState("");
@@ -7108,6 +7594,17 @@ function ShiftDetailModal({ shift, onClose }) {
           ))}
         </div>
         <div className="flex justify-between font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total ventas ({shift.salesCount})</span><span className="font-mono">{formatCLP(shift.salesTotal)}</span></div>
+        {(shift.salesBySeller || []).length > 0 && (
+          <div className="pt-1 pb-1 space-y-0.5">
+            <div className="text-xs font-semibold" style={{ color: C.gray }}>Desglose por vendedor</div>
+            {shift.salesBySeller.map(v => (
+              <div key={v.seller} className="flex justify-between text-xs">
+                <span style={{ color: C.ink }}>{v.seller} · {v.count} venta{v.count === 1 ? "" : "s"}</span>
+                <span className="font-mono">{formatCLP(v.total)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex justify-between"><span style={{ color: C.gray }}>Dotación inicial</span><span className="font-mono">{formatCLP(shift.openingAmount)}</span></div>
         <div className="flex justify-between"><span style={{ color: C.gray }}>Refuerzos ({(shift.reinforcements || []).length})</span><span className="font-mono">+{formatCLP(shift.reinforcementsTotal || 0)}</span></div>
         {(shift.reinforcements || []).length > 0 && (
@@ -7136,49 +7633,6 @@ function ShiftDetailModal({ shift, onClose }) {
   );
 }
 
-function TeamShiftsPanel({ openShifts, sales, session }) {
-  const others = openShifts.filter(s => s.openedBy !== session.name);
-  if (others.length === 0) return null;
-
-  function quickSummary(shift) {
-    const start = new Date(shift.openedAt).getTime();
-    const shiftSales = sales.filter(s => s.seller === shift.openedBy && new Date(s.date).getTime() >= start);
-    const salesTotal = shiftSales.reduce((a, s) => a + s.total, 0);
-    const withdrawalsTotal = (shift.withdrawals || []).reduce((a, w) => a + w.amount, 0);
-    const reinforcementsTotal = (shift.reinforcements || []).reduce((a, r) => a + r.amount, 0);
-    const cashSales = shiftSales.filter(s => s.paymentMethod === "Efectivo").reduce((a, s) => a + s.total, 0);
-    const expectedCash = shift.openingAmount + cashSales + reinforcementsTotal - withdrawalsTotal;
-    return { salesTotal, salesCount: shiftSales.length, expectedCash };
-  }
-
-  return (
-    <div className="rounded-xl overflow-hidden mb-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-      <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: C.greenSoft }}>
-        <Store size={15} style={{ color: C.greenDark }} />
-        <span className="text-sm font-semibold" style={{ color: C.greenDark, fontFamily: "'Space Grotesk', sans-serif" }}>Cajas abiertas del equipo ({others.length})</span>
-      </div>
-      <div className="divide-y" style={{ borderColor: C.paperLine }}>
-        {others.map(s => {
-          const q = quickSummary(s);
-          return (
-            <div key={s.id} className="px-4 py-2.5 flex items-center justify-between gap-2">
-              <div>
-                <div className="text-sm font-medium" style={{ color: C.ink }}>{s.openedBy}</div>
-                <div className="text-xs" style={{ color: C.gray }}>Desde {formatDate(s.openedAt)} · dotación {formatCLP(s.openingAmount)} · {q.salesCount} venta(s)</div>
-              </div>
-              <div className="text-right">
-                <div className="text-xs" style={{ color: C.gray }}>Efectivo esperado</div>
-                <div className="font-mono font-semibold text-sm" style={{ color: C.greenDark }}>{formatCLP(q.expectedCash)}</div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <p className="text-[11px] px-4 py-2" style={{ color: C.grayLight, borderTop: `1px dashed ${C.paperLine}` }}>Solo lectura — cada persona abre, refuerza, retira y cierra únicamente su propia caja.</p>
-    </div>
-  );
-}
-
 function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
   const [openingAmount, setOpeningAmount] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
@@ -7187,7 +7641,25 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
   const [countedCash, setCountedCash] = useState("");
   const [viewingShift, setViewingShift] = useState(null);
 
-  const myShift = openShifts.find(s => s.openedBy === session.name) || null;
+  // Caja única para todo el equipo: no importa quién la abrió, cualquier
+  // vendedor cobra con ella hasta que alguien la cierra. Si por el cambio de
+  // modelo quedó más de una caja individual abierta de antes, se combinan acá
+  // en una sola vista (la más antigua manda la fecha de apertura) para no
+  // perder el rastro del efectivo — se cierran todas juntas al hacer el cierre.
+  const sharedShift = useMemo(() => {
+    if (openShifts.length === 0) return null;
+    const sorted = [...openShifts].sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt));
+    if (sorted.length === 1) return sorted[0];
+    const [primary, ...extra] = sorted;
+    return {
+      ...primary,
+      _allIds: sorted.map(s => s.id),
+      openedBy: [...new Set(sorted.map(s => s.openedBy))].join(", "),
+      openingAmount: sorted.reduce((a, s) => a + s.openingAmount, 0),
+      withdrawals: sorted.flatMap(s => s.withdrawals || []),
+      reinforcements: sorted.flatMap(s => s.reinforcements || []),
+    };
+  }, [openShifts]);
 
   async function persistOpenShifts(next) {
     setOpenShifts(next);
@@ -7195,7 +7667,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
   }
 
   async function openShift() {
-    if (myShift) return;
+    if (sharedShift) return;
     if (openingAmount === "" || Number(openingAmount) < 0) return toast("Ingresa el monto de dotación inicial", "error");
     const shift = {
       id: uid("shift"), openedBy: session.name, openedByRole: session.role,
@@ -7203,33 +7675,59 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
       withdrawals: [], reinforcements: [], status: "open",
     };
     const latest = await loadJSON("open-shifts", openShifts);
+    if (latest.length > 0) return toast("Ya hay una caja abierta", "error");
     await persistOpenShifts([...latest, shift]);
     setOpeningAmount("");
-    toast("Caja abierta a tu nombre", "success");
+    toast("Caja abierta", "success");
   }
 
   const shiftSalesList = useMemo(() => {
-    if (!myShift) return [];
-    const start = new Date(myShift.openedAt).getTime();
-    return sales.filter(s => s.seller === myShift.openedBy && new Date(s.date).getTime() >= start);
-  }, [sales, myShift]);
+    if (!sharedShift) return [];
+    const start = new Date(sharedShift.openedAt).getTime();
+    // Todas las ventas del turno cuentan, sin importar quién las hizo — es
+    // una sola caja compartida. Quién vendió cada una ya quedó guardado en
+    // la venta misma (cada vendedor entra con su propia cuenta al sistema).
+    return sales.filter(s => new Date(s.date).getTime() >= start);
+  }, [sales, sharedShift]);
 
   const summary = useMemo(() => {
-    const byMethod = { Efectivo: 0, "Débito": 0, "Crédito": 0, Transferencia: 0 };
+    // "Fiado" cuenta como venta del turno (para el total), pero no aporta
+    // efectivo: expectedCash de más abajo solo suma byMethod.Efectivo, así
+    // que una venta fiada nunca infla el efectivo esperado en caja. Ojo: el
+    // desglose por método que se guarda al cerrar la caja (turnosCerrados,
+    // operacion.js) solo tiene columna propia para los cuatro métodos de
+    // siempre — el total del cierre SÍ incluye lo fiado, pero si se vuelve a
+    // abrir un cierre ya guardado, esta línea puntual se ve en 0. No se
+    // agregó esa columna para no arriesgar romper el cierre de caja (una
+    // función crítica) si la migración 0012 aún no está aplicada.
+    const byMethod = { Efectivo: 0, "Débito": 0, "Crédito": 0, Transferencia: 0, Fiado: 0 };
     shiftSalesList.forEach(s => { byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + s.total; });
     const total = shiftSalesList.reduce((a, s) => a + s.total, 0);
     return { byMethod, total, count: shiftSalesList.length };
   }, [shiftSalesList]);
 
-  const withdrawalsTotal = (myShift?.withdrawals || []).reduce((s, w) => s + w.amount, 0);
-  const reinforcementsTotal = (myShift?.reinforcements || []).reduce((s, r) => s + r.amount, 0);
-  const expectedCash = myShift ? myShift.openingAmount + summary.byMethod.Efectivo + reinforcementsTotal - withdrawalsTotal : 0;
+  const salesBySeller = useMemo(() => {
+    const map = {};
+    shiftSalesList.forEach(s => {
+      const key = s.seller || "Sin nombre";
+      if (!map[key]) map[key] = { seller: key, count: 0, total: 0 };
+      map[key].count += 1;
+      map[key].total += s.total;
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [shiftSalesList]);
+
+  const withdrawalsTotal = (sharedShift?.withdrawals || []).reduce((s, w) => s + w.amount, 0);
+  const reinforcementsTotal = (sharedShift?.reinforcements || []).reduce((s, r) => s + r.amount, 0);
+  const expectedCash = sharedShift ? sharedShift.openingAmount + summary.byMethod.Efectivo + reinforcementsTotal - withdrawalsTotal : 0;
 
   async function registerWithdrawal(amount, reason) {
     const w = { id: uid("wd"), amount, reason, date: new Date().toISOString(), by: session.name };
     const latest = await loadJSON("open-shifts", openShifts);
-    const updated = { ...myShift, withdrawals: [...myShift.withdrawals, w] };
-    await persistOpenShifts(latest.map(s => s.id === myShift.id ? updated : s));
+    const primary = [...latest].sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt))[0];
+    if (!primary) return;
+    const updated = { ...primary, withdrawals: [...(primary.withdrawals || []), w] };
+    await persistOpenShifts(latest.map(s => s.id === primary.id ? updated : s));
     setWithdrawOpen(false);
     toast("Retiro registrado", "success");
   }
@@ -7237,30 +7735,35 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
   async function registerReinforcement(amount, reason) {
     const r = { id: uid("rf"), amount, reason, date: new Date().toISOString(), by: session.name };
     const latest = await loadJSON("open-shifts", openShifts);
-    const updated = { ...myShift, reinforcements: [...(myShift.reinforcements || []), r] };
-    await persistOpenShifts(latest.map(s => s.id === myShift.id ? updated : s));
+    const primary = [...latest].sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt))[0];
+    if (!primary) return;
+    const updated = { ...primary, reinforcements: [...(primary.reinforcements || []), r] };
+    await persistOpenShifts(latest.map(s => s.id === primary.id ? updated : s));
     setReinforceOpen(false);
     toast("Refuerzo agregado a la caja", "success");
   }
 
   async function confirmClose() {
     if (countedCash === "") return toast("Ingresa el efectivo contado en caja", "error");
+    if (!sharedShift) return;
     const closedAt = new Date().toISOString();
     const record = {
-      id: myShift.id,
-      openedBy: myShift.openedBy, openedAt: myShift.openedAt,
+      id: sharedShift.id,
+      openedBy: sharedShift.openedBy, openedAt: sharedShift.openedAt,
       closedBy: session.name, closedAt,
-      openingAmount: myShift.openingAmount,
+      openingAmount: sharedShift.openingAmount,
       salesByMethod: summary.byMethod, salesTotal: summary.total, salesCount: summary.count,
-      withdrawals: myShift.withdrawals, withdrawalsTotal,
-      reinforcements: myShift.reinforcements || [], reinforcementsTotal,
+      salesBySeller,
+      withdrawals: sharedShift.withdrawals, withdrawalsTotal,
+      reinforcements: sharedShift.reinforcements || [], reinforcementsTotal,
       expectedCash, countedCash: Number(countedCash),
       difference: Number(countedCash) - expectedCash,
     };
+    const closingIds = sharedShift._allIds || [sharedShift.id];
     const latestLog = await loadJSON("shifts-log", shiftsLog);
     const latestOpen = await loadJSON("open-shifts", openShifts);
     const newLog = [record, ...latestLog];
-    const newOpenShifts = latestOpen.filter(s => s.id !== myShift.id);
+    const newOpenShifts = latestOpen.filter(s => !closingIds.includes(s.id));
     setShiftsLog(newLog);
     await saveJSON("shifts-log", newLog);
     await persistOpenShifts(newOpenShifts);
@@ -7268,27 +7771,21 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
     toast("Caja cerrada correctamente", "success");
   }
 
-  const myHistory = useMemo(
-    () => role === "admin" ? shiftsLog : shiftsLog.filter(s => s.openedBy === session.name),
-    [shiftsLog, role, session.name]
-  );
-
-  if (!myShift) {
+  if (!sharedShift) {
     return (
       <div className="max-w-md mx-auto">
-        {role === "admin" && <TeamShiftsPanel openShifts={openShifts} sales={sales} session={session} />}
         <div className="rounded-xl p-5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           <div className="flex items-center gap-2.5 mb-4">
             <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: C.greenSoft }}><Unlock size={18} style={{ color: C.green }} /></div>
             <div>
               <h3 className="font-semibold text-sm" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Apertura de caja</h3>
-              <p className="text-xs" style={{ color: C.gray }}>Ingresa el efectivo con el que partes tu turno, {session.name}</p>
+              <p className="text-xs" style={{ color: C.gray }}>Es una sola caja para todo el equipo — ingresa el efectivo con el que parte el turno, {session.name}</p>
             </div>
           </div>
           <Field label="Monto de dotación inicial"><input autoFocus type="number" value={openingAmount} onChange={e => setOpeningAmount(e.target.value)} onKeyDown={e => e.key === "Enter" && openShift()} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" /></Field>
-          <Btn full icon={Unlock} onClick={openShift}>Abrir mi caja</Btn>
+          <Btn full icon={Unlock} onClick={openShift}>Abrir caja</Btn>
         </div>
-        <ShiftHistory shiftsLog={myHistory} onView={setViewingShift} />
+        <ShiftHistory shiftsLog={shiftsLog} onView={setViewingShift} />
         {viewingShift && <ShiftDetailModal shift={viewingShift} onClose={() => setViewingShift(null)} />}
       </div>
     );
@@ -7296,16 +7793,14 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
 
   return (
     <div className="max-w-2xl mx-auto space-y-4">
-      {role === "admin" && <TeamShiftsPanel openShifts={openShifts} sales={sales} session={session} />}
-
       <div className="rounded-xl p-4 flex items-center justify-between" style={{ background: C.ink }}>
         <div>
-          <div className="text-xs" style={{ color: C.grayLight }}>Tu caja, abierta desde</div>
-          <div className="text-sm font-semibold" style={{ color: C.paper }}>{myShift.openedBy} · {formatDate(myShift.openedAt)}</div>
+          <div className="text-xs" style={{ color: C.grayLight }}>Caja del equipo, abierta desde</div>
+          <div className="text-sm font-semibold" style={{ color: C.paper }}>{sharedShift.openedBy} · {formatDate(sharedShift.openedAt)}</div>
         </div>
         <div className="text-right">
           <div className="text-xs" style={{ color: C.grayLight }}>Dotación inicial</div>
-          <div className="font-mono font-semibold" style={{ color: C.brass }}>{formatCLP(myShift.openingAmount)}</div>
+          <div className="font-mono font-semibold" style={{ color: C.brass }}>{formatCLP(sharedShift.openingAmount)}</div>
         </div>
       </div>
 
@@ -7320,16 +7815,34 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Ventas del turno ({summary.count})</span><span className="font-mono font-semibold" style={{ color: C.greenDark }}>{formatCLP(summary.total)}</span></div>
-        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Refuerzos ({(myShift.reinforcements || []).length})</span><span className="font-mono font-semibold" style={{ color: C.brassText }}>+{formatCLP(reinforcementsTotal)}</span></div>
-        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Retiros ({myShift.withdrawals.length})</span><span className="font-mono font-semibold" style={{ color: C.rust }}>−{formatCLP(withdrawalsTotal)}</span></div>
+        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Refuerzos ({(sharedShift.reinforcements || []).length})</span><span className="font-mono font-semibold" style={{ color: C.brassText }}>+{formatCLP(reinforcementsTotal)}</span></div>
+        <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Retiros ({sharedShift.withdrawals.length})</span><span className="font-mono font-semibold" style={{ color: C.rust }}>−{formatCLP(withdrawalsTotal)}</span></div>
         <div className="flex justify-between text-base font-semibold pt-2 mt-2" style={{ borderTop: `1px dashed ${C.paperLine}`, color: C.ink }}><span>Efectivo esperado en caja</span><span className="font-mono">{formatCLP(expectedCash)}</span></div>
       </div>
 
-      {(myShift.reinforcements || []).length > 0 && (
+      {salesBySeller.length > 0 && (
+        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: C.paperDark }}>
+            <Users size={15} style={{ color: C.gray }} />
+            <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Desglose por vendedor</span>
+          </div>
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {salesBySeller.map(v => (
+              <div key={v.seller} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                <span className="text-sm truncate" style={{ color: C.ink }}>{v.seller}</span>
+                <span className="text-xs flex-shrink-0" style={{ color: C.gray }}>{v.count} venta{v.count === 1 ? "" : "s"}</span>
+                <span className="font-mono font-semibold text-sm flex-shrink-0" style={{ color: C.greenDark }}>{formatCLP(v.total)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(sharedShift.reinforcements || []).length > 0 && (
         <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           <div className="px-4 py-2 text-xs font-semibold" style={{ background: C.paperDark, color: C.gray }}>Refuerzos del turno</div>
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
-            {myShift.reinforcements.map(r => (
+            {sharedShift.reinforcements.map(r => (
               <div key={r.id} className="px-4 py-2 flex justify-between text-sm">
                 <span style={{ color: C.ink }}>{r.reason || "Refuerzo de caja"} <span className="text-xs" style={{ color: C.gray }}>· {formatDate(r.date)} · {r.by}</span></span>
                 <span className="font-mono" style={{ color: C.brassText }}>+{formatCLP(r.amount)}</span>
@@ -7339,11 +7852,11 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
         </div>
       )}
 
-      {myShift.withdrawals.length > 0 && (
+      {sharedShift.withdrawals.length > 0 && (
         <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           <div className="px-4 py-2 text-xs font-semibold" style={{ background: C.paperDark, color: C.gray }}>Retiros del turno</div>
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
-            {myShift.withdrawals.map(w => (
+            {sharedShift.withdrawals.map(w => (
               <div key={w.id} className="px-4 py-2 flex justify-between text-sm">
                 <span style={{ color: C.ink }}>{w.reason || "Retiro de efectivo"} <span className="text-xs" style={{ color: C.gray }}>· {formatDate(w.date)} · {w.by}</span></span>
                 <span className="font-mono" style={{ color: C.rust }}>−{formatCLP(w.amount)}</span>
@@ -7357,9 +7870,9 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
         <Btn variant="ghost" full icon={ArrowUpCircle} onClick={() => setReinforceOpen(true)}>Agregar refuerzo</Btn>
         <Btn variant="ghost" full icon={ArrowDownCircle} onClick={() => setWithdrawOpen(true)}>Registrar retiro</Btn>
       </div>
-      <Btn variant="rust" full icon={Lock} onClick={() => { setClosing(true); setCountedCash(""); }}>Cerrar mi caja</Btn>
+      <Btn variant="rust" full icon={Lock} onClick={() => { setClosing(true); setCountedCash(""); }}>Cerrar caja</Btn>
 
-      <ShiftHistory shiftsLog={myHistory} onView={setViewingShift} />
+      <ShiftHistory shiftsLog={shiftsLog} onView={setViewingShift} />
       {viewingShift && <ShiftDetailModal shift={viewingShift} onClose={() => setViewingShift(null)} />}
       {withdrawOpen && <WithdrawalModal onClose={() => setWithdrawOpen(false)} onConfirm={registerWithdrawal} />}
       {reinforceOpen && <ReinforcementModal onClose={() => setReinforceOpen(false)} onConfirm={registerReinforcement} />}
@@ -7367,12 +7880,23 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
       {closing && (
         <Modal title="Cierre de caja" onClose={() => setClosing(false)}>
           <div className="rounded-lg p-3 mb-3 space-y-1 text-sm" style={{ background: C.paperDark }}>
-            <div className="flex justify-between"><span style={{ color: C.gray }}>Dotación inicial</span><span className="font-mono">{formatCLP(myShift.openingAmount)}</span></div>
+            <div className="flex justify-between"><span style={{ color: C.gray }}>Dotación inicial</span><span className="font-mono">{formatCLP(sharedShift.openingAmount)}</span></div>
             <div className="flex justify-between"><span style={{ color: C.gray }}>+ Ventas en efectivo</span><span className="font-mono">{formatCLP(summary.byMethod.Efectivo)}</span></div>
             <div className="flex justify-between"><span style={{ color: C.gray }}>+ Refuerzos</span><span className="font-mono">{formatCLP(reinforcementsTotal)}</span></div>
             <div className="flex justify-between"><span style={{ color: C.gray }}>− Retiros</span><span className="font-mono">{formatCLP(withdrawalsTotal)}</span></div>
             <div className="flex justify-between font-semibold pt-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>= Efectivo esperado</span><span className="font-mono">{formatCLP(expectedCash)}</span></div>
           </div>
+          {salesBySeller.length > 0 && (
+            <div className="rounded-lg p-3 mb-3 space-y-1 text-sm" style={{ background: C.paperDark }}>
+              <div className="text-xs font-semibold mb-1" style={{ color: C.gray }}>Desglose por vendedor</div>
+              {salesBySeller.map(v => (
+                <div key={v.seller} className="flex justify-between text-xs">
+                  <span style={{ color: C.ink }}>{v.seller} · {v.count} venta{v.count === 1 ? "" : "s"}</span>
+                  <span className="font-mono">{formatCLP(v.total)}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <Field label="Efectivo contado físicamente en caja"><input autoFocus type="number" value={countedCash} onChange={e => setCountedCash(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" /></Field>
           {countedCash !== "" && (
             <div className="rounded-lg p-3 mb-3 flex justify-between text-sm font-semibold" style={{ background: Number(countedCash) - expectedCash === 0 ? C.greenSoft : C.rustSoft, color: Number(countedCash) - expectedCash === 0 ? C.greenDark : C.rust }}>
@@ -7772,6 +8296,394 @@ function RankBadge({ n }) {
   );
 }
 
+/* ---------------------------------------------------------
+   PREDICTOR DE INVERSIÓN
+   Antes de destinar plata a comprar más stock de algo, o a ampliar una
+   categoría, esta sección cruza lo que YA se vende (ingresos, margen,
+   quiebres de stock, rotación) para mostrar qué categorías vienen dando
+   señales sólidas y cuáles no. Importante: el sistema solo conoce lo que
+   el almacén ya vende — no predice demanda de un rubro que nunca se ha
+   ofrecido. Sirve para decidir dónde profundizar (más stock, más
+   variedad) dentro de lo que ya funciona, no como bola de cristal para
+   algo completamente nuevo.
+--------------------------------------------------------- */
+
+function buildCategoryInvestmentStats(products, sales, lastSaleMap, windowDays) {
+  const now = Date.now();
+  const msDay = 24 * 60 * 60 * 1000;
+  const recentStart = now - windowDays * msDay;
+  const priorStart = recentStart - windowDays * msDay;
+
+  const productById = new Map(products.map(p => [p.id, p]));
+  const byCat = new Map();
+  function bucket(cat) {
+    if (!byCat.has(cat)) byCat.set(cat, {
+      cat, recentRevenue: 0, recentCost: 0, recentQty: 0, priorRevenue: 0,
+      recentDays: new Set(), recentProducts: new Set(),
+    });
+    return byCat.get(cat);
+  }
+
+  sales.forEach(s => {
+    const t = new Date(s.date).getTime();
+    if (t < priorStart) return;
+    const isRecent = t >= recentStart;
+    (s.items || []).forEach(it => {
+      const prod = it.productId ? productById.get(it.productId) : null;
+      if (!prod) return; // producto ya no está en el catálogo vigente: no se puede atribuir a una categoría actual
+      const cat = prod.category?.trim() || "Sin categoría";
+      const b = bucket(cat);
+      const revenue = (it.price || 0) * (it.qty || 0);
+      if (isRecent) {
+        b.recentRevenue += revenue;
+        b.recentCost += (it.cost || 0) * (it.qty || 0);
+        b.recentQty += it.qty || 0;
+        b.recentDays.add(s.date.slice(0, 10));
+        b.recentProducts.add(prod.id);
+      } else {
+        b.priorRevenue += revenue;
+      }
+    });
+  });
+
+  const catalogByCat = new Map();
+  products.forEach(p => {
+    const cat = p.category?.trim() || "Sin categoría";
+    if (!catalogByCat.has(cat)) catalogByCat.set(cat, []);
+    catalogByCat.get(cat).push(p);
+  });
+
+  let totalRevenue = 0, totalCost = 0;
+  byCat.forEach(b => { totalRevenue += b.recentRevenue; totalCost += b.recentCost; });
+  const overallMargin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : null;
+
+  const rows = [...byCat.values()]
+    .filter(b => b.recentDays.size > 0)
+    .map(b => {
+      const catalog = catalogByCat.get(b.cat) || [];
+      const activeStock = catalog.filter(p => p.stock > 0);
+      const outOfStock = catalog.filter(p => p.stock <= 0).length;
+      const belowMin = catalog.filter(p => p.stock > 0 && p.stock <= p.minStock).length;
+      const stalledCount = activeStock.filter(p => {
+        const last = lastSaleMap.get(p.id);
+        const days = last ? Math.floor((now - last) / msDay) : null;
+        return days === null || days >= 45; // mismo umbral que "quizás no conviene volver a comprar"
+      }).length;
+      const stalledShare = activeStock.length > 0 ? stalledCount / activeStock.length : null;
+      const margin = b.recentRevenue > 0 ? ((b.recentRevenue - b.recentCost) / b.recentRevenue) * 100 : null;
+      const growthPct = b.priorRevenue > 0 ? ((b.recentRevenue - b.priorRevenue) / b.priorRevenue) * 100 : null;
+      const consistency = b.recentDays.size / windowDays;
+      const breadth = catalog.length > 0 ? b.recentProducts.size / catalog.length : null;
+
+      const lowConfidence = b.recentDays.size < 5;
+      const marginOk = margin !== null && overallMargin !== null && margin >= overallMargin;
+      const growthOk = growthPct === null || growthPct >= 0;
+      const consistencyOk = consistency >= 0.5;
+      const cautious = stalledShare !== null && stalledShare >= 0.5;
+      const positives = [marginOk, growthOk, consistencyOk].filter(Boolean).length;
+
+      let verdict;
+      if (lowConfidence) verdict = { tone: "gray", label: "Datos insuficientes aún" };
+      else if (cautious) verdict = { tone: "brass", label: "Con matices" };
+      else if (positives >= 3) verdict = { tone: "green", label: "Candidato sólido" };
+      else if (positives >= 2) verdict = { tone: "brass", label: "Señal mixta" };
+      else verdict = { tone: "rust", label: "No parece el momento" };
+
+      return {
+        cat: b.cat, totalProducts: catalog.length, recentRevenue: b.recentRevenue, recentQty: b.recentQty,
+        daysWithSales: b.recentDays.size, productsSold: b.recentProducts.size, breadth,
+        margin, growthPct, consistency, outOfStock, belowMin, stalledShare, lowConfidence, verdict,
+      };
+    })
+    .sort((a, b) => b.recentRevenue - a.recentRevenue);
+
+  return { rows, overallMargin };
+}
+
+/* ---------------------------------------------------------
+   MEMORIA DE PRECIOS — stock antiguo con precio ya bajado
+   Cuando el precio de venta de un producto baja (por ejemplo porque llegó
+   una compra más barata) y todavía queda stock de la compra anterior, ese
+   stock se termina vendiendo al precio nuevo aunque se compró pensando en
+   venderse al precio viejo: la pérdida (o el margen que se deja de ganar)
+   queda escondida, porque el sistema no distingue "esta unidad es de la
+   compra vieja" de "esta es de la compra nueva" — solo hay un precio de
+   venta vigente por producto.
+
+   Esto no inventa un seguimiento de lotes que el sistema no tiene: usa lo
+   que ya es real y se guarda — el historial de costo/precio de cada
+   producto (memoria completa, sin el tope de un año que se pidió: la
+   tabla producto_precio_historial no tiene límite de tiempo) y las
+   recepciones de stock (compras con factura + reposiciones rápidas) —
+   para estimar cuánto de lo que hay ahora en bodega es anterior a la
+   última baja de precio del producto, y qué tan grande es la diferencia.
+--------------------------------------------------------- */
+
+function findLastPriceDrop(priceHistory) {
+  if (!Array.isArray(priceHistory) || priceHistory.length < 2) return null;
+  for (let i = priceHistory.length - 1; i > 0; i--) {
+    const prev = priceHistory[i - 1], cur = priceHistory[i];
+    if (Number(cur.price) < Number(prev.price)) {
+      return { date: cur.date, oldPrice: Number(prev.price), newPrice: Number(cur.price), oldCost: Number(prev.cost) || 0 };
+    }
+  }
+  return null;
+}
+
+/* Misma cuenta que usa el panel de Análisis de abajo, pero acá no es solo un
+   aviso: es la que decide cuánto cobrar en la caja. Si a un producto por
+   unidad todavía le quedan unidades de antes de su última baja de precio,
+   se cobran esas primero al precio viejo y recién las que sobren al precio
+   nuevo — así la próxima compra no se aprovecha de una rebaja que en
+   realidad era para el lote que llegó después. No se aplica a productos por
+   peso: ahí no tiene sentido repartir un mismo pesaje entre dos precios. */
+function unitsStillAtOldPrice(product, purchaseItems) {
+  if (product.unitType === "peso") return null;
+  if (!(product.stock > 0)) return null;
+  const drop = findLastPriceDrop(product.priceHistory);
+  if (!drop) return null;
+  const dropTime = new Date(drop.date).getTime();
+  const receivedSince = purchaseItems
+    .filter(pi => pi.productId === product.id && new Date(pi.date).getTime() > dropTime)
+    .reduce((a, pi) => a + (Number(pi.qty) || 0), 0);
+  const qty = Math.max(0, Math.min(product.stock, product.stock - receivedSince));
+  if (qty <= 0) return null;
+  return { qty, oldPrice: drop.oldPrice, newPrice: drop.newPrice };
+}
+
+function buildPriceDropRisks(products, purchaseItems) {
+  const now = Date.now();
+  const msDay = 24 * 60 * 60 * 1000;
+  const receivedByProduct = new Map();
+  purchaseItems.forEach(pi => {
+    if (!pi.productId) return;
+    const list = receivedByProduct.get(pi.productId) || [];
+    list.push({ time: new Date(pi.date).getTime(), qty: Number(pi.qty) || 0 });
+    receivedByProduct.set(pi.productId, list);
+  });
+
+  const rows = [];
+  products.forEach(p => {
+    if (!(p.stock > 0)) return;
+    const drop = findLastPriceDrop(p.priceHistory);
+    if (!drop) return;
+    const dropTime = new Date(drop.date).getTime();
+    const receivedSince = (receivedByProduct.get(p.id) || [])
+      .filter(r => r.time > dropTime)
+      .reduce((a, r) => a + r.qty, 0);
+    const unitsAtRisk = Math.max(0, Math.min(p.stock, p.stock - receivedSince));
+    if (unitsAtRisk <= 0) return;
+    const marginLossPerUnit = drop.oldPrice - drop.newPrice;
+    const opportunityCost = unitsAtRisk * marginLossPerUnit;
+    const belowOldCost = drop.oldCost > 0 && drop.newPrice < drop.oldCost;
+    const realLoss = belowOldCost ? unitsAtRisk * (drop.oldCost - drop.newPrice) : 0;
+    const daysSinceDrop = Math.floor((now - dropTime) / msDay);
+    rows.push({
+      id: p.id, name: p.name, unitType: p.unitType, stock: p.stock, unitsAtRisk,
+      oldPrice: drop.oldPrice, newPrice: drop.newPrice, daysSinceDrop, opportunityCost, belowOldCost, realLoss,
+    });
+  });
+
+  return rows.sort((a, b) => (b.realLoss - a.realLoss) || (b.opportunityCost - a.opportunityCost));
+}
+
+/* En la caja, cuando a un producto le queda poco stock al precio anterior y
+   el cliente pide más de lo que corresponde a ese precio, se cobra TODO al
+   precio anterior (más alto) en vez de mezclar dos precios en la misma
+   boleta —eso confundiría al cliente—. Esto hace que esas ventas dejen más
+   margen del esperado, no menos: es una excepción y conviene que quede a la
+   vista de un administrador, en vez de perderse entre el resto de las
+   ventas. Ver checkout() en POSView, donde se calcula extraQty/extraProfit. */
+function buildOldPriceSalesLog(sales) {
+  const rows = [];
+  sales.forEach(s => {
+    (s.items || []).forEach(it => {
+      if (!it.oldPriceApplied) return;
+      rows.push({
+        saleId: s.id, invoiceNumber: s.invoiceNumber, date: s.date, name: it.name,
+        qty: it.qty, oldPrice: it.oldPrice, newPrice: it.newPrice,
+        extraQty: it.extraQty || 0, extraProfit: it.extraProfit || 0,
+      });
+    });
+  });
+  return rows.sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
+function PriceDropAlertPanel({ products, purchaseItems, sales }) {
+  const rows = useMemo(() => buildPriceDropRisks(products, purchaseItems), [products, purchaseItems]);
+  const [showAll, setShowAll] = useState(false);
+  const shown = showAll ? rows : rows.slice(0, 12);
+  const hasRealLoss = rows.some(r => r.belowOldCost);
+  const totalOpportunity = rows.reduce((a, r) => a + r.opportunityCost, 0);
+  const totalRealLoss = rows.reduce((a, r) => a + r.realLoss, 0);
+
+  const oldPriceSales = useMemo(() => buildOldPriceSalesLog(sales), [sales]);
+  const [showAllSales, setShowAllSales] = useState(false);
+  const shownSales = showAllSales ? oldPriceSales : oldPriceSales.slice(0, 8);
+  const totalExtraProfit = oldPriceSales.reduce((a, r) => a + r.extraProfit, 0);
+
+  return (
+    <div className="rounded-xl overflow-hidden mt-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: hasRealLoss ? C.rustSoft : C.brassSoft }}>
+        <PackageMinus size={15} style={{ color: hasRealLoss ? C.rust : "#8a6a1f" }} />
+        <span className="text-sm font-semibold" style={{ color: hasRealLoss ? C.rust : "#8a6a1f", fontFamily: "'Space Grotesk', sans-serif" }}>Stock que quedó con precio antiguo ({rows.length})</span>
+      </div>
+      <div className="p-4">
+        <p className="text-xs mb-3" style={{ color: C.gray }}>
+          Cuando baja el precio de venta y todavía queda stock de la compra anterior, esas unidades terminan vendiéndose más baratas de lo pensado — una pérdida de margen difícil de notar porque no aparece como error en ninguna parte. Esto compara el historial de precio de cada producto contra lo recibido después de su última baja, para estimarlo.
+        </p>
+        {rows.length === 0 ? (
+          <EmptyState icon={PackageMinus} title="Sin señales por ahora" hint="No se detecta stock que venga de antes de la última baja de precio de algún producto." />
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 mb-3 text-sm">
+              {totalRealLoss > 0 && <span style={{ color: C.rust }}>Riesgo de vender bajo costo: <b className="font-mono">{formatCLP(totalRealLoss)}</b></span>}
+              <span style={{ color: "#8a6a1f" }}>Margen que se dejaría de ganar en total: <b className="font-mono">{formatCLP(totalOpportunity)}</b></span>
+            </div>
+            <div className="divide-y" style={{ borderColor: C.paperLine }}>
+              {shown.map(r => (
+                <div key={r.id} className="py-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium truncate" style={{ color: C.ink }}>{r.name}</span>
+                    <span className="font-mono text-sm font-semibold flex-shrink-0" style={{ color: r.belowOldCost ? C.rust : "#8a6a1f" }}>{formatCLP(r.belowOldCost ? r.realLoss : r.opportunityCost)}</span>
+                  </div>
+                  <div className="text-xs mt-0.5" style={{ color: C.gray }}>
+                    {r.unitsAtRisk}{r.unitType === "peso" ? " kg" : " un."} de {r.stock}{r.unitType === "peso" ? " kg" : " un."} en stock parecen venir de antes de la baja de {formatCLP(r.oldPrice)} a {formatCLP(r.newPrice)}, hace {r.daysSinceDrop} día{r.daysSinceDrop === 1 ? "" : "s"}
+                    {r.belowOldCost && <span style={{ color: C.rust }}> — esas unidades costaron más de lo que ahora se están vendiendo</span>}.
+                  </div>
+                </div>
+              ))}
+            </div>
+            {rows.length > shown.length && (
+              <button onClick={() => setShowAll(true)} className="text-xs font-medium mt-2 underline" style={{ color: C.gray }}>Ver los {rows.length - shown.length} restantes</button>
+            )}
+          </>
+        )}
+        <p className="text-xs mt-3" style={{ color: C.grayLight }}>
+          Es una estimación, no una medición exacta: el sistema no distingue lote por lote qué unidad física es cuál. Se calcula comparando el stock actual contra lo recibido (compras y reposiciones) desde la última baja de precio registrada en cada producto.
+        </p>
+
+        {oldPriceSales.length > 0 && (
+          <div className="mt-4 pt-4" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+            <div className="text-sm font-semibold mb-1" style={{ color: C.ink }}>Ventas donde se mantuvo el precio anterior ({oldPriceSales.length})</div>
+            <p className="text-xs mb-2" style={{ color: C.gray }}>
+              Para no cobrarle al cliente dos precios distintos del mismo producto en la misma boleta, cuando la cantidad pedida superó lo que quedaba al precio anterior, se cobró todo a ese precio más alto. Esto no genera pérdida — al contrario, esas unidades de más dejaron una ganancia extra sobre lo esperado. Es un caso excepcional, no algo que deba pasar seguido.
+            </p>
+            {totalExtraProfit > 0 && (
+              <p className="text-sm font-semibold mb-2" style={{ color: C.greenDark }}>Ganancia extra acumulada por este motivo: {formatCLP(totalExtraProfit)}</p>
+            )}
+            <div className="divide-y" style={{ borderColor: C.paperLine }}>
+              {shownSales.map((r, idx) => (
+                <div key={`${r.saleId}-${idx}`} className="py-2 flex items-center justify-between gap-2 text-xs">
+                  <div className="min-w-0">
+                    <div className="truncate" style={{ color: C.ink }}>Boleta #{r.invoiceNumber} · {formatDate(r.date)} — {r.qty}× {r.name}</div>
+                    <div style={{ color: C.gray }}>Cobrado a {formatCLP(r.oldPrice)} c/u (precio anterior; el vigente es {formatCLP(r.newPrice)}){r.extraQty > 0 ? ` · ${r.extraQty} de esas unidades ya correspondían al precio nuevo` : ""}</div>
+                  </div>
+                  {r.extraProfit > 0 && <Badge tone="green">+{formatCLP(r.extraProfit)}</Badge>}
+                </div>
+              ))}
+            </div>
+            {oldPriceSales.length > shownSales.length && (
+              <button onClick={() => setShowAllSales(true)} className="text-xs font-medium mt-2 underline" style={{ color: C.gray }}>Ver las {oldPriceSales.length - shownSales.length} restantes</button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InvestmentPredictorPanel({ products, sales, lastSaleMap }) {
+  const [windowDays, setWindowDays] = useState(30);
+  const msDay = 24 * 60 * 60 * 1000;
+
+  const { rows, overallMargin } = useMemo(
+    () => buildCategoryInvestmentStats(products, sales, lastSaleMap, windowDays),
+    [products, sales, lastSaleMap, windowDays]
+  );
+
+  const historyDays = useMemo(() => {
+    if (sales.length === 0) return 0;
+    let oldest = Date.now();
+    sales.forEach(s => { const t = new Date(s.date).getTime(); if (t < oldest) oldest = t; });
+    return Math.floor((Date.now() - oldest) / msDay);
+  }, [sales]);
+
+  const shortHistory = historyDays < windowDays * 2;
+
+  return (
+    <div className="rounded-xl overflow-hidden mt-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <div className="px-4 py-2.5 flex items-center justify-between gap-2 flex-wrap" style={{ background: C.paperDark }}>
+        <div className="flex items-center gap-2">
+          <Sparkles size={15} style={{ color: C.ink }} />
+          <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Predictor de inversión por categoría</span>
+        </div>
+        <div className="flex gap-1.5">
+          {[[30, "30 días"], [60, "60 días"], [90, "90 días"]].map(([v, l]) => (
+            <button key={v} onClick={() => setWindowDays(v)} className="px-2.5 py-1 rounded-lg text-xs font-medium" style={windowDays === v ? { background: C.ink, color: C.paper } : { background: "#fff", color: C.gray }}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="p-4">
+        <p className="text-xs mb-3" style={{ color: C.gray }}>
+          Cruza ventas, márgenes, quiebres de stock y rotación de lo que <b>ya se vende</b> para ver qué categorías dan señales sólidas para profundizar (más stock, más variedad) — no predice demanda de un rubro que nunca se ha ofrecido, porque el sistema no tiene datos de eso.
+        </p>
+
+        {shortHistory && (
+          <div className="rounded-lg p-3 mb-3 text-sm" style={{ background: C.brassSoft, color: C.brassText }}>
+            Todavía hay {historyDays} día{historyDays === 1 ? "" : "s"} de historial de ventas registrado, menos que los {windowDays * 2} necesarios para comparar contra un período anterior completo. La variación (crecimiento) de cada categoría es referencial hasta que se acumulen más días.
+          </div>
+        )}
+
+        {overallMargin !== null && (
+          <p className="text-xs mb-3" style={{ color: C.grayLight }}>Margen promedio del negocio en el período: {overallMargin.toFixed(0)}% · se usa como referencia para el "margen sobre el promedio" de cada categoría.</p>
+        )}
+
+        {rows.length === 0 ? (
+          <EmptyState icon={Sparkles} title="Sin ventas suficientes en este período" hint="Elige una ventana más amplia o espera a acumular más días de venta." />
+        ) : (
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {rows.map((r, i) => (
+              <div key={r.cat} className="py-3">
+                <div className="flex items-center gap-2.5 mb-1.5">
+                  <RankBadge n={i + 1} />
+                  <span className="text-sm font-medium flex-1 truncate" style={{ color: C.ink }}>{r.cat}</span>
+                  <Badge tone={r.verdict.tone}>{r.verdict.label}</Badge>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs pl-7" style={{ color: C.gray }}>
+                  <span className="font-mono font-semibold" style={{ color: C.greenDark }}>{formatCLP(r.recentRevenue)}</span>
+                  <span className="flex items-center gap-1">
+                    {r.growthPct === null ? "sin período anterior para comparar" : (
+                      <>
+                        {r.growthPct >= 0 ? <TrendingUp size={12} style={{ color: C.greenDark }} /> : <TrendingDown size={12} style={{ color: C.rust }} />}
+                        <span style={{ color: r.growthPct >= 0 ? C.greenDark : C.rust }}>{r.growthPct >= 0 ? "+" : ""}{r.growthPct.toFixed(0)}% vs. período anterior</span>
+                      </>
+                    )}
+                  </span>
+                  <span>{r.margin === null ? "sin margen calculable" : `margen ${r.margin.toFixed(0)}%`}</span>
+                  <span>{r.daysWithSales} de {windowDays} días con venta</span>
+                  <span>{r.productsSold} de {r.totalProducts} producto(s) vendidos</span>
+                </div>
+                {(r.outOfStock > 0 || r.belowMin > 0) && (
+                  <div className="text-xs mt-1 pl-7" style={{ color: C.rust }}>
+                    {r.outOfStock > 0 && `${r.outOfStock} producto(s) sin stock ahora mismo`}{r.outOfStock > 0 && r.belowMin > 0 && " · "}{r.belowMin > 0 && `${r.belowMin} bajo el mínimo`} — posible demanda insatisfecha: puede ser razón para invertir más, no menos.
+                  </div>
+                )}
+                {r.stalledShare !== null && r.stalledShare >= 0.5 && (
+                  <div className="text-xs mt-1 pl-7" style={{ color: "#8a6a1f" }}>
+                    {Math.round(r.stalledShare * 100)}% de los productos con stock de esta categoría llevan 45+ días sin venderse — antes de invertir más, conviene revisar si es la variedad correcta.
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex, purchaseItems, movements, setMovements, settings, setSettings, session, toast }) {
   const [range, setRange] = useState("30");
   const now = Date.now();
@@ -8060,6 +8972,10 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
         )}
       </div>
 
+      <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} />
+
+      <InvestmentPredictorPanel products={products} sales={sales} lastSaleMap={lastSaleMap} />
+
       <BreadPredictionPanel products={products} setProducts={setProducts} sales={sales} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} settings={settings} setSettings={setSettings} session={session} toast={toast} />
     </div>
   );
@@ -8222,7 +9138,7 @@ function SupplierModal({ initial, onClose, onSave }) {
   );
 }
 
-function SupplierCard({ s, role, invoicesIndex, purchaseItems, products, onEdit, onDelete, onViewInvoice }) {
+function SupplierCard({ s, role, invoicesIndex, purchaseItems, balance, onEdit, onDelete, onViewInvoice, onViewLedger, products }) {
   const [expanded, setExpanded] = useState(false);
   const invoices = useMemo(() => invoicesIndex.filter(i => i.supplierId === s.id), [invoicesIndex, s.id]);
   const items = useMemo(() => purchaseItems.filter(i => i.supplierId === s.id), [purchaseItems, s.id]);
@@ -8295,6 +9211,7 @@ function SupplierCard({ s, role, invoicesIndex, purchaseItems, products, onEdit,
                   <span className="flex items-center gap-1.5" style={{ color: C.ink }}>
                     {formatDate(inv.date)}{inv.refNumber ? ` · Doc ${inv.refNumber}` : ""}
                     {inv.noDocument && <Badge tone="rust">sin boleta</Badge>}
+                    {inv.paymentMethod === "Crédito con el proveedor" && <Badge tone="brass">crédito</Badge>}
                   </span>
                   <span className="font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
                 </button>
@@ -8305,22 +9222,43 @@ function SupplierCard({ s, role, invoicesIndex, purchaseItems, products, onEdit,
       ) : (
         <p className="text-xs pt-2" style={{ color: C.grayLight, borderTop: `1px dashed ${C.paperLine}` }}>Sin facturas catalogadas aún.</p>
       )}
+
+      <div className="flex items-center justify-between pt-2 mt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+        <div>
+          <div className="text-[10px]" style={{ color: C.gray }}>Se le debe (crédito)</div>
+          <div className="font-mono font-semibold text-sm" style={{ color: balance > 0 ? C.rust : C.greenDark }}>{formatCLP(balance)}</div>
+        </div>
+        <button onClick={() => onViewLedger(s)} className="text-xs font-medium flex items-center gap-1" style={{ color: C.green }}>
+          <History size={12} /> Ver movimientos y abonar
+        </button>
+      </div>
     </div>
   );
 }
 
-function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, products, role, toast }) {
+function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, supplierLedger, setSupplierLedger, movements, setMovements, products, role, toast }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [viewingInvoice, setViewingInvoice] = useState(null);
+  const [viewingLedger, setViewingLedger] = useState(null);
+
+  function balanceOf(supplierId) {
+    return supplierLedger.reduce((s, m) => {
+      if (m.supplierId !== supplierId) return s;
+      return s + (m.type === "cargo" ? m.amount : -m.amount);
+    }, 0);
+  }
 
   const categories = useMemo(() => [...new Set(suppliers.map(s => s.category).filter(Boolean))].sort(), [suppliers]);
   const filtered = useMemo(() => {
     const q = normalize(query);
     return suppliers.filter(s => (!q || normalize(s.name).includes(q) || normalize(s.contactName).includes(q)) && (!category || s.category === category));
   }, [suppliers, query, category]);
+
+  const totalDebt = suppliers.reduce((s, sup) => s + Math.max(0, balanceOf(sup.id)), 0);
+  const withDebt = suppliers.filter(sup => balanceOf(sup.id) > 0).length;
 
   async function persist(ns) { setSuppliers(ns); await saveJSON("suppliers", ns); }
 
@@ -8339,9 +9277,46 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
     toast("Proveedor eliminado", "success");
   }
 
+  async function registerPayment(supplier, amount, paymentMethod, note) {
+    const latestLedger = await loadJSON("supplier-ledger", supplierLedger);
+    const abono = {
+      id: uid("provmov"), supplierId: supplier.id, type: "abono",
+      amount, date: new Date().toISOString(), invoiceId: null, paymentMethod, note: note || "",
+    };
+    const newLedger = [abono, ...latestLedger];
+    setSupplierLedger(newLedger);
+    await saveJSON("supplier-ledger", newLedger);
+
+    // El abono sí es plata real saliendo de caja —a diferencia de la
+    // recepción a crédito original, que no generó egreso— así que recién
+    // acá se refleja como gasto en el libro de caja general.
+    const latestMovements = await loadJSON("movements-log", movements);
+    const asiento = {
+      id: uid("mov"), date: abono.date, type: "egreso",
+      concept: `Pago a proveedor — ${supplier.name}`,
+      amount, category: "Pago a proveedor", auto: true,
+      supplierId: supplier.id,
+    };
+    const newMovements = [asiento, ...latestMovements];
+    setMovements(newMovements);
+    await saveJSON("movements-log", newMovements);
+    toast("Pago registrado", "success");
+  }
+
   return (
     <div>
       <PriceComparisonPanel purchaseItems={purchaseItems} />
+
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Se debe a proveedores</div>
+          <div className="text-lg font-semibold font-mono" style={{ color: C.rust }}>{formatCLP(totalDebt)}</div>
+        </div>
+        <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Proveedores con deuda</div>
+          <div className="text-lg font-semibold font-mono" style={{ color: C.ink }}>{withDebt}</div>
+        </div>
+      </div>
 
       <div className="flex flex-wrap gap-2 mb-3">
         <div className="relative flex-1 min-w-[200px]">
@@ -8360,7 +9335,7 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
       ) : (
         <div className="grid sm:grid-cols-2 gap-3">
           {filtered.map(s => (
-            <SupplierCard key={s.id} s={s} role={role} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} products={products} onEdit={setEditing} onDelete={setDeleting} onViewInvoice={setViewingInvoice} />
+            <SupplierCard key={s.id} s={s} role={role} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} products={products} balance={balanceOf(s.id)} onEdit={setEditing} onDelete={setDeleting} onViewInvoice={setViewingInvoice} onViewLedger={setViewingLedger} />
           ))}
         </div>
       )}
@@ -8373,6 +9348,469 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
         </Modal>
       )}
       {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} onClose={() => setViewingInvoice(null)} />}
+      {viewingLedger && (
+        <SupplierLedgerModal
+          supplier={viewingLedger}
+          ledger={supplierLedger}
+          toast={toast}
+          onRegisterPayment={registerPayment}
+          onClose={() => setViewingLedger(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   CATEGORÍAS (secciones de productos) — CRUD
+   Antes solo se creaban al vuelo desde ProductModal/DraftRow, sin ninguna
+   pantalla para administrarlas. Acá se pueden crear a mano, renombrar,
+   ordenar o desactivar. La creación-al-vuelo sigue intacta (migración
+   0007): cualquiera del equipo puede seguir escribiendo una sección nueva
+   al recibir mercadería, esta pantalla solo agrega la administración.
+--------------------------------------------------------- */
+function CategoriesView({ categories, setCategories, products, toast }) {
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
+
+  const countOf = (name) => products.filter(p => p.category === name).length;
+
+  const sorted = useMemo(
+    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    [categories]
+  );
+  const filtered = useMemo(() => {
+    const q = normalize(query);
+    return sorted.filter(c => !q || normalize(c.name).includes(q));
+  }, [sorted, query]);
+
+  async function persist(ns) { setCategories(ns); await saveJSON("product-categories", ns); }
+
+  async function saveCategory(c) {
+    const latest = await loadJSON("product-categories", categories);
+    const exists = latest.some(x => x.id === c.id);
+    const ns = exists ? latest.map(x => x.id === c.id ? c : x) : [...latest, c];
+    await persist(ns);
+    setEditing(null);
+    toast(exists ? "Categoría actualizada" : "Categoría creada", "success");
+  }
+  async function deleteCategory(id) {
+    const latest = await loadJSON("product-categories", categories);
+    await persist(latest.filter(c => c.id !== id));
+    setDeleting(null);
+    toast("Categoría desactivada", "success");
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar sección…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <Btn icon={Plus} onClick={() => setEditing({})}>Nueva categoría</Btn>
+      </div>
+
+      {filtered.length === 0 ? (
+        <EmptyState icon={Tags} title="Sin categorías" hint="Crea las secciones en las que se organiza el catálogo — Verduras, Frutas, Abarrotes, Aseo… También se crean solas al recibir un producto de un tipo nuevo." />
+      ) : (
+        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {filtered.map(c => (
+              <div key={c.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium" style={{ color: C.ink }}>{c.name}</div>
+                  <div className="text-xs" style={{ color: C.gray }}>{countOf(c.name)} producto(s) · orden {c.order ?? 0}</div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => setEditing(c)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
+                  <button onClick={() => setDeleting(c)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {editing !== null && <CategoryModal initial={editing.id ? editing : null} onClose={() => setEditing(null)} onSave={saveCategory} />}
+      {deleting && (
+        <Modal title="Desactivar categoría" onClose={() => setDeleting(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>
+            ¿Desactivar <strong>{deleting.name}</strong>?
+            {countOf(deleting.name) > 0
+              ? ` Los ${countOf(deleting.name)} producto(s) que ya la tienen asignada la conservan tal cual — solo deja de estar disponible para elegirla en productos nuevos.`
+              : " No hay productos usándola en este momento."}
+          </p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteCategory(deleting.id)}>Desactivar</Btn></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CategoryModal({ initial, onClose, onSave }) {
+  const [form, setForm] = useState({
+    id: initial?.id || uid("cat"),
+    name: initial?.name || "",
+    order: initial?.order ?? 0,
+  });
+  function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+  function submit() {
+    if (!form.name.trim()) return;
+    onSave({ ...form, name: form.name.trim(), order: Number(form.order) || 0 });
+  }
+  return (
+    <Modal title={initial?.id ? "Editar categoría" : "Nueva categoría"} onClose={onClose}>
+      <Field label="Nombre"><input autoFocus value={form.name} onChange={e => set("name", e.target.value)} className={inputCls} style={{ ...inputStyle(), textTransform: "uppercase" }} placeholder="Ej. Verduras, Frutas, Abarrotes…" /></Field>
+      <Field label="Orden (opcional)"><input type="number" value={form.order} onChange={e => set("order", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" /></Field>
+      <p className="text-xs mb-4" style={{ color: C.gray }}>El orden decide en qué posición aparece esta sección en las listas — menor número, más arriba.</p>
+      <Btn full icon={Check} onClick={submit}>Guardar</Btn>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   FIADO — CLIENTES Y SU LIBRO DE DEUDA
+   Migración 0012. "quick" en CustomerModal es el formulario reducido que se
+   usa desde el POS (solo nombre y teléfono, para no frenar una venta);
+   desde acá (administración) se completa con dirección, límite y notas.
+--------------------------------------------------------- */
+function CustomerModal({ initial, onClose, onSave, quick }) {
+  const [form, setForm] = useState({
+    id: initial?.id || uid("cus"),
+    name: initial?.name || "",
+    phone: initial?.phone || "",
+    address: initial?.address || "",
+    notes: initial?.notes || "",
+    creditLimit: initial?.creditLimit ?? "",
+  });
+  function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+  function submit() {
+    if (!form.name.trim()) return;
+    onSave({
+      ...form,
+      name: form.name.trim(),
+      creditLimit: form.creditLimit === "" ? null : Number(form.creditLimit),
+    });
+  }
+  return (
+    <Modal title={initial?.id ? "Editar cliente" : "Nuevo cliente"} onClose={onClose}>
+      <Field label="Nombre"><input autoFocus value={form.name} onChange={e => set("name", e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Nombre del cliente" /></Field>
+      <Field label="Teléfono (opcional)"><input value={form.phone} onChange={e => set("phone", e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} /></Field>
+      {!quick && (
+        <>
+          <Field label="Dirección (opcional)"><input value={form.address} onChange={e => set("address", e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+          <Field label="Límite de crédito (opcional)">
+            <input type="number" value={form.creditLimit} onChange={e => set("creditLimit", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Sin límite definido" />
+          </Field>
+          <Field label="Notas (opcional)"><textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={2} className={inputCls} style={inputStyle()} placeholder="Referencias, condiciones de pago, etc." /></Field>
+        </>
+      )}
+      <Btn full icon={Check} onClick={submit}>Guardar cliente</Btn>
+    </Modal>
+  );
+}
+
+function CustomerLedgerModal({ customer, ledger, onRegisterPayment, toast, onClose }) {
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("Efectivo");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const entries = useMemo(() => {
+    return ledger
+      .filter(m => m.customerId === customer.id)
+      .slice()
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [ledger, customer.id]);
+
+  const balance = entries.reduce((s, m) => s + (m.type === "cargo" ? m.amount : -m.amount), 0);
+
+  async function submit() {
+    const n = Number(amount);
+    if (!n || n <= 0) return toast("Ingresa un monto válido", "error");
+    setSaving(true);
+    try {
+      await onRegisterPayment(customer, n, method, note.trim());
+      setAmount(""); setNote("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`Fiado — ${customer.name}`} onClose={onClose} wide>
+      <div className="rounded-lg p-3 mb-3 flex items-center justify-between" style={{ background: C.ink }}>
+        <span className="text-sm" style={{ color: C.grayLight }}>Debe actualmente</span>
+        <span className="font-mono font-bold text-lg" style={{ color: balance > 0 ? C.brass : "#fff" }}>{formatCLP(balance)}</span>
+      </div>
+
+      <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+        <div className="text-xs font-semibold mb-2" style={{ color: C.ink }}>Registrar abono (pago que hizo el cliente)</div>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Monto" className={`${inputCls} font-mono`} style={inputStyle()} />
+          <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls} style={inputStyle()}>
+            {["Efectivo", "Débito", "Crédito", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <input value={note} onChange={e => setNote(e.target.value)} placeholder="Nota (opcional)" className={`${inputCls} mb-2`} style={inputStyle()} />
+        <Btn full size="sm" icon={saving ? Loader2 : Check} disabled={saving} onClick={submit}>{saving ? "Guardando…" : "Registrar abono"}</Btn>
+      </div>
+
+      <div className="text-xs font-semibold mb-1.5" style={{ color: C.ink }}>Historial</div>
+      {entries.length === 0 ? (
+        <p className="text-xs" style={{ color: C.gray }}>Sin movimientos todavía.</p>
+      ) : (
+        <div className="rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
+          <div className="max-h-72 overflow-y-auto divide-y" style={{ borderColor: C.paperLine }}>
+            {entries.map(m => (
+              <div key={m.id} className="flex items-center justify-between px-3 py-2 text-xs">
+                <div>
+                  <div style={{ color: C.ink }}>{m.type === "cargo" ? "Venta fiada" : `Abono${m.paymentMethod ? ` (${m.paymentMethod})` : ""}`}</div>
+                  <div style={{ color: C.gray }}>{formatDate(m.date)}{m.note ? ` · ${m.note}` : ""}</div>
+                </div>
+                <span className="font-mono font-semibold" style={{ color: m.type === "cargo" ? C.rust : C.greenDark }}>
+                  {m.type === "cargo" ? "+" : "−"}{formatCLP(m.amount)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3"><Btn variant="ghost" full onClick={onClose}>Cerrar</Btn></div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   CRÉDITO CON PROVEEDORES — libro de deuda del negocio
+   Migración 0014, espejo de CustomerLedgerModal en sentido contrario:
+   acá el cargo nace de recibir mercadería "a crédito" en Recepción, y el
+   abono es un pago que EL GALPÓN le hizo al proveedor.
+--------------------------------------------------------- */
+function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, toast, onClose }) {
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("Efectivo");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const entries = useMemo(() => {
+    return ledger
+      .filter(m => m.supplierId === supplier.id)
+      .slice()
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [ledger, supplier.id]);
+
+  const balance = entries.reduce((s, m) => s + (m.type === "cargo" ? m.amount : -m.amount), 0);
+
+  async function submit() {
+    const n = Number(amount);
+    if (!n || n <= 0) return toast("Ingresa un monto válido", "error");
+    setSaving(true);
+    try {
+      await onRegisterPayment(supplier, n, method, note.trim());
+      setAmount(""); setNote("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`Crédito — ${supplier.name}`} onClose={onClose} wide>
+      <div className="rounded-lg p-3 mb-3 flex items-center justify-between" style={{ background: C.ink }}>
+        <span className="text-sm" style={{ color: C.grayLight }}>Se le debe actualmente</span>
+        <span className="font-mono font-bold text-lg" style={{ color: balance > 0 ? C.brass : "#fff" }}>{formatCLP(balance)}</span>
+      </div>
+
+      <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+        <div className="text-xs font-semibold mb-2" style={{ color: C.ink }}>Registrar abono (pago que se le hizo al proveedor)</div>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Monto" className={`${inputCls} font-mono`} style={inputStyle()} />
+          <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls} style={inputStyle()}>
+            {["Efectivo", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <input value={note} onChange={e => setNote(e.target.value)} placeholder="Nota (opcional)" className={`${inputCls} mb-2`} style={inputStyle()} />
+        <Btn full size="sm" icon={saving ? Loader2 : Check} disabled={saving} onClick={submit}>{saving ? "Guardando…" : "Registrar abono"}</Btn>
+      </div>
+
+      <div className="text-xs font-semibold mb-1.5" style={{ color: C.ink }}>Historial</div>
+      {entries.length === 0 ? (
+        <p className="text-xs" style={{ color: C.gray }}>Sin movimientos todavía.</p>
+      ) : (
+        <div className="rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
+          <div className="max-h-72 overflow-y-auto divide-y" style={{ borderColor: C.paperLine }}>
+            {entries.map(m => (
+              <div key={m.id} className="flex items-center justify-between px-3 py-2 text-xs">
+                <div>
+                  <div style={{ color: C.ink }}>{m.type === "cargo" ? "Recepción a crédito" : `Abono${m.paymentMethod ? ` (${m.paymentMethod})` : ""}`}</div>
+                  <div style={{ color: C.gray }}>{formatDate(m.date)}{m.note ? ` · ${m.note}` : ""}</div>
+                </div>
+                <span className="font-mono font-semibold" style={{ color: m.type === "cargo" ? C.rust : C.greenDark }}>
+                  {m.type === "cargo" ? "+" : "−"}{formatCLP(m.amount)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3"><Btn variant="ghost" full onClick={onClose}>Cerrar</Btn></div>
+    </Modal>
+  );
+}
+
+function ClientesView({ customers, setCustomers, customerLedger, setCustomerLedger, movements, setMovements, toast }) {
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
+  const [viewingLedger, setViewingLedger] = useState(null);
+
+  function balanceOf(customerId) {
+    return customerLedger.reduce((s, m) => {
+      if (m.customerId !== customerId) return s;
+      return s + (m.type === "cargo" ? m.amount : -m.amount);
+    }, 0);
+  }
+
+  const filtered = useMemo(() => {
+    const q = normalize(query);
+    return customers.filter(c => !q || normalize(c.name).includes(q) || normalize(c.phone).includes(q));
+  }, [customers, query]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sorted = useMemo(() => [...filtered].sort((a, b) => balanceOf(b.id) - balanceOf(a.id)), [filtered, customerLedger]);
+
+  const totalDebt = customers.reduce((s, c) => s + Math.max(0, balanceOf(c.id)), 0);
+  const withDebt = customers.filter(c => balanceOf(c.id) > 0).length;
+  const overLimit = customers.filter(c => c.creditLimit != null && balanceOf(c.id) > c.creditLimit).length;
+
+  async function persist(nc) { setCustomers(nc); await saveJSON("customers", nc); }
+
+  async function saveCustomer(c) {
+    const latest = await loadJSON("customers", customers);
+    const exists = latest.some(x => x.id === c.id);
+    const nc = exists ? latest.map(x => x.id === c.id ? c : x) : [...latest, c];
+    await persist(nc);
+    setEditing(null);
+    toast(exists ? "Cliente actualizado" : "Cliente registrado", "success");
+  }
+  async function deleteCustomer(id) {
+    const latest = await loadJSON("customers", customers);
+    await persist(latest.filter(c => c.id !== id));
+    setDeleting(null);
+    toast("Cliente eliminado", "success");
+  }
+
+  async function registerPayment(customer, amount, paymentMethod, note) {
+    const latestLedger = await loadJSON("customer-ledger", customerLedger);
+    const abono = {
+      id: uid("cliemov"), customerId: customer.id, type: "abono",
+      amount, date: new Date().toISOString(), saleId: null, paymentMethod, note: note || "",
+    };
+    const newLedger = [abono, ...latestLedger];
+    setCustomerLedger(newLedger);
+    await saveJSON("customer-ledger", newLedger);
+
+    // El abono sí es plata real entrando a la caja —a diferencia de la venta
+    // fiada original, que solo quedó registrada como deuda— así que recién
+    // acá se refleja como ingreso en el libro de caja general.
+    const latestMovements = await loadJSON("movements-log", movements);
+    const asiento = {
+      id: uid("mov"), date: abono.date, type: "ingreso",
+      concept: `Abono de fiado — ${customer.name}`,
+      amount, category: "Abono de fiado", auto: true,
+    };
+    const newMovements = [asiento, ...latestMovements];
+    setMovements(newMovements);
+    await saveJSON("movements-log", newMovements);
+    toast("Abono registrado", "success");
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
+        <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Total por cobrar</div>
+          <div className="text-lg font-semibold font-mono" style={{ color: C.rust }}>{formatCLP(totalDebt)}</div>
+        </div>
+        <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Clientes con deuda</div>
+          <div className="text-lg font-semibold font-mono" style={{ color: C.ink }}>{withDebt}</div>
+        </div>
+        <div className="rounded-xl p-4 col-span-2 lg:col-span-1" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Sobre su límite</div>
+          <div className="text-lg font-semibold font-mono" style={{ color: overLimit > 0 ? C.rust : C.ink }}>{overLimit}</div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por nombre o teléfono…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <Btn icon={Plus} onClick={() => setEditing({})}>Nuevo cliente</Btn>
+      </div>
+
+      {sorted.length === 0 ? (
+        <EmptyState icon={CreditCard} title="Sin clientes" hint="Registra a los clientes a los que se les puede vender fiado, o créalos directamente desde el POS al elegir 'Fiado' como forma de pago." />
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-3">
+          {sorted.map(c => {
+            const balance = balanceOf(c.id);
+            const over = c.creditLimit != null && balance > c.creditLimit;
+            return (
+              <div key={c.id} className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: balance > 0 ? C.brassSoft : C.greenSoft }}>
+                      <CreditCard size={16} style={{ color: balance > 0 ? C.brassText : C.greenDark }} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold truncate" style={{ color: C.ink }}>{c.name}</div>
+                      {c.phone && <div className="text-xs" style={{ color: C.gray }}>{c.phone}</div>}
+                    </div>
+                  </div>
+                  <div className="flex gap-1 flex-shrink-0">
+                    <button title="Editar" onClick={() => setEditing(c)} className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><Pencil size={16} /></button>
+                    <button title="Eliminar" onClick={() => setDeleting(c)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><Trash2 size={16} /></button>
+                  </div>
+                </div>
+                {c.address && <p className="text-xs mb-2" style={{ color: C.gray }}>{c.address}</p>}
+                <div className="flex items-center justify-between pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+                  <div>
+                    <div className="text-[10px]" style={{ color: C.gray }}>Debe actualmente</div>
+                    <div className="font-mono font-semibold text-sm" style={{ color: balance > 0 ? C.rust : C.greenDark }}>{formatCLP(balance)}</div>
+                  </div>
+                  {c.creditLimit != null && <Badge tone={over ? "rust" : "gray"}>límite {formatCLP(c.creditLimit)}</Badge>}
+                </div>
+                <button onClick={() => setViewingLedger(c)} className="mt-2 text-xs font-medium flex items-center gap-1" style={{ color: C.green }}>
+                  <History size={12} /> Ver movimientos y abonar
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing !== null && <CustomerModal initial={editing.id ? editing : null} onClose={() => setEditing(null)} onSave={saveCustomer} />}
+      {deleting && (
+        <Modal title="Eliminar cliente" onClose={() => setDeleting(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar <strong>{deleting.name}</strong>? Las ventas y movimientos de fiado ya registrados no se modifican.</p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteCustomer(deleting.id)}>Eliminar</Btn></div>
+        </Modal>
+      )}
+      {viewingLedger && (
+        <CustomerLedgerModal
+          customer={viewingLedger}
+          ledger={customerLedger}
+          toast={toast}
+          onRegisterPayment={registerPayment}
+          onClose={() => setViewingLedger(null)}
+        />
+      )}
     </div>
   );
 }
@@ -8551,7 +9989,7 @@ function StaleStockPanel({ products, setProducts, session, toast }) {
   );
 }
 
-function InventoryView({ products, setProducts, movements, setMovements, purchaseItems, setPurchaseItems, suppliers, settings, role, session, toast }) {
+function InventoryView({ products, setProducts, movements, setMovements, purchaseItems, setPurchaseItems, suppliers, setSuppliers, categories, settings, role, session, toast }) {
   const [query, setQuery] = useState("");
   const [selectedSection, setSelectedSection] = useState(null); // null = grilla de secciones, "__unclassified__", o nombre de categoría
   const [editing, setEditing] = useState(null);
@@ -8800,7 +10238,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
         </div>
       )}
 
-      {editing !== null && <ProductModal initial={editing} products={products} suppliers={suppliers} role={role} session={session} onClose={() => setEditing(null)} onSave={saveProduct} />}
+      {editing !== null && <ProductModal initial={editing} products={products} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} role={role} session={session} toast={toast} onClose={() => setEditing(null)} onSave={saveProduct} />}
       {restocking && <RestockModal product={restocking} onClose={() => setRestocking(null)} onConfirm={confirmRestock} />}
       {importing && <ImportModal onClose={() => setImporting(false)} onImport={handleImport} />}
       {shrinking && <ShrinkageModal product={shrinking} adminPin={settings.adminPin} role={role} session={session} onClose={() => setShrinking(null)} onConfirm={confirmShrinkage} toast={toast} />}
@@ -9061,7 +10499,7 @@ function InvoicesView({ sales, settings }) {
                 </div>
                 <div className="flex items-center gap-3">
                   {s.boletaEmitida === false && <Badge tone="rust">sin boleta</Badge>}
-                  <Badge tone="gray">{s.paymentMethod}</Badge>
+                  <Badge tone={s.paymentMethod === "Fiado" ? "brass" : "gray"}>{s.paymentMethod}</Badge>
                   <span className="font-mono font-semibold text-sm" style={{ color: C.green }}>{formatCLP(s.total)}</span>
                 </div>
               </button>
@@ -9217,7 +10655,7 @@ function PayrollPanel({ workers, setWorkers, movements, setMovements, session, t
       {payingWorker && <PayWorkerModal worker={payingWorker} onClose={() => setPayingWorker(null)} onSave={registerPayment} />}
       {deletingWorker && (
         <Modal title="Eliminar trabajador" onClose={() => setDeletingWorker(null)}>
-          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar a <strong>{deletingWorker.name}</strong> de la lista? Los pagos que ya se le registraron se mantienen en Finanzas, solo deja de aparecer para pagos nuevos.</p>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar a <strong>{deletingWorker.name}</strong> de la lista? Los pagos que ya se le registraron se mantienen en Egresos, solo deja de aparecer para pagos nuevos.</p>
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeletingWorker(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteWorker(deletingWorker)}>Eliminar</Btn></div>
         </Modal>
       )}
@@ -9231,40 +10669,134 @@ function PayrollPanel({ workers, setWorkers, movements, setMovements, session, t
 // Categorías que el libro de caja reconoce. Antes este campo era texto libre,
 // pero cualquier valor inventado terminaba archivado como "General" y
 // fragmentaba los informes sin que nadie se enterara.
-const CATEGORIAS_MOVIMIENTO = [
-  "General", "Venta", "Compra de mercadería", "Sueldos", "Merma",
-  "Consumo interno", "Entrada libre", "Ajuste de inventario",
+//
+// Agrupadas para la sección "Pagos y gastos" (migración 0011): separa los
+// gastos propios del local (arriendo, bencina, gas, insumos, mantención,
+// impuestos…) de los pagos a proveedores de mercadería, que son otra cosa.
+// Cada categoría nueva necesita también su valor en el enum de la base
+// (galpon.categoria_movimiento) y su traducción en lib/datos/traduccion.js —
+// si falta cualquiera de las dos, la categoría se guarda igual pero cae a
+// "General" en la base sin avisar, así que hay que mantenerlas juntas.
+const GRUPOS_CATEGORIA_MOVIMIENTO = [
+  {
+    label: "Gastos del local",
+    options: [
+      "General", "Arriendo", "Bencina y combustible", "Gas", "Insumos y aseo",
+      "Mantención y reparaciones", "Impuestos y contribuciones", "Otro gasto del local",
+    ],
+  },
+  {
+    label: "Mercadería",
+    options: ["Compra de mercadería", "Pago a proveedor"],
+  },
+  {
+    label: "Otros movimientos",
+    options: ["Sueldos", "Merma", "Consumo interno", "Entrada libre", "Ajuste de inventario"],
+  },
 ];
+const CATEGORIAS_MOVIMIENTO = GRUPOS_CATEGORIA_MOVIMIENTO.flatMap(g => g.options);
 
+// Solo egresos (migración de esta sesión: Egresos es la única pantalla que
+// usa este modal, y ahí todo lo que se registra a mano es un pago o un
+// gasto — nunca un ingreso, así que no tiene caso preguntarlo). Tampoco se
+// adjunta boleta/factura acá: eso ya se hace en Recepción, que es donde
+// realmente llega el documento de la compra.
 function MovementModal({ onClose, onSave }) {
-  const [type, setType] = useState("ingreso");
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("General");
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await onSave({ id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept, category: category || "General", amount: Number(amount), auto: false });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <Modal title="Nuevo movimiento" onClose={onClose}>
-      <div className="grid grid-cols-2 gap-1.5 mb-3">
-        <button onClick={() => setType("ingreso")} className="py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={type === "ingreso" ? { background: C.greenSoft, color: C.greenDark } : { background: C.paperDark, color: C.gray }}><ArrowUpCircle size={15} />Ingreso</button>
-        <button onClick={() => setType("egreso")} className="py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={type === "egreso" ? { background: C.rustSoft, color: C.rust } : { background: C.paperDark, color: C.gray }}><ArrowDownCircle size={15} />Egreso</button>
-      </div>
-      <Field label="Concepto"><input autoFocus value={concept} onChange={e => setConcept(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Pago de arriendo, venta al por mayor…" /></Field>
+    <Modal title="Nuevo pago" onClose={onClose}>
       <Field label="Categoría">
         <select value={category} onChange={e => setCategory(e.target.value)} className={inputCls} style={inputStyle()}>
-          {CATEGORIAS_MOVIMIENTO.map(c => <option key={c} value={c}>{c}</option>)}
+          {GRUPOS_CATEGORIA_MOVIMIENTO.map(g => (
+            <optgroup key={g.label} label={g.label}>
+              {g.options.map(c => <option key={c} value={c}>{c}</option>)}
+            </optgroup>
+          ))}
         </select>
       </Field>
-      <Field label="Monto"><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} /></Field>
-      <Btn full icon={Check} disabled={!concept || !amount} onClick={() => onSave({ id: uid("mov"), date: new Date().toISOString(), type, concept, category: category || "General", amount: Number(amount), auto: false })}>Guardar movimiento</Btn>
+      <Field label="Concepto"><input autoFocus value={concept} onChange={e => setConcept(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Pago de arriendo, bencina de la camioneta…" /></Field>
+      <Field label="Monto">
+        <div className="relative">
+          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-base" style={{ color: C.gray }}>$</span>
+          <input type="number" value={amount} onChange={e => setAmount(e.target.value)} className={`${inputCls} font-mono pl-7`} style={inputStyle()} placeholder="0" />
+        </div>
+      </Field>
+
+      <Btn full icon={saving ? Loader2 : Check} disabled={!concept || !amount || saving} onClick={submit}>{saving ? "Guardando…" : "Guardar"}</Btn>
     </Modal>
   );
 }
 
-function FinanceView({ sales, movements, setMovements, products, workers, setWorkers, session, toast }) {
+function MovementReceiptViewerModal({ movement, onClose }) {
+  const [pages, setPages] = useState([]);
+  const [pageIdx, setPageIdx] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await loadJSON(`movement-doc:${movement.id}`, null);
+        if (!cancelled && res) setPages(Array.isArray(res.pages) ? res.pages : []);
+      } catch (e) { /* archivo no disponible */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [movement.id]);
+
+  const image = pages[pageIdx];
+
+  return (
+    <Modal title={`Boleta/factura — ${movement.concept}`} onClose={onClose}>
+      {loading ? (
+        <div className="rounded-lg flex items-center justify-center" style={{ height: 220, background: C.paperDark }}><Loader2 className="animate-spin" size={20} style={{ color: C.gray }} /></div>
+      ) : image ? (
+        <>
+          {image.mediaType === "application/pdf" ? (
+            <div className="rounded-lg p-4 flex flex-col items-center gap-2" style={{ background: C.paperDark }}>
+              <Receipt size={24} style={{ color: C.gray }} />
+              <span className="text-sm text-center" style={{ color: C.ink }}>{image.name}</span>
+              <a href={image.dataUrl} download={image.name} className="text-xs underline" style={{ color: C.green }}>Descargar PDF</a>
+            </div>
+          ) : (
+            <img src={image.dataUrl} alt={`Archivo ${pageIdx + 1}`} className="w-full rounded-lg" style={{ border: `1.5px solid ${C.paperLine}` }} />
+          )}
+          {pages.length > 1 && (
+            <div className="flex items-center justify-between mt-2">
+              <button disabled={pageIdx === 0} onClick={() => setPageIdx(i => i - 1)} className="p-3 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}><ChevronLeft size={18} /></button>
+              <span className="text-xs" style={{ color: C.gray }}>Archivo {pageIdx + 1} de {pages.length}</span>
+              <button disabled={pageIdx === pages.length - 1} onClick={() => setPageIdx(i => i + 1)} className="p-3 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}><ChevronRight size={18} /></button>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="rounded-lg p-4 text-center text-sm" style={{ background: C.paperDark, color: C.gray }}>No se encontró el archivo adjunto.</div>
+      )}
+    </Modal>
+  );
+}
+
+function FinanceView({ sales, movements, products }) {
   const [range, setRange] = useState("mes");
-  const [adding, setAdding] = useState(false);
-  const [payrollOpen, setPayrollOpen] = useState(false);
   const now = new Date().toISOString();
 
+  // Finanzas es solo estadística del negocio (migración de esta sesión):
+  // registrar pagos, gastos y sueldos vive en Egresos y Sueldos, cada uno en
+  // su propia pestaña. Acá solo se lee movements-log para armar los números
+  // y los gráficos — nunca se escribe nada desde esta pantalla.
   const filteredMovs = useMemo(() => {
     if (range === "todo") return movements;
     if (range === "hoy") return movements.filter(m => isSameDay(m.date, now));
@@ -9301,14 +10833,6 @@ function FinanceView({ sales, movements, setMovements, products, workers, setWor
 
   const hasHistorical = movements.some(m => m.historical);
 
-  async function saveMovement(m) {
-    const latest = await loadJSON("movements-log", movements);
-    const nm = [m, ...latest];
-    setMovements(nm); await saveJSON("movements-log", nm);
-    setAdding(false);
-    toast("Movimiento registrado", "success");
-  }
-
   const cards = [
     { label: "Ventas de hoy", value: ventasHoy, tone: "green" },
     { label: `Ingresos (${range})`, value: totalIngresos, tone: "green" },
@@ -9318,6 +10842,12 @@ function FinanceView({ sales, movements, setMovements, products, workers, setWor
 
   return (
     <div className="space-y-4">
+      <div className="flex gap-1.5">
+        {["hoy", "mes", "todo"].map(r => (
+          <button key={r} onClick={() => setRange(r)} className="px-3 py-1.5 rounded-lg text-xs font-medium capitalize" style={range === r ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}>{r}</button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {cards.map(c => (
           <div key={c.label} className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -9363,34 +10893,71 @@ function FinanceView({ sales, movements, setMovements, products, workers, setWor
           </ResponsiveContainer>
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1.5">
-          {["hoy", "mes", "todo"].map(r => (
-            <button key={r} onClick={() => setRange(r)} className="px-3 py-1.5 rounded-lg text-xs font-medium capitalize" style={range === r ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}>{r}</button>
-          ))}
-        </div>
-        <div className="flex gap-1.5">
-          <Btn size="sm" variant="ghost" icon={Users} onClick={() => setPayrollOpen(true)}>Sueldos</Btn>
-          <Btn size="sm" icon={Plus} onClick={() => setAdding(true)}>Nuevo movimiento</Btn>
-        </div>
+/* ---------------------------------------------------------
+   EGRESOS (solo admin)
+   Antes vivía dentro de Finanzas ("Nuevo pago o gasto" + el libro de
+   movimientos). Se separó a su propia pestaña para que Finanzas quede solo
+   como estadística del negocio y esta sea la pantalla donde de verdad se
+   registran pagos y gastos día a día.
+--------------------------------------------------------- */
+function ExpensesView({ movements, setMovements, toast }) {
+  const [range, setRange] = useState("mes");
+  const [adding, setAdding] = useState(false);
+  const [viewingReceipt, setViewingReceipt] = useState(null);
+  const now = new Date().toISOString();
+
+  // Solo egresos: pagos a proveedores (con crédito o sin él), gastos del
+  // local, sueldos, mermas, etc. Las ventas y demás ingresos se ven en Caja
+  // y Boletas — acá solo importa la plata que sale.
+  const egresos = useMemo(() => movements.filter(m => m.type === "egreso"), [movements]);
+  const filteredMovs = useMemo(() => {
+    if (range === "todo") return egresos;
+    if (range === "hoy") return egresos.filter(m => isSameDay(m.date, now));
+    return egresos.filter(m => isSameMonth(m.date, now));
+  }, [egresos, range]);
+
+  async function saveMovement(m) {
+    const latest = await loadJSON("movements-log", movements);
+    const nm = [m, ...latest];
+    setMovements(nm); await saveJSON("movements-log", nm);
+    setAdding(false);
+    toast("Pago registrado", "success");
+  }
+
+  return (
+    <div className="space-y-4">
+      <Btn size="lg" full icon={Plus} onClick={() => setAdding(true)}>Nuevo pago</Btn>
+
+      <div className="flex gap-1.5">
+        {["hoy", "mes", "todo"].map(r => (
+          <button key={r} onClick={() => setRange(r)} className="px-3 py-1.5 rounded-lg text-xs font-medium capitalize" style={range === r ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}>{r}</button>
+        ))}
       </div>
 
       <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         {filteredMovs.length === 0 ? (
-          <EmptyState icon={Wallet} title="Sin movimientos" hint="Los ingresos y egresos aparecerán aquí." />
+          <EmptyState icon={ArrowDownCircle} title="Sin egresos" hint="Los pagos y gastos que registres aparecerán aquí." />
         ) : (
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
             {filteredMovs.slice(0, 80).map(m => (
               <div key={m.id} className="flex items-center justify-between px-4 py-2.5">
                 <div className="flex items-center gap-2.5">
-                  {m.type === "ingreso" ? <ArrowUpCircle size={16} style={{ color: C.green }} /> : <ArrowDownCircle size={16} style={{ color: C.rust }} />}
+                  <ArrowDownCircle size={16} style={{ color: C.rust }} />
                   <div>
                     <div className="text-sm" style={{ color: C.ink }}>{m.concept}</div>
                     <div className="text-xs" style={{ color: C.gray }}>{formatDate(m.date)} · {m.category}{!m.auto ? " · manual" : ""}</div>
                   </div>
                 </div>
-                <span className="font-mono font-semibold text-sm" style={{ color: m.type === "ingreso" ? C.greenDark : C.rust }}>{m.type === "ingreso" ? "+" : "−"}{formatCLP(m.amount)}</span>
+                <div className="flex items-center gap-2.5">
+                  {m.hasDocument && (
+                    <button onClick={() => setViewingReceipt(m)} aria-label="Ver boleta o factura adjunta" className="flex items-center justify-center" style={{ color: C.gray }}><Receipt size={16} /></button>
+                  )}
+                  <span className="font-mono font-semibold text-sm" style={{ color: C.rust }}>−{formatCLP(m.amount)}</span>
+                </div>
               </div>
             ))}
           </div>
@@ -9398,11 +10965,7 @@ function FinanceView({ sales, movements, setMovements, products, workers, setWor
       </div>
 
       {adding && <MovementModal onClose={() => setAdding(false)} onSave={saveMovement} />}
-      {payrollOpen && (
-        <Modal title="Sueldos" onClose={() => setPayrollOpen(false)} wide>
-          <PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} />
-        </Modal>
-      )}
+      {viewingReceipt && <MovementReceiptViewerModal movement={viewingReceipt} onClose={() => setViewingReceipt(null)} />}
     </div>
   );
 }
@@ -9739,6 +11302,140 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
 }
 
 /* ---------------------------------------------------------
+   INVENTARIO GENERAL — conteo puntual de todo el local (agosto 2026)
+   Actividad de una sola noche: varias personas contando el local entero al
+   mismo tiempo, cualquiera cuenta cualquier producto (sin repartirse nada
+   de antemano), y cada conteo ajusta el stock al toque. Pensada para el
+   teléfono: buscar por nombre o escanear con la cámara, anotar la cantidad
+   real, confirmar, seguir con el siguiente. Reutiliza el mismo libro de
+   conteos que ya existía (galpon.conteo/conteo_detalle) — ver
+   registrarConteoInventarioGeneral en lib/datos — así que no hizo falta
+   ninguna tabla nueva ni migración para esto.
+--------------------------------------------------------- */
+function GeneralInventoryView({ products, setProducts, inventoryCounts, session, toast, onLogout }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [countedValue, setCountedValue] = useState("");
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [sessionCount, setSessionCount] = useState(0);
+  const inputRef = useRef(null);
+
+  const matches = useMemo(() => {
+    if (query.trim().length < 1) return [];
+    const q = normalize(query);
+    return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q)).slice(0, 12);
+  }, [query, products]);
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const totalContadosHoy = useMemo(
+    () => inventoryCounts.filter(c => c.status === "completado" && (c.completedAt || "").slice(0, 10) === todayStr).length,
+    [inventoryCounts, todayStr]
+  );
+
+  function pick(p) {
+    setSelected(p);
+    setQuery("");
+    setCountedValue("");
+    setTimeout(() => document.getElementById("conteo-cantidad")?.focus(), 50);
+  }
+
+  function handleScan(code) {
+    const clean = code.trim();
+    const found = products.find(p => p.barcode === clean);
+    setScannerOpen(false);
+    if (!found) { toast(`Código ${clean} no está en el catálogo — búscalo por nombre`, "error"); return; }
+    pick(found);
+  }
+
+  async function confirm() {
+    if (!selected || saving) return;
+    const n = Number(countedValue);
+    if (countedValue === "" || !Number.isFinite(n) || n < 0) return toast("Ingresa una cantidad válida", "error");
+    setSaving(true);
+    try {
+      const { stock, diff } = await registrarConteoInventarioGeneral({ product: selected, counted: n });
+      setProducts(prev => prev.map(p => p.id === selected.id ? { ...p, stock } : p));
+      setSessionCount(s => s + 1);
+      toast(diff === 0 ? "Conteo registrado — sin diferencia" : `Conteo registrado — ${diff > 0 ? "+" : ""}${diff} vs. sistema`, "success");
+      setSelected(null); setCountedValue("");
+      inputRef.current?.focus();
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo registrar el conteo"), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col" style={{ background: C.paper }}>
+      <div className="sticky top-0 z-10 px-4 py-3 flex items-center justify-between" style={{ background: C.ink, color: C.paper }}>
+        <div>
+          <div className="font-semibold text-sm" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Inventario general</div>
+          <div className="text-[11px] opacity-70">{session.name} · {totalContadosHoy} contados entre todos · {sessionCount} tuyos</div>
+        </div>
+        {onLogout && <button onClick={onLogout} className="p-2 rounded-lg" style={{ color: C.paper }}><LogOut size={18} /></button>}
+      </div>
+
+      <div className="p-4 flex-1 max-w-md mx-auto w-full">
+        <div className="rounded-xl p-3 mb-4" style={{ background: C.brassSoft }}>
+          <p className="text-xs" style={{ color: "#8a6a1f" }}>Cuenta lo que tengas al frente: escanea el código o busca por nombre, anota la cantidad real y confirma. No hace falta repartirse nada — cualquiera cuenta cualquier producto.</p>
+        </div>
+
+        {!selected ? (
+          <>
+            <div className="relative mb-3">
+              <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+              <input ref={inputRef} autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Busca el producto por nombre…" className={`${inputCls} pl-10 text-base`} style={inputStyle()} />
+            </div>
+            <Btn full size="lg" variant="dark" icon={Camera} onClick={() => setScannerOpen(true)}>Escanear código</Btn>
+
+            {matches.length > 0 && (
+              <div className="mt-3 rounded-xl overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+                {matches.map(p => (
+                  <button key={p.id} onClick={() => pick(p)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-black/[.03]" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                    <div>
+                      <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+                      <div className="text-xs" style={{ color: C.gray }}>{p.category || "Sin categoría"}</div>
+                    </div>
+                    <div className="text-xs font-mono flex-shrink-0 ml-2" style={{ color: C.gray }}>sistema: {p.stock}{p.unitType === "peso" ? " kg" : ""}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {query.trim().length > 0 && matches.length === 0 && (
+              <EmptyState icon={Search} title="Sin resultados" hint="Prueba con otra palabra, o escanea el código de barras." />
+            )}
+          </>
+        ) : (
+          <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+            <div className="text-base font-semibold mb-0.5" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{selected.name}</div>
+            <div className="text-xs mb-4" style={{ color: C.gray }}>{selected.category || "Sin categoría"} · sistema dice {selected.stock}{selected.unitType === "peso" ? " kg" : ""}</div>
+
+            <label className="block mb-4">
+              <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Cantidad real contada{selected.unitType === "peso" ? " (kg)" : ""}</span>
+              <input
+                id="conteo-cantidad" type="number" inputMode="decimal" step={selected.unitType === "peso" ? "0.001" : "1"}
+                autoFocus value={countedValue} onChange={e => setCountedValue(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && confirm()}
+                className={`${inputCls} font-mono text-2xl text-center`} style={inputStyle()} placeholder="0"
+              />
+            </label>
+
+            <div className="flex gap-2">
+              <Btn variant="ghost" full onClick={() => { setSelected(null); setCountedValue(""); }}>Cancelar</Btn>
+              <Btn full size="lg" icon={saving ? Loader2 : Check} disabled={saving || countedValue === ""} onClick={confirm}>Confirmar</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {scannerOpen && <CameraScanner onDetect={handleScan} onClose={() => setScannerOpen(false)} />}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
    TRANSFORMACIÓN DE PRODUCTOS
    Para productos del local que se transforman en otro producto distinto
    (ej. lechugas → ensaladas de lechuga). El costo de los insumos se toma
@@ -10070,6 +11767,7 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
     username: initial?.username || "",
     password: "",
     role: initial?.role || "vendedor",
+    pin: initial?.pin || "",
   });
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
 
@@ -10077,14 +11775,29 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
     if (!form.name.trim()) return toast("Escribe el nombre", "error");
     if (!form.username.trim()) return toast("Escribe un nombre de usuario", "error");
     if (!isEdit && !form.password) return toast("Escribe una contraseña", "error");
+    // Al crear, el PIN es obligatorio (sin él no hay forma de identificarse en
+    // la caja). Al editar, en blanco significa "no cambiarlo" — el PIN nunca
+    // se lee de vuelta desde la base, así que no hay un valor previo que
+    // mostrar. Si escriben algo, tiene que ser un PIN válido.
+    if (!isEdit && (!form.pin.trim() || form.pin.trim().length < 4)) {
+      return toast("Ingresa un PIN de vendedor de al menos 4 dígitos", "error");
+    }
+    if (form.pin.trim() && form.pin.trim().length < 4) {
+      return toast("El PIN debe tener al menos 4 dígitos", "error");
+    }
     const taken = users.some(u => normalize(u.username) === normalize(form.username.trim()) && u.id !== initial?.id);
     if (taken) return toast("Ese nombre de usuario ya está en uso", "error");
+    // La unicidad del PIN ya no se puede comprobar aquí: el PIN de las demás
+    // personas nunca llega al navegador. La revisa el servidor al guardar
+    // (galpon.fijar_pin, migración 0013) y, si choca, el error vuelve como
+    // toast desde UsersView.saveUser.
     onSave({
       id: initial?.id || uid("user"),
       name: form.name.trim(),
       username: form.username.trim(),
       password: form.password ? form.password : (initial?.password || ""),
       role: form.role,
+      pin: form.pin.trim(),
       createdAt: initial?.createdAt || new Date().toISOString(),
     });
   }
@@ -10095,6 +11808,9 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
       <Field label="Nombre de usuario"><input value={form.username} onChange={e => set("username", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. carla" /></Field>
       <Field label={isEdit ? "Nueva contraseña (déjalo vacío para no cambiarla)" : "Contraseña"}>
         <input type="password" value={form.password} onChange={e => set("password", e.target.value)} className={inputCls} style={inputStyle()} placeholder="••••" />
+      </Field>
+      <Field label={isEdit ? "Nuevo PIN de vendedor (déjalo vacío para no cambiarlo)" : "PIN de vendedor (para identificarse antes de cada venta — distinto del PIN de administrador de Ajustes)"}>
+        <input type="password" inputMode="numeric" maxLength={6} value={form.pin} onChange={e => set("pin", e.target.value.replace(/\D/g, ""))} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="••••" />
       </Field>
       <Field label="Rol">
         <div className="grid grid-cols-2 gap-1.5">
@@ -10157,15 +11873,32 @@ function UsersView({ users, setUsers, sales, invoicesIndex, shiftsLog, session, 
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
 
-  async function persist(nu) { setUsers(nu); await saveJSON("users", nu); }
+  // Si guardar falla (por ejemplo, un PIN de vendedor que ya usa otra
+  // persona — algo que solo el servidor puede saber con certeza, migración
+  // 0013) se deshace el cambio optimista: lo que llegó a mostrarse en
+  // pantalla no llegó a guardarse de verdad.
+  async function persist(nu) {
+    const previo = users;
+    setUsers(nu);
+    try {
+      await saveJSON("users", nu);
+    } catch (e) {
+      setUsers(previo);
+      throw e;
+    }
+  }
 
   async function saveUser(u) {
-    const latest = await loadJSON("users", users);
-    const exists = latest.some(x => x.id === u.id);
-    const nu = exists ? latest.map(x => x.id === u.id ? u : x) : [...latest, u];
-    await persist(nu);
-    setEditing(null);
-    toast(exists ? "Usuario actualizado" : "Usuario creado", "success");
+    try {
+      const latest = await loadJSON("users", users);
+      const exists = latest.some(x => x.id === u.id);
+      const nu = exists ? latest.map(x => x.id === u.id ? u : x) : [...latest, u];
+      await persist(nu);
+      setEditing(null);
+      toast(exists ? "Usuario actualizado" : "Usuario creado", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar el usuario"), "error");
+    }
   }
 
   async function deleteUser(user) {
@@ -10183,7 +11916,7 @@ function UsersView({ users, setUsers, sales, invoicesIndex, shiftsLog, session, 
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <p className="text-xs" style={{ color: C.gray }}>Cada persona entra con su propio usuario y contraseña. Puedes revisar cuánto ha vendido o recepcionado cada quien.</p>
+        <p className="text-xs" style={{ color: C.gray }}>Cada persona entra con su propio usuario y contraseña, y tiene un PIN de vendedor propio (distinto del PIN de administrador de Ajustes) para identificarse antes de cada venta en la caja común. Puedes revisar cuánto ha vendido o recepcionado cada quien.</p>
         <Btn icon={Plus} onClick={() => setEditing({})}>Nuevo usuario</Btn>
       </div>
       <div className="grid sm:grid-cols-2 gap-3">
@@ -10846,8 +12579,240 @@ function MarcelitaWidget({ products, feedback, setFeedback, session, role, toast
 
 
 /* ---------------------------------------------------------
+   ACTIVIDADES PENDIENTES
+   Junta en un solo lugar las señales de "esto necesita que alguien haga
+   algo" que hoy viven repartidas en cada pestaña (conteos atrasados,
+   aprobaciones de precio, clientes sobre su límite de fiado, la caja abierta
+   hace mucho, feedback sin resolver) — y les agrega fecha/urgencia para que
+   se pueda mirar de un vistazo qué es lo más urgente, no solo cuánto hay.
+   No duplica el botón de "resolver" de cada pestaña: cada tarjeta lleva un
+   "Ir a…" que salta directo a donde se actúa. Se calcula con lo que el
+   sistema ya tiene cargado — sin tablas nuevas ni otra fuente de verdad. */
+function construirActividades({ rolEfectivo, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback }) {
+  const items = [];
+  const hoyStr = new Date().toISOString().slice(0, 10);
+
+  // --- Conteos de inventario: atrasados, por vencer, y (para admin) las
+  // excepciones que alguien pidió y siguen sin respuesta. ---
+  const misConteos = rolEfectivo === "admin" ? inventoryCounts : inventoryCounts.filter(r => r.assignedToId === session.userId);
+  for (const r of misConteos) {
+    if (r.status === "completado") continue;
+    if (r.status === "excepcion_solicitada") {
+      if (rolEfectivo === "admin") {
+        items.push({
+          id: `conteo-excepcion-${r.id}`, tab: "conteos", tabLabel: "Conteos", severidad: "media",
+          titulo: `Excepción pendiente — conteo de ${r.category}`,
+          detalle: `${r.assignedToName} pidió mover la fecha (${r.exception?.reason || "sin motivo detallado"}). Falta aprobarla o rechazarla.`,
+        });
+      }
+      continue;
+    }
+    if (isOverdue(r)) {
+      items.push({
+        id: `conteo-vencido-${r.id}`, tab: "conteos", tabLabel: "Conteos", severidad: "alta",
+        titulo: `Conteo atrasado — ${r.category}`,
+        detalle: `Estaba programado para el ${formatDateOnly(r.dueDate)}, asignado a ${r.assignedToName}.`,
+      });
+    } else {
+      const dias = Math.round((new Date(`${r.dueDate}T00:00:00`) - new Date(`${hoyStr}T00:00:00`)) / 86400000);
+      if (dias >= 0 && dias <= 2) {
+        items.push({
+          id: `conteo-proximo-${r.id}`, tab: "conteos", tabLabel: "Conteos", severidad: "baja",
+          titulo: `Conteo por vencer — ${r.category}`,
+          detalle: (dias === 0 ? "Vence hoy" : `Vence en ${dias} día${dias === 1 ? "" : "s"}`) + `, asignado a ${r.assignedToName}.`,
+        });
+      }
+    }
+  }
+
+  // --- Aprobaciones de precio (solo admin: es quien las resuelve en
+  // Recepción → Aprobaciones). ---
+  if (rolEfectivo === "admin") {
+    for (const p of products) {
+      if (!p.priceApproval) continue;
+      items.push({
+        id: `precio-${p.id}`, tab: "recepcion", tabLabel: "Recepción", severidad: "media",
+        titulo: `Precio por aprobar — ${p.name}`,
+        detalle: `${p.priceApproval.requestedBy} propuso ${formatCLP(p.priceApproval.suggestedPrice)} (costo neto ${formatCLP(p.priceApproval.netCost)}).`,
+      });
+    }
+  }
+
+  // --- Clientes fiado sobre su límite de crédito (solo admin: es quien ve
+  // Fiado). El saldo se calcula igual que en ClientesView: cargos menos
+  // abonos, nunca un contador guardado aparte. ---
+  if (rolEfectivo === "admin") {
+    for (const c of customers) {
+      if (c.creditLimit == null) continue;
+      const saldo = customerLedger.reduce((s, m) => m.customerId === c.id ? s + (m.type === "cargo" ? m.amount : -m.amount) : s, 0);
+      if (saldo > c.creditLimit) {
+        items.push({
+          id: `fiado-${c.id}`, tab: "clientes", tabLabel: "Fiado", severidad: "alta",
+          titulo: `${c.name} superó su límite de fiado`,
+          detalle: `Debe ${formatCLP(saldo)}, sobre el límite de ${formatCLP(c.creditLimit)}.`,
+        });
+      }
+    }
+  }
+
+  // --- La caja lleva demasiadas horas abierta (visible para todos: ambos
+  // roles operan la caja). Bajo el modelo de caja única solo hay una a la
+  // vez; se toma la más antigua por si quedó algo del modelo anterior. ---
+  if (openShifts.length > 0) {
+    const masAntigua = [...openShifts].sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt))[0];
+    const horasAbierta = (Date.now() - new Date(masAntigua.openedAt).getTime()) / 3600000;
+    if (horasAbierta >= 16) {
+      items.push({
+        id: `turno-${masAntigua.id}`, tab: "caja", tabLabel: "Caja", severidad: horasAbierta >= 24 ? "alta" : "media",
+        titulo: "La caja lleva mucho tiempo abierta",
+        detalle: `Abierta desde ${formatDate(masAntigua.openedAt)} (${masAntigua.openedBy}). Si el turno ya terminó, conviene cerrarla.`,
+      });
+    }
+  }
+
+  // --- Feedback de Marcelita sin resolver (solo admin: es quien lo cierra).
+  // No vive en ninguna pestaña —es el ícono flotante de Marcelita—, así que
+  // esta tarjeta no lleva botón "Ir a": se lo dice en el propio texto. ---
+  if (rolEfectivo === "admin") {
+    for (const f of feedback) {
+      if (f.status === "resuelto") continue;
+      items.push({
+        id: `feedback-${f.id}`, tab: null, tabLabel: null, severidad: f.type === "Falla o error" ? "alta" : "baja",
+        titulo: `${f.type} sin resolver — ${f.author}`,
+        detalle: (f.message?.length > 90 ? `${f.message.slice(0, 90)}…` : f.message) + " — revísalo en el ícono de Marcelita, abajo a la derecha.",
+      });
+    }
+  }
+
+  const orden = { alta: 0, media: 1, baja: 2 };
+  return items.sort((a, b) => orden[a.severidad] - orden[b.severidad]);
+}
+
+/* La recomendación de pan de hoy se agrega aparte, dentro de la propia
+   pestaña: a diferencia de las demás señales (que ya viven en memoria en
+   SistemaVentas), depende de bread-holidays/bread-shortages, que hoy solo
+   carga BreadPredictionPanel bajo demanda. Traer esas dos colecciones también
+   en la carga inicial —solo para sumar un aviso más, informativo— no valía la
+   complejidad de tocar ese flujo compartido; por eso este aviso no cuenta en
+   el badge de la pestaña, y aparece recién al abrirla. */
+function useActividadPan({ role, products, sales, movements, purchaseItems, settings }) {
+  const [holidays, setHolidays] = useState(null);
+  const [shortages, setShortages] = useState(null);
+
+  // El panel completo (Análisis → Predicción de pan) es solo para admin, así
+  // que este aviso también lo es: de lo contrario el botón "Ir a Análisis"
+  // llevaría a un vendedor a una pestaña que no puede ver. Ni siquiera se
+  // cargan bread-holidays/bread-shortages si no hace falta.
+  useEffect(() => {
+    if (role !== "admin") return;
+    (async () => {
+      const [h, s] = await Promise.all([
+        loadJSON("bread-holidays", DEFAULT_BREAD_HOLIDAYS),
+        loadJSON("bread-shortages", []),
+      ]);
+      setHolidays(h || DEFAULT_BREAD_HOLIDAYS);
+      setShortages(s || []);
+    })();
+  }, [role]);
+
+  return useMemo(() => {
+    if (role !== "admin" || !holidays) return null;
+    const breadCategory = settings.breadCategory || "PAN";
+    const byDate = buildBreadHistory(products, sales, movements, purchaseItems, breadCategory);
+    const splitR = breadSplitRatio(byDate);
+    const shortageDates = new Set((shortages || []).filter(s => s.morning || s.afternoon).map(s => s.date));
+    const [hoy] = buildBreadRecommendations(byDate, holidays, splitR, shortageDates, 1);
+    if (!hoy || hoy.isClosedToday || !hoy.pred) return null;
+    return {
+      id: "pan-hoy", tab: "analisis", tabLabel: "Análisis", severidad: "baja",
+      titulo: "Recomendación de pan de hoy",
+      detalle: `Según el historial: ~${hoy.evening} para la mañana y ~${hoy.midday} para el mediodía.`,
+    };
+  }, [holidays, shortages, products, sales, movements, purchaseItems, settings]);
+}
+
+function ActividadCard({ item, onIr }) {
+  const tono = item.severidad === "alta" ? C.rust : item.severidad === "media" ? C.brass : C.green;
+  const tonoSoft = item.severidad === "alta" ? C.rustSoft : item.severidad === "media" ? C.brassSoft : C.greenSoft;
+  return (
+    <div className="rounded-xl p-4 flex items-start gap-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <div className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ background: tono }} aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold" style={{ color: C.ink }}>{item.titulo}</div>
+        <div className="text-xs mt-0.5" style={{ color: C.gray }}>{item.detalle}</div>
+      </div>
+      {item.tab && (
+        <button
+          onClick={() => onIr(item.tab)}
+          className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex-shrink-0"
+          style={{ background: tonoSoft, color: tono }}
+        >
+          Ir a {item.tabLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ActividadesView({ session, role, products, inventoryCounts, customers, customerLedger, openShifts, feedback, sales, movements, purchaseItems, settings, setTab }) {
+  const actividades = useMemo(
+    () => construirActividades({ rolEfectivo: role, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback }),
+    [role, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback]
+  );
+  const pan = useActividadPan({ role, products, sales, movements, purchaseItems, settings });
+  const todas = pan ? [...actividades, pan] : actividades;
+
+  const grupos = [
+    { clave: "alta", titulo: "Urgente", items: todas.filter(a => a.severidad === "alta") },
+    { clave: "media", titulo: "Pronto", items: todas.filter(a => a.severidad === "media") },
+    { clave: "baja", titulo: "Para revisar", items: todas.filter(a => a.severidad === "baja") },
+  ].filter(g => g.items.length > 0);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <Bell size={20} style={{ color: C.green }} />
+        <div>
+          <h2 className="text-lg font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Actividades pendientes</h2>
+          <p className="text-xs" style={{ color: C.gray }}>Lo que el sistema detectó que necesita una decisión o una acción — no reemplaza cada pestaña, solo junta los avisos en un lugar.</p>
+        </div>
+      </div>
+
+      {todas.length === 0 ? (
+        <div className="rounded-xl p-8 text-center" style={{ background: "#fff", border: `1.5px dashed ${C.paperLine}` }}>
+          <CheckCircle2 size={28} style={{ color: C.green }} className="mx-auto mb-2" />
+          <p className="text-sm font-medium" style={{ color: C.ink }}>Todo al día — no hay nada pendiente por ahora.</p>
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {grupos.map(g => (
+            <div key={g.clave}>
+              <div className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: C.gray }}>{g.titulo} ({g.items.length})</div>
+              <div className="space-y-2">
+                {g.items.map(item => <ActividadCard key={item.id} item={item} onIr={setTab} />)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
    APP PRINCIPAL
 --------------------------------------------------------- */
+
+/* Ventana del Inventario General (actividad puntual de una sola noche,
+   agosto 2026): desde acá y hasta acá, cualquiera que NO sea administrador
+   ve solo la pantalla de conteo — nada de vender, recepción, etc. — para
+   que nadie mueva stock mientras se cuenta el local entero. Un
+   administrador nunca queda bloqueado: sigue viendo el sistema completo y
+   puede entrar al conteo por su cuenta si quiere ayudar a contar.
+   Horario de Chile continental (UTC-4 en agosto, sin horario de verano). */
+const INVENTARIO_GENERAL_INICIO = new Date("2026-08-23T01:00:00Z"); // 22-ago 21:00 hora Chile
+const INVENTARIO_GENERAL_FIN    = new Date("2026-08-23T13:00:00Z"); // 23-ago 09:00 hora Chile
+
 /* Las pestañas agrupadas por lo que se hace con ellas. Doce opciones sueltas en
    una barra obligaban a arrastrar para encontrar cualquier cosa; agrupadas, el
    menú se lee de una mirada y cada grupo corresponde a un momento del día. */
@@ -10857,6 +12822,8 @@ const GRUPOS = {
       { id: "pos", label: "Vender", icon: ShoppingCart },
       { id: "caja", label: "Caja", icon: Banknote },
       { id: "facturas", label: "Boletas", icon: FileText },
+      { id: "actividades", label: "Actividades", icon: Bell },
+      { id: "inventario-general", label: "Inventario General", icon: ClipboardCheck },
     ]},
     { titulo: "Bodega", items: [
       { id: "inventario", label: "Inventario", icon: Package },
@@ -10870,15 +12837,21 @@ const GRUPOS = {
       { id: "pos", label: "Vender", icon: ShoppingCart },
       { id: "caja", label: "Caja", icon: Banknote },
       { id: "facturas", label: "Boletas", icon: FileText },
+      { id: "inventario-general", label: "Inventario General", icon: ClipboardCheck },
+      { id: "actividades", label: "Actividades", icon: Bell },
     ]},
     { titulo: "Bodega", items: [
       { id: "inventario", label: "Inventario", icon: Package },
       { id: "recepcion", label: "Recepción", icon: Truck },
       { id: "conteos", label: "Conteos", icon: ClipboardList },
       { id: "transformar", label: "Transformar", icon: Blend },
+      { id: "categorias", label: "Categorías", icon: Tags },
     ]},
     { titulo: "Administración", items: [
       { id: "proveedores", label: "Proveedores", icon: Building2 },
+      { id: "clientes", label: "Fiado", icon: CreditCard },
+      { id: "egresos", label: "Egresos", icon: ArrowDownCircle },
+      { id: "sueldos", label: "Sueldos", icon: Users },
       { id: "finanzas", label: "Finanzas", icon: Wallet },
       { id: "analisis", label: "Análisis", icon: BarChart3 },
       { id: "usuarios", label: "Usuarios", icon: User },
@@ -10948,7 +12921,7 @@ function MenuLateral({ grupos, tab, setTab, avisos, settings }) {
                   className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium mb-0.5 text-left"
                   style={activo
                     ? { background: C.green, color: "#fff" }
-                    : { background: "transparent", color: "#cbd5e1" }}
+                    : { background: "transparent", color: "#e8e0d0" }}
                 >
                   <t.icon size={18} className="flex-shrink-0" aria-hidden="true" />
                   <span className="truncate">{t.label}</span>
@@ -10966,6 +12939,15 @@ function MenuLateral({ grupos, tab, setTab, avisos, settings }) {
 /* Barra inferior del teléfono. Se queda fija al alcance del pulgar y respeta el
    área segura de los teléfonos con barra de gestos. */
 function BarraInferior({ items, tab, setTab, avisos, onMas, masActivo }) {
+  // Lo que queda detrás de "Más" (Actividades, Conteos, etc.) no debería
+  // desaparecer del radar solo por no caber en la barra: se suma acá para
+  // que "Más" también avise, en vez de que haya que entrar a mirar.
+  const idsVisibles = new Set(items.map(i => i.id));
+  const avisosOcultos = Object.entries(avisos || {})
+    .filter(([id]) => id !== "__mas" && !idsVisibles.has(id))
+    .reduce((s, [, n]) => s + (n || 0), 0);
+  const avisosConMas = { ...avisos, __mas: avisosOcultos };
+
   const boton = (t, activo, alPulsar, etiqueta, Icono) => (
     <button
       key={t}
@@ -10976,9 +12958,9 @@ function BarraInferior({ items, tab, setTab, avisos, onMas, masActivo }) {
     >
       <span className="relative">
         <Icono size={22} aria-hidden="true" />
-        {!!avisos[t] && (
+        {!!avisosConMas[t] && (
           <span className="absolute -top-1 -right-2 min-w-[16px] h-4 px-1 rounded-full text-[10px] font-semibold flex items-center justify-center"
-                style={{ background: C.rust, color: "#fff" }}>{avisos[t]}</span>
+                style={{ background: C.rust, color: "#fff" }}>{avisosConMas[t]}</span>
         )}
       </span>
       <span className="text-[11px] font-medium leading-none">{etiqueta}</span>
@@ -11045,6 +13027,10 @@ export default function SistemaVentas() {
   const [openShifts, setOpenShifts] = useState([]);
   const [shiftsLog, setShiftsLog] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [customerLedger, setCustomerLedger] = useState([]);
+  const [supplierLedger, setSupplierLedger] = useState([]);
   const [invoicesIndex, setInvoicesIndex] = useState([]);
   const [purchaseItems, setPurchaseItems] = useState([]);
   const [feedback, setFeedback] = useState([]);
@@ -11053,6 +13039,12 @@ export default function SistemaVentas() {
   const [workers, setWorkers] = useState([]);
   const [myAccountOpen, setMyAccountOpen] = useState(false);
   const [menuAbierto, setMenuAbierto] = useState(false);
+  const [adminGateOpen, setAdminGateOpen] = useState(false);
+  // Máscara de "Volver a vender": oculta el panel de Administración sin
+  // tocar la sesión real. Arranca siempre en false — un administrador que
+  // entra normal (o al recuperar la sesión al recargar) ve todo, como hoy;
+  // solo se activa si él mismo elige "Volver a vender".
+  const [modoVenta, setModoVenta] = useState(false);
   const [session, setSession] = useState(null);
   // Mientras no se haya revisado si había una sesión abierta, no se decide
   // qué mostrar: sin esto, quien recarga la página ve parpadear el ingreso.
@@ -11075,6 +13067,9 @@ export default function SistemaVentas() {
     }
     olvidarInstantaneas();
     setSession(null);
+    // La próxima persona que entre parte sin la máscara de "Volver a
+    // vender" puesta — ve el panel completo o no, según su propio rol real.
+    setModoVenta(false);
   }, []);
 
   // Si ya había una sesión abierta (por ejemplo, al recargar la página), se
@@ -11115,14 +13110,18 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        const [s, p, sl, mv, os, sh, sup, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
+        const [s, p, cat, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
+          loadJSON("product-categories", []),
           loadJSON("sales-log", []),
           loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
           loadJSON("shifts-log", []),
           loadJSON("suppliers", []),
+          loadJSON("customers", []),
+          loadJSON("customer-ledger", []),
+          loadJSON("supplier-ledger", []),
           loadJSON("invoices-index", []),
           loadJSON("purchase-items-log", []),
           loadJSON("marcelita-feedback", []),
@@ -11139,8 +13138,9 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setSales(sl); setMovements(mv);
+        setProducts(p); setCategories(cat); setSales(sl); setMovements(mv);
         setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
+        setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
         setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
         setUsers(us); setInventoryCounts(ic); setWorkers(wk);
       } catch (e) {
@@ -11176,11 +13176,15 @@ export default function SistemaVentas() {
       const results = await Promise.allSettled([
         loadJSONStrict("business-settings"),
         loadJSONStrict("products-catalog"),
+        loadJSONStrict("product-categories"),
         loadJSONStrict("sales-log", reciente),
         loadJSONStrict("movements-log", reciente),
         loadJSONStrict("open-shifts"),
         loadJSONStrict("shifts-log", reciente),
         loadJSONStrict("suppliers"),
+        loadJSONStrict("customers"),
+        loadJSONStrict("customer-ledger", reciente),
+        loadJSONStrict("supplier-ledger", reciente),
         loadJSONStrict("invoices-index", reciente),
         loadJSONStrict("purchase-items-log", reciente),
         loadJSONStrict("marcelita-feedback", reciente),
@@ -11193,18 +13197,22 @@ export default function SistemaVentas() {
       // un corte de red momentáneo), esa pieza en particular simplemente se deja
       // como estaba — nunca se reemplaza el catálogo, las ventas, etc. por una
       // lista vacía solo porque la sincronización tuvo un tropiezo puntual.
-      const [s, p, sl, mv, os, sh, sup, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
+      const [s, p, cat, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
       if (s) setSettings(s);
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
       // así una lectura vacía puntual nunca borra lo que ya se veía en pantalla.
       if (p !== undefined) setProducts(prev => (p.length > 0 || prev.length === 0) ? p : prev);
+      if (cat !== undefined) setCategories(prev => (cat.length > 0 || prev.length === 0) ? cat : prev);
       if (os !== undefined) setOpenShifts(prev => (os.length > 0 || prev.length === 0) ? os : prev);
       if (sup !== undefined) setSuppliers(prev => (sup.length > 0 || prev.length === 0) ? sup : prev);
+      if (cu !== undefined) setCustomers(prev => (cu.length > 0 || prev.length === 0) ? cu : prev);
       if (us !== undefined) setUsers(prev => (us.length > 0 || prev.length === 0) ? us : prev);
       if (wk !== undefined) setWorkers(prev => (wk.length > 0 || prev.length === 0) ? wk : prev);
       if (sl !== undefined) setSales(prev => mergeById(prev, sl));
       if (mv !== undefined) setMovements(prev => mergeById(prev, mv));
+      if (cl !== undefined) setCustomerLedger(prev => mergeById(prev, cl));
+      if (spl !== undefined) setSupplierLedger(prev => mergeById(prev, spl));
       if (sh !== undefined) setShiftsLog(prev => mergeById(prev, sh));
       if (invIdx !== undefined) setInvoicesIndex(prev => mergeById(prev, invIdx));
       if (pItems !== undefined) setPurchaseItems(prev => mergeById(prev, pItems));
@@ -11233,19 +13241,47 @@ export default function SistemaVentas() {
     return (
       <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <style>{FONTS}</style>
-        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={setSession} toast={toast} />
+        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSession(s); }} toast={toast} />
         <Toast toast={toastData} />
       </div>
     );
   }
 
-  const tabs = TABS[session.role];
+  // "Volver a vender" no cierra la sesión real (sigue siendo la de un
+  // administrador): solo activa esta máscara, que hace que el resto de la
+  // pantalla — pestañas, menú, badges — se vea y se comporte exactamente
+  // como para un vendedor cualquiera. Así, en la caja compartida, quien use
+  // el computador después de un administrador no hereda de regalo el menú
+  // completo de Administración con solo tocar "Más". Volver a entrar (ver
+  // el botón de la barra superior) SÍ vuelve a pedir usuario y contraseña
+  // cada vez (AdminGateModal): que la sesión de fondo sea de un
+  // administrador no prueba que quien está ahora frente al teclado sea esa
+  // misma persona — es una caja compartida entre varios vendedores.
+  const rolEfectivo = (session.role === "admin" && modoVenta) ? "vendedor" : session.role;
+
+  // Ventana del Inventario General: mientras dure, quien no sea
+  // administrador ve SOLO esta pantalla — nada de menú, nada de otras
+  // pestañas — para que nadie mueva stock mientras el local se cuenta
+  // entero. Un administrador nunca queda bloqueado.
+  const ahora = new Date();
+  const inventarioGeneralActivo = ahora >= INVENTARIO_GENERAL_INICIO && ahora < INVENTARIO_GENERAL_FIN;
+  if (inventarioGeneralActivo && rolEfectivo !== "admin") {
+    return (
+      <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <style>{FONTS}</style>
+        <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} onLogout={cerrarSesion} />
+        <Toast toast={toastData} />
+      </div>
+    );
+  }
+
+  const tabs = TABS[rolEfectivo];
   const pendingApprovals = products.filter(p => p.priceApproval).length;
-  const pendingCounts = session.role === "admin"
+  const pendingCounts = rolEfectivo === "admin"
     ? inventoryCounts.filter(r => r.status === "excepcion_solicitada").length
     : inventoryCounts.filter(r => r.assignedToId === session.userId && r.status === "pendiente").length;
 
-  const allData = { settings, products, sales, movements, openShifts, shiftsLog, suppliers, invoicesIndex, purchaseItems, feedback, users, inventoryCounts, workers };
+  const allData = { settings, products, categories, sales, movements, openShifts, shiftsLog, suppliers, customers, customerLedger, supplierLedger, invoicesIndex, purchaseItems, feedback, users, inventoryCounts, workers };
 
   async function restoreAll(archivo) {
     // Los respaldos del sistema anterior traen identificadores propios
@@ -11262,24 +13298,38 @@ export default function SistemaVentas() {
     }
 
     const keys = {
-      settings: "business-settings", products: "products-catalog", sales: "sales-log", movements: "movements-log",
+      settings: "business-settings", products: "products-catalog", categories: "product-categories",
+      sales: "sales-log", movements: "movements-log",
       openShifts: "open-shifts", shiftsLog: "shifts-log", suppliers: "suppliers", invoicesIndex: "invoices-index",
       purchaseItems: "purchase-items-log", feedback: "marcelita-feedback", users: "users",
       inventoryCounts: "inventory-counts", workers: "workers",
+      customers: "customers", customerLedger: "customer-ledger",
+      supplierLedger: "supplier-ledger",
     };
     const setters = {
-      settings: setSettings, products: setProducts, sales: setSales, movements: setMovements,
+      settings: setSettings, products: setProducts, categories: setCategories, sales: setSales, movements: setMovements,
       openShifts: setOpenShifts, shiftsLog: setShiftsLog, suppliers: setSuppliers, invoicesIndex: setInvoicesIndex,
       purchaseItems: setPurchaseItems, feedback: setFeedback, users: setUsers,
       inventoryCounts: setInventoryCounts, workers: setWorkers,
+      customers: setCustomers, customerLedger: setCustomerLedger,
+      supplierLedger: setSupplierLedger,
     };
     // Orden obligatorio: cada cosa depende de la anterior. Las boletas apuntan a
     // quien vendió, las líneas de compra al documento, los sueldos al trabajador.
     // Antes se guardaba todo en paralelo, cuando no había relaciones que romper.
+    // "categories" va antes que "products" porque un producto apunta a su
+    // sección (categoria_id); si el catálogo llegara primero, cada producto
+    // dispararía su propia creación-al-vuelo de la sección en vez de usar la
+    // que trae el respaldo. "customers" va antes que "sales" porque una venta
+    // fiada apunta a un cliente; "customerLedger" va después de "sales" porque
+    // un cargo de fiado apunta a la venta que lo originó (migración 0012).
+    // "supplierLedger" va después de "invoicesIndex" por la misma razón: un
+    // cargo a crédito (migración 0014) apunta al documento de compra que lo
+    // originó.
     const orden = [
-      "workers", "suppliers", "settings", "products", "openShifts",
+      "workers", "suppliers", "customers", "settings", "categories", "products", "openShifts",
       "invoicesIndex", "sales", "purchaseItems", "movements", "shiftsLog",
-      "inventoryCounts", "feedback",
+      "customerLedger", "supplierLedger", "inventoryCounts", "feedback",
     ];
     for (const field of orden) {
       if (data[field] === undefined) continue;
@@ -11305,17 +13355,25 @@ export default function SistemaVentas() {
     // las guarda Supabase Auth y nunca salen en el archivo.
   }
 
-  const grupos = GRUPOS[session.role];
+  const grupos = GRUPOS[rolEfectivo];
+  // No incluye la recomendación de pan (ver useActividadPan): esa depende de
+  // bread-holidays/bread-shortages, que no están cargados acá — el badge de
+  // la pestaña cuenta las demás señales, y el aviso de pan aparece recién al
+  // abrirla.
+  const actividadesPendientes = construirActividades({
+    rolEfectivo, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback,
+  }).length;
   const avisos = {
-    recepcion: session.role === "admin" ? pendingApprovals : 0,
+    recepcion: rolEfectivo === "admin" ? pendingApprovals : 0,
     conteos: pendingCounts,
+    actividades: actividadesPendientes,
   };
   const principales = tabs.filter(t => MOVIL_PRINCIPALES.includes(t.id));
   const seccionActual = tabs.find(t => t.id === tab);
   const enBarraInferior = MOVIL_PRINCIPALES.includes(tab);
 
   return (
-    <div className="min-h-dvh" style={{ background: C.paper, fontFamily: "'Inter', system-ui, -apple-system, sans-serif", color: C.ink }}>
+    <div className="min-h-dvh" style={{ background: C.paper, fontFamily: "'IBM Plex Sans', system-ui, -apple-system, sans-serif", color: C.ink }}>
       <style>{FONTS}</style>
       <style>{`
         @keyframes fadeUp { from { opacity:0; transform: translate(-50%,8px);} to {opacity:1; transform: translate(-50%,0);} }
@@ -11356,12 +13414,43 @@ export default function SistemaVentas() {
                 {seccionActual?.label || settings.businessName}
               </h1>
               <div className="text-xs truncate" style={{ color: C.gray }}>
-                {session.name} · {session.role === "admin" ? "Administrador" : "Vendedor"}
+                {session.name} · {rolEfectivo === "admin" ? "Administrador" : "Vendedor"}
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 flex-shrink-0">
+            {/* Dos casos, según lo que se ve AHORA en pantalla (rolEfectivo),
+                no según quién es realmente la sesión de fondo (session.role):
+                 1) Se ve como vendedor (ya sea porque la sesión real lo es, o
+                    porque un administrador puso "Volver a vender") → siempre
+                    pide entrar con cuenta de administrador de verdad
+                    (AdminGateModal). Es una caja compartida: que la sesión de
+                    fondo ya sea de un administrador no prueba que quien está
+                    ahora frente al teclado sea esa misma persona, así que
+                    "Volver a vender" exige repetir el login cada vez que se
+                    quiere volver a Administración — nunca lo salta.
+                 2) Se ve el panel de Administración → "Volver a vender"
+                    activa la máscara y no toca la sesión ni la caja abierta. */}
+            {rolEfectivo !== "admin" ? (
+              <button
+                onClick={() => setAdminGateOpen(true)}
+                className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
+                style={{ background: C.paperDark, color: C.ink }}
+              >
+                <Lock size={16} aria-hidden="true" />
+                <span className="hidden sm:inline">Panel de administración</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => { setModoVenta(true); setTab("pos"); }}
+                className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
+                style={{ background: C.greenSoft, color: C.greenDark }}
+              >
+                <ShoppingCart size={16} aria-hidden="true" />
+                <span className="hidden sm:inline">Volver a vender</span>
+              </button>
+            )}
             <button
               onClick={() => setMyAccountOpen(true)}
               className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
@@ -11384,18 +13473,24 @@ export default function SistemaVentas() {
         {/* El espacio de abajo deja respirar el contenido por encima de la
             barra inferior del teléfono, que va fija. */}
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} session={session} toast={toast} role={session.role} />}
-        {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={session.role} toast={toast} />}
+        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} />}
+        {tab === "actividades" && <ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} />}
+        {tab === "inventario-general" && <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} />}
+        {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} />}
         {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
-        {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} settings={settings} role={session.role} session={session} toast={toast} />}
-        {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} role={session.role} session={session} toast={toast} />}
-        {tab === "proveedores" && session.role === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} products={products} role={session.role} toast={toast} />}
-        {tab === "finanzas" && session.role === "admin" && <FinanceView sales={sales} movements={movements} setMovements={setMovements} products={products} workers={workers} setWorkers={setWorkers} session={session} toast={toast} />}
-        {tab === "analisis" && session.role === "admin" && <AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
-        {tab === "ajustes" && session.role === "admin" && <SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} />}
-        {tab === "usuarios" && session.role === "admin" && <UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} />}
-        {tab === "transformar" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={session.role} toast={toast} />}
-        {tab === "conteos" && <InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={session.role} toast={toast} />}
+        {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
+        {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
+        {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} toast={toast} />}
+        {tab === "proveedores" && rolEfectivo === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} />}
+        {tab === "clientes" && rolEfectivo === "admin" && <ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} />}
+        {tab === "egresos" && rolEfectivo === "admin" && <ExpensesView movements={movements} setMovements={setMovements} toast={toast} />}
+        {tab === "sueldos" && rolEfectivo === "admin" && <PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} />}
+        {tab === "finanzas" && rolEfectivo === "admin" && <FinanceView sales={sales} movements={movements} products={products} />}
+        {tab === "analisis" && rolEfectivo === "admin" && <AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
+        {tab === "ajustes" && rolEfectivo === "admin" && <SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} />}
+        {tab === "usuarios" && rolEfectivo === "admin" && <UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} />}
+        {tab === "transformar" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={rolEfectivo} toast={toast} />}
+        {tab === "conteos" && <InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={rolEfectivo} toast={toast} />}
         </main>
       </div>
 
@@ -11410,8 +13505,22 @@ export default function SistemaVentas() {
         />
       )}
 
-      <MarcelitaWidget products={products} feedback={feedback} setFeedback={setFeedback} session={session} role={session.role} toast={toast} users={users} counts={inventoryCounts} setCounts={setInventoryCounts} />
+      <MarcelitaWidget products={products} feedback={feedback} setFeedback={setFeedback} session={session} role={rolEfectivo} toast={toast} users={users} counts={inventoryCounts} setCounts={setInventoryCounts} />
       {myAccountOpen && <MyAccountModal session={session} users={users} setUsers={setUsers} onClose={() => setMyAccountOpen(false)} toast={toast} />}
+      {adminGateOpen && (
+        <AdminGateModal
+          toast={toast}
+          onClose={() => setAdminGateOpen(false)}
+          onEnter={(perfilAdmin) => {
+            setAdminGateOpen(false);
+            // null significa que el inicio de sesión terminó cerrando la
+            // sesión (contraseña de una cuenta que no era admin): se vuelve
+            // a la pantalla de ingreso, igual que un "Salir" cualquiera.
+            setSession(perfilAdmin);
+            if (perfilAdmin) { setModoVenta(false); setTab("pos"); }
+          }}
+        />
+      )}
       <Toast toast={toastData} />
     </div>
   );

@@ -76,6 +76,13 @@ export async function POST(request) {
     model: cuerpo.model || MODELO,
     max_tokens: cuerpo.max_tokens || 4096,
     messages: cuerpo.messages || [],
+    // Antes se armaba esta petición sin "system" ni "tools": la ruta recibía
+    // ambos del cliente pero nunca los reenviaba a Claude. Marcelita mandaba su
+    // instrucción de sistema y la herramienta de búsqueda web en la petición,
+    // pero la API nunca las veía — por eso respondía sin saber que podía
+    // buscar en internet ni que tenía el contexto del inventario.
+    ...(cuerpo.system ? { system: cuerpo.system } : {}),
+    ...(Array.isArray(cuerpo.tools) && cuerpo.tools.length > 0 ? { tools: cuerpo.tools } : {}),
   };
 
   // Reintentos ante saturación del servicio: el mismo comportamiento que tenía
