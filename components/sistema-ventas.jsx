@@ -12234,7 +12234,55 @@ function Cifra({ etiqueta, valor, tono }) {
   );
 }
 
-function InvoicesView({ sales, settings }) {
+/* El distintivo "EN VIVO" de la venta del día.
+
+   Las ventas ya llegaban solas: el ciclo de sincronización trae cada quince
+   segundos lo que se vendió en la otra caja. Lo que faltaba era decirlo — sin
+   nada que lo indique, uno mira el total, no lo ve moverse y no sabe si está
+   congelado o si de verdad no se ha vendido nada.
+
+   Cuenta su propio tiempo con un intervalo propio y lee la marca de la última
+   sincronización desde una referencia, no desde el estado: si el "hace 3
+   segundos" viviera en el estado de la aplicación, cada tictac volvería a
+   dibujar las doce pestañas y los cinco mil productos, una vez por segundo.
+
+   Solo aparece cuando el período que se está mirando incluye hoy. En agosto
+   del año pasado no hay nada en vivo que mostrar. */
+function IndicadorEnVivo({ marcaRef, onRefrescar }) {
+  const [, tictac] = useState(0);
+  const [refrescando, setRefrescando] = useState(false);
+
+  useEffect(() => {
+    const t = setInterval(() => tictac(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const hace = Math.max(0, Math.round((Date.now() - (marcaRef?.current || Date.now())) / 1000));
+  const cuando = hace < 5 ? "recién" : hace < 60 ? `hace ${hace}s` : `hace ${Math.floor(hace / 60)} min`;
+
+  async function ahora() {
+    if (refrescando || !onRefrescar) return;
+    setRefrescando(true);
+    try { await onRefrescar(); } finally { setRefrescando(false); }
+  }
+
+  return (
+    <button
+      type="button" onClick={ahora} disabled={refrescando}
+      className="flex items-center gap-1.5 px-3 py-2 rounded-lg"
+      style={{ background: C.rustSoft }}
+      title="Las ventas se actualizan solas cada 15 segundos. Toca para traerlas ahora mismo."
+    >
+      {refrescando
+        ? <Loader2 size={12} className="animate-spin" style={{ color: C.rust }} />
+        : <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: C.rust }} />}
+      <span className="text-[10px] font-bold tracking-wide" style={{ color: C.rust }}>EN VIVO</span>
+      <span className="text-[10px]" style={{ color: C.rust, opacity: 0.75 }}>{refrescando ? "actualizando…" : cuando}</span>
+    </button>
+  );
+}
+
+function InvoicesView({ sales, settings, marcaSincroRef, onRefrescar }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [viewing, setViewing] = useState(null);
@@ -12294,6 +12342,10 @@ function InvoicesView({ sales, settings }) {
     if (siguiente) setClave(siguiente);
   };
 
+  /* ¿El tramo que se está mirando incluye este momento? Solo entonces tiene
+     sentido decir que está en vivo. */
+  const esAhora = claveActual === clavePeriodo(new Date().toISOString(), periodo);
+
   return (
     <div>
       {/* Día, mes o año. El período manda sobre todo lo de abajo: el resumen,
@@ -12319,6 +12371,7 @@ function InvoicesView({ sales, settings }) {
             className="p-2.5 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}
             title="Período siguiente"><ChevronRight size={16} /></button>
         </div>
+        {esAhora && <IndicadorEnVivo marcaRef={marcaSincroRef} onRefrescar={onRefrescar} />}
         <Btn variant="ghost" icon={FileText} onClick={() => setFiscalOpen(true)}>SII</Btn>
       </div>
 
@@ -15176,6 +15229,14 @@ function HojaDeSecciones({ grupos, tab, setTab, avisos, onClose }) {
 
 export default function SistemaVentas() {
   const [loading, setLoading] = useState(true);
+
+  /* Cuándo terminó la última sincronización, y cómo pedir una ahora. Van en
+     referencias y no en el estado a propósito: el distintivo "en vivo" de
+     Ventas necesita leer la marca cada segundo, y si eso viviera en el estado
+     cada tictac volvería a dibujar la aplicación entera. */
+  const marcaSincroRef = useRef(Date.now());
+  const refrescarRef = useRef(null);
+  const refrescarAhora = useCallback(() => refrescarRef.current?.(), []);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [products, setProducts] = useState([]);
   const [sales, setSales] = useState([]);
@@ -15384,7 +15445,11 @@ export default function SistemaVentas() {
       if (pItems !== undefined) setPurchaseItems(prev => mergeById(prev, pItems));
       if (fb !== undefined) setFeedback(prev => mergeById(prev, fb));
       if (ic !== undefined) setInventoryCounts(prev => mergeById(prev, ic));
+      marcaSincroRef.current = Date.now();
     }
+    // Se deja a mano para que una pantalla pueda pedir el ciclo ahora mismo
+    // (el botón EN VIVO de Ventas) en vez de esperar los quince segundos.
+    refrescarRef.current = refresh;
     // Cada 15 segundos en vez de 5: ahora cada ciclo son consultas a una base de
     // datos, no lecturas locales, y 15 segundos siguen siendo imperceptibles
     // para quien está en otra caja.
@@ -15651,7 +15716,7 @@ export default function SistemaVentas() {
         {tab === "actividades" && <ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} />}
         {tab === "inventario-general" && <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} />}
         {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} />}
-        {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
+        {tab === "facturas" && <InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} />}
         {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "consumos" && rolEfectivo === "admin" && <ConsumosView toast={toast} />}
