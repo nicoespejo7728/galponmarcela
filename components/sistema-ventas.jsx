@@ -5470,12 +5470,12 @@ function BarraDeConexion({ enCola, onSubir }) {
     <div className="px-4 sm:px-6 py-2 flex items-center gap-2 flex-wrap" style={{ background: tono.fondo }}>
       <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: tono.punto }} />
       <span className="text-xs font-semibold" style={{ color: tono.texto }}>
-        {!enLinea ? "Sin internet" : "Ventas por subir"}
+        {!enLinea ? "Sin internet" : "Falta subir"}
       </span>
       <span className="text-xs" style={{ color: tono.texto, opacity: 0.85 }}>
         {pendiente
-          ? `${enCola} venta${enCola === 1 ? "" : "s"} guardada${enCola === 1 ? "" : "s"} en este computador, esperando subir.`
-          : "Puedes seguir cobrando: las ventas quedan guardadas acá y se suben solas cuando vuelva."}
+          ? `${enCola} ${enCola === 1 ? "operación guardada" : "operaciones guardadas"} en este computador, esperando subir.`
+          : "Puedes seguir cobrando: lo que hagas queda guardado acá y se sube solo cuando vuelva."}
       </span>
       {pendiente && (
         <button onClick={subir} disabled={subiendo}
@@ -6353,7 +6353,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
        —porque se cayó el internet— se sigue con lo que hay en pantalla, que a
        lo más está unos segundos atrasado. Esperar a que el navegador se rinda
        solo eran catorce segundos de pantalla muerta con el cliente al frente. */
-    const [latestSettings, latestSales, latestMovements, latestProducts] = await Promise.race([
+    const sinRed = typeof navigator !== "undefined" && navigator.onLine === false;
+    const [latestSettings, latestSales, latestMovements, latestProducts] = sinRed
+      ? [settings, sales, movements, products]
+      : await Promise.race([
       Promise.all([
         loadJSON("business-settings", settings),
         loadJSON("sales-log", sales),
@@ -6559,7 +6562,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     }));
     const costTotal = items.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
 
-    await registrarConsumo({ perfilId: persona.id, motivo: reason, items });
+    const registro = await registrarConsumo({ perfilId: persona.id, motivo: reason, items });
 
     // La base ya descontó el stock dentro de la transacción; acá solo se
     // refleja en pantalla para que el catálogo no muestre el saldo de antes
@@ -6576,7 +6579,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       responsible: persona.name, reason, items, costTotal,
     });
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false); setConsumptionOpen(false);
-    toast(`Consumo registrado a nombre de ${persona.name}`, "success");
+    onCambioEnCola?.();
+    toast(registro.subida
+      ? `Consumo registrado a nombre de ${persona.name}`
+      : `Sin internet — el consumo de ${persona.name} quedó guardado y se sube solo cuando vuelva`, "success");
   }
 
   // Sin caja abierta no se puede empezar a vender: una venta que ocurriera
@@ -15403,12 +15409,38 @@ export default function SistemaVentas() {
     (async () => {
       try {
         const sb = obtenerCliente();
+        /* getSession() lee de lo que el navegador guardó, no de la red: eso
+           sobrevive a quedarse sin internet. Lo que no sobrevivía era el paso
+           siguiente —preguntarle a la base quién es— y sin eso el sistema caía
+           a la pantalla de ingreso aunque el programa hubiera abierto bien. */
         const { data: { session: sesionSupabase } } = await sb.auth.getSession();
         if (!sesionSupabase?.user) return;
-        await cargarCatalogos({ forzar: true });
-        const { data: perfil } = await sb
-          .from("perfil").select("id,nombre,usuario,rol,activo")
-          .eq("id", sesionSupabase.user.id).maybeSingle();
+        try { await cargarCatalogos({ forzar: true }); } catch (e) { /* sin conexión */ }
+
+        const idUsuario = sesionSupabase.user.id;
+        let perfil = null;
+        // Si el navegador ya sabe que no hay red, ni se pregunta.
+        if (navigator.onLine !== false) {
+          try {
+            const { data } = await Promise.race([
+              sb.from("perfil").select("id,nombre,usuario,rol,activo").eq("id", idUsuario).maybeSingle(),
+              new Promise(listo => setTimeout(() => listo({ data: null }), 2500)),
+            ]);
+            perfil = data;
+          } catch (e) { /* sin conexión: se resuelve más abajo */ }
+        }
+
+        if (!perfil) {
+          // Con la copia que este computador guardó la última vez que sí pudo
+          // leer. Es la misma gente y los mismos permisos de hace un rato.
+          const guardados = await loadJSON("users", []);
+          const suyo = (guardados || []).find(u => u.id === idUsuario);
+          if (suyo) {
+            perfil = { id: suyo.id, nombre: suyo.name, usuario: suyo.username, rol: suyo.role, activo: true };
+            console.info("[sesión] recuperada sin conexión, con lo que recuerda este equipo");
+          }
+        }
+
         if (perfil?.activo) {
           fijarUsuarioActual(perfil.id);
           setSession({ role: perfil.rol, name: perfil.nombre, username: perfil.usuario, userId: perfil.id });
@@ -15562,13 +15594,13 @@ export default function SistemaVentas() {
         setEnCola(r.quedan);
         if (r.subidas > 0) {
           toast(r.subidas === 1
-            ? "Se subió la venta que había quedado esperando internet"
-            : `Se subieron ${r.subidas} ventas que estaban esperando internet`, "success");
+            ? "Se subió lo que había quedado esperando internet"
+            : `Se subieron ${r.subidas} operaciones que estaban esperando internet`, "success");
           await refresh();
         }
         if (r.trabadas.length) {
           console.error("[pendientes] no se pudieron subir", r.trabadas);
-          toast(`${r.trabadas.length} venta(s) no se pudieron subir. Revisa la consola.`, "error");
+          toast(`${r.trabadas.length} operación(es) no se pudieron subir. Revisa la consola.`, "error");
         }
       } catch (e) {
         console.error("[pendientes] fallo al vaciar la cola", e);

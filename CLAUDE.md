@@ -63,6 +63,33 @@ pestaña vas a trabajar.
    Un mock vacío no detecta choques con lo que ya está en la base: eso ya pasó
    dos veces.
 
+## Sin internet
+
+El almacén está en un barrio y la conexión se corta. Desde agosto de 2026 el
+sistema sigue funcionando sin ella:
+
+- El programa queda instalado en el equipo (`public/sw.js`), así que abre
+  aunque no haya red — en menos de un segundo.
+- Los datos para operar quedan en IndexedDB (`lib/datos/copia-local.js`), así
+  que abre **con** el catálogo, los precios y la gente.
+- Las ventas, los consumos y los egresos se guardan en una cola
+  (`lib/datos/pendientes.js`) y suben solos al volver la conexión.
+- Cada equipo recuerda una huella del PIN de quien ya se identificó en él
+  (`lib/datos/pin-local.js`), porque sin identificar a nadie no hay venta.
+
+Dos reglas que no se rompen:
+
+- **Todo lo que entre a la cola tiene que poder reintentarse sin duplicar.**
+  El identificador lo pone el navegador y la escritura tolera la llave
+  repetida. Una operación que no cumpla eso no puede encolarse.
+- **El stock se mueve por el kárdex, que es una resta, no un valor absoluto.**
+  Por eso dos cajas pueden vender a ciegas y el stock queda bien al subir.
+  Escribir `producto.stock` directo rompería justamente esto.
+
+`navigator.onLine` en `false` es una certeza y se usa para saltarse la red;
+en `true` no promete nada (un módem prendido sin internet se ve "en línea"),
+así que ahí mandan los plazos de espera.
+
 ## Base de datos
 
 Las migraciones viven en `supabase/migrations/`, numeradas y en orden. Una
