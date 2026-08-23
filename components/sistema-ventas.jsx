@@ -41,6 +41,7 @@ import {
   ROLLOS, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
+import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
 import { normalizarRespaldo } from "@/lib/datos/respaldo";
 import { subirLogo, quitarLogo } from "@/lib/datos/logo";
 import {
@@ -10635,6 +10636,10 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
     () => productos.filter(p => esCodigoDelAlmacen(p.barcode)), [productos]);
   const porAsignar = useMemo(
     () => productos.filter(p => !esCodigoDelAlmacen(p.barcode)), [productos]);
+  /* Para la hoja de la caja se mira el catálogo entero y no esta lista: acá
+     solo están los que tienen stock hoy. */
+  const paraLaCaja = useMemo(
+    () => (todos || []).filter(p => esCodigoDelAlmacen(p.barcode)), [todos]);
 
   const aImprimir = useMemo(
     () => conCodigo
@@ -10723,6 +10728,18 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
     ventana.document.close();
   }
 
+  /* La hoja carta va con TODOS los que tengan código interno, no con los que
+     estén marcados arriba: es un listado de consulta para la caja, no una
+     tanda de impresión. Uno que quedó en cero de stock igual tiene que estar —
+     el día que llegue de nuevo, el código ya existe y la hoja lo tiene. */
+  function imprimirHojaCarta() {
+    if (paraLaCaja.length === 0) return toast("Todavía no hay productos con código interno", "error");
+    const ventana = window.open("", "_blank", "width=900,height=700");
+    if (!ventana) return toast("El navegador bloqueó la ventana de impresión. Permítela y vuelve a intentar.", "error");
+    ventana.document.write(hojaCartaDeCodigos(paraLaCaja, settings));
+    ventana.document.close();
+  }
+
   const fijar = (id, v) => setCuantas(c => ({ ...c, [id]: v }));
 
   if (productos.length === 0) {
@@ -10791,7 +10808,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
                 onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 0])))}>Ninguna</Btn>
               <Btn size="sm" variant="ghost"
                 onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 1])))}>Una de cada uno</Btn>
-              <Btn size="sm" variant="ghost" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Hoja para imprimir</Btn>
+              <Btn size="sm" variant="ghost" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Etiquetas sueltas</Btn>
               <Btn size="sm" icon={trabajando ? Loader2 : Download} disabled={trabajando || aImprimir.length === 0}
                 onClick={descargarImagenes}>
                 {trabajando ? "Generando…" : "Etiquetas para la Niimbot"}
@@ -10809,6 +10826,24 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
         </div>
       )}
 
+      {paraLaCaja.length > 0 && (
+        <div className="rounded-xl p-4 mb-3 flex items-center justify-between gap-3 flex-wrap"
+             style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold" style={{ color: C.ink }}>
+              Hoja carta para la caja · {paraLaCaja.length} producto{paraLaCaja.length === 1 ? "" : "s"}
+            </div>
+            <p className="text-xs mt-0.5 max-w-lg" style={{ color: C.gray }}>
+              Los {paraLaCaja.length} productos con código interno en {hojasQueSalen(paraLaCaja.length)} hoja(s) tamaño
+              carta, {CARTA_POR_HOJA} por hoja y en orden alfabético, con el código bien grande. Se imprime en la
+              impresora de siempre y se deja en una carpeta al lado de la registradora: cuando algo no tiene la etiqueta
+              pegada, se le pasa la pistola a la hoja. Imprímela al 100%, sin "ajustar a la página".
+            </p>
+          </div>
+          <Btn size="sm" variant="ghost" icon={Printer} onClick={imprimirHojaCarta}>Hoja carta</Btn>
+        </div>
+      )}
+
       <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="divide-y" style={{ borderColor: C.paperLine }}>
           {productos.slice(0, 200).map(p => {
@@ -10819,6 +10854,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
                   <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
                   <span className="block text-xs font-mono" style={{ color: listo ? C.greenDark : C.gray }}>
                     {listo ? p.barcode : "sin código todavía"} · stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"}
+                    {" · "}{p.category || "sin sección"}
                   </span>
                 </span>
                 {listo ? (
@@ -11065,7 +11101,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
 
   const SECCIONES = [
     { id: "duplicados", label: "Duplicados", cuenta: duplicadosVisibles.length },
-    { id: "sinCodigo", label: "Etiquetas", cuenta: sinCodigo.length },
+    { id: "sinCodigo", label: "Códigos internos", cuenta: sinCodigo.length },
     { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
     { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
   ];
@@ -11076,7 +11112,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
 
   const AYUDA = {
     duplicados: "El mismo producto quedó en dos fichas —la cámara del teléfono leyó mal el código— y el stock está en la que la pistola no encuentra. Elige cuál se conserva: el stock se junta ahí y las otras se desactivan, sin perder su historial.",
-    sinCodigo: "No traen código en el envase, así que la pistola no los encuentra y hay que buscarlos a mano con el cliente esperando. Acá se les crea uno propio y se imprime la etiqueta. Si el producto sí tiene código impreso, es mejor escanear ese: usa \"Completar\".",
+    sinCodigo: "No traen código en el envase, así que la pistola no los encuentra y hay que buscarlos a mano con el cliente esperando. Acá se les crea uno propio y se imprime la etiqueta. El código interno no toca la sección del producto: un fideo con código nuestro sigue estando en ABARROTES. Si el producto sí tiene código impreso, es mejor escanear ese: usa \"Completar\".",
     sinPrecio: "Tienen stock y no se pueden cobrar hasta que alguien les ponga precio.",
     sinSeccion: "Sin sección no aparecen agrupados en Inventario ni en el catálogo rápido.",
   };
