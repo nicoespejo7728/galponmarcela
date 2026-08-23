@@ -196,9 +196,18 @@ function friendlyError(err, fallback) {
   if (low.includes("json") || low.includes("unexpected token")) {
     return fallback || "No se pudo interpretar la respuesta. Intenta de nuevo.";
   }
-  // Si el mensaje ya viene en español (los mensajes propios del sistema lo están),
-  // se deja tal cual — solo se traducen los que vienen crudos desde afuera.
-  if (raw && /[áéíóúñ¿¡]/i.test(raw)) return raw;
+  // Errores técnicos crudos de Postgres/PostgREST (códigos, nombres de
+  // columnas, jerga de restricciones): mejor el genérico que ese texto.
+  if (/pgrst\d|violates|duplicate key|constraint|relation .* does not exist|permission denied for|jwt |P0001|23505|23503|42501/i.test(raw)) {
+    return fallback || "Ocurrió un problema inesperado. Intenta de nuevo.";
+  }
+  // Cualquier otro mensaje se muestra tal cual. Los que arma el propio
+  // sistema (como los de las funciones de la base: "Solo un administrador
+  // puede...", "El PIN debe tener...") ya vienen en español y listos para
+  // mostrarse — antes esto se detectaba buscando tildes o "ñ", pero varios
+  // de esos mensajes no llevan ninguna letra acentuada y terminaban
+  // tapados por el genérico sin que nadie entendiera la razón real.
+  if (raw) return raw;
   return fallback || "Ocurrió un problema inesperado. Intenta de nuevo.";
 }
 function isSameDay(iso, ref) { return dayKey(iso) === dayKey(ref); }
