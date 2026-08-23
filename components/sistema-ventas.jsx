@@ -13944,7 +13944,7 @@ const GRUPOS = {
       { id: "conteos", label: "Conteos", icon: ClipboardList },
       { id: "transformar", label: "Transformar", icon: Blend },
       { id: "categorias", label: "Categorías", icon: Tags },
-      { id: "revisar", label: "Revisar", icon: ClipboardCheck },
+      { id: "revisar", label: "Productos", icon: ClipboardCheck },
     ]},
     { titulo: "Administración", items: [
       { id: "proveedores", label: "Proveedores", icon: Building2 },
