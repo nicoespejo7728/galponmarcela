@@ -7380,9 +7380,48 @@ function ApprovalsPanel({ products, setProducts, toast }) {
   );
 }
 
+/* Productos que llegan por kilo y se venden por unidad.
+
+   El pan fresco es el caso: el proveedor entrega sacos y cobra por kilo, pero
+   en el mesón se vende marraqueta por marraqueta. Quien recibe tiene delante
+   la boleta del panadero —kilos y precio por kilo— y hasta ahora tenía que
+   hacer la multiplicación en la cabeza para anotar unidades, con el costo
+   unitario a ojo.
+
+   La conversión vive en el producto (`unitsPerKg`, doce panes por kilo) y se
+   aplica en el borde, igual que los gramos en la caja: se escribe en kilos y
+   por dentro se sigue guardando en unidades, que es como se vende, como se
+   cuenta el stock y como lo espera todo lo demás. */
+function unidadesPorKilo(producto) {
+  const n = Number(producto?.unitsPerKg) || 0;
+  return producto && producto.unitType !== "peso" && n > 0 ? n : 0;
+}
+
+/* Kilos con hasta tres decimales, sin ceros de relleno: 3 y no "3,000". */
+function enKilos(unidades, porKilo) {
+  if (!porKilo) return "";
+  const kg = (Number(unidades) || 0) / porKilo;
+  return kg === 0 ? "" : String(Number(kg.toFixed(3)));
+}
+
 function DraftRow({ item, onChange, onRemove, role, products, categories = [] }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
   const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
+  const porKilo = unidadesPorKilo(currentProduct);
+  // Por omisión se recibe en kilos cuando el producto lo permite: es como
+  // viene la boleta. El botón queda al lado por si un día llegan sueltas.
+  const [enKilo, setEnKilo] = useState(porKilo > 0);
+  const porKiloActivo = porKilo > 0 && enKilo;
+  const costoPorKilo = porKiloActivo ? (Number(item.netCost) || 0) * porKilo : 0;
+
+  function cambiarKilos(texto) {
+    const kg = Number(texto) || 0;
+    onChange({ ...item, qty: Math.round(kg * porKilo) });
+  }
+  function cambiarCostoPorKilo(texto) {
+    const porKg = Number(texto) || 0;
+    onChange({ ...item, netCost: porKg ? porKg / porKilo : 0 });
+  }
   const sortedCategories = useMemo(
     () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
     [categories]
@@ -7440,18 +7479,43 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
       </div>
       <Badge tone={item.isNew ? "brass" : "green"}>{item.isNew ? "nuevo" : "existente"}</Badge>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>{item.unitType === "peso" ? "recibes (g)" : "recibes"}</span>
-        {/* En gramos, como en la caja: por dentro se sigue guardando en kilos. */}
+        <span className="text-[10px]" style={{ color: C.gray }}>
+          {porKiloActivo ? "recibes (kg)" : item.unitType === "peso" ? "recibes (g)" : "recibes"}
+        </span>
+        {/* En gramos o en kilos, según lo que diga la boleta: por dentro se
+            sigue guardando en kilos (peso) o en unidades (pan). */}
         <input
-          type="number" inputMode="numeric" step="1"
-          value={item.unitType === "peso" ? enGramos(item.qty) : item.qty}
-          onChange={e => onChange({ ...item, qty: item.unitType === "peso" ? desdeGramos(e.target.value) : e.target.value })}
+          type="number" inputMode="decimal" step={porKiloActivo ? "0.001" : "1"}
+          value={porKiloActivo ? enKilos(item.qty, porKilo) : item.unitType === "peso" ? enGramos(item.qty) : item.qty}
+          onChange={e => porKiloActivo
+            ? cambiarKilos(e.target.value)
+            : onChange({ ...item, qty: item.unitType === "peso" ? desdeGramos(e.target.value) : e.target.value })}
           className={`${inputCls} font-mono w-20 text-center`} style={inputStyle()} />
+        {porKiloActivo && (
+          <span className="text-[10px] mt-0.5" style={{ color: C.greenDark }}>
+            = {Number(item.qty) || 0} un.
+          </span>
+        )}
       </div>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>costo neto</span>
-        <input type="number" value={item.netCost} onChange={e => onChange({ ...item, netCost: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()} />
+        <span className="text-[10px]" style={{ color: C.gray }}>{porKiloActivo ? "costo por kilo" : "costo neto"}</span>
+        <input type="number" step={porKiloActivo ? "1" : "any"}
+          value={porKiloActivo ? (costoPorKilo || "") : item.netCost}
+          onChange={e => porKiloActivo ? cambiarCostoPorKilo(e.target.value) : onChange({ ...item, netCost: e.target.value })}
+          className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()} />
+        {porKiloActivo && (
+          <span className="text-[10px] mt-0.5" style={{ color: C.gray }}>
+            {formatCLP(Number(item.netCost) || 0)} c/u
+          </span>
+        )}
       </div>
+      {porKilo > 0 && (
+        <button type="button" onClick={() => setEnKilo(v => !v)}
+          className="text-[10px] underline self-end pb-1" style={{ color: C.gray }}
+          title={`Este producto se compra por kilo — ${porKilo} unidades por kilo`}>
+          {enKilo ? "anotar por unidad" : "anotar por kilo"}
+        </button>
+      )}
       <div className="flex flex-col items-center">
         {/* Quien recibe la mercadería es quien ve la boleta del proveedor y
             sabe a cuánto conviene venderlo. Puede escribir el precio; si no es
@@ -7525,7 +7589,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   }, [nameQuery, products]);
 
   function addExistingDraft(p) {
-    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: 1, netCost: p.cost || 0, unitType: p.unitType === "peso" ? "peso" : "unidad" }]);
+    // Los que llegan por kilo parten en un kilo, no en una unidad: así el
+    // casillero muestra "1" y no "0,083" apenas se agrega la línea.
+    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: unidadesPorKilo(p) || 1, netCost: p.cost || 0, unitType: p.unitType === "peso" ? "peso" : "unidad" }]);
     setNameQuery("");
   }
   function addNewDraft() {
@@ -7556,7 +7622,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         return copy;
       }
       if (found) {
-        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: 1, netCost: found.cost || 0, unitType: found.unitType === "peso" ? "peso" : "unidad" }];
+        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: unidadesPorKilo(found) || 1, netCost: found.cost || 0, unitType: found.unitType === "peso" ? "peso" : "unidad" }];
       }
       return [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: clean, name: "", category: "", qty: 1, netCost: 0, unitType: "unidad" }];
     });
