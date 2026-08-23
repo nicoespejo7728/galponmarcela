@@ -6080,7 +6080,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         const already = existing ? existing.qty : 0;
         if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
         if (existing) return prev.map(i => i.productId === product.id ? { ...i, qty: Number((i.qty + addQty).toFixed(3)) } : i);
-        return [...prev, { productId: product.id, barcode: product.barcode, name: product.name, price: product.price, cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso" }];
+        return [...prev, { productId: product.id, barcode: product.barcode, name: product.name, price: product.price, cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso", category: product.category }];
       }
       if (existing) {
         if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
@@ -6099,6 +6099,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         productId: product.id, barcode: product.barcode, name: product.name,
         price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
         cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
+        category: product.category,
         isOldPriceLine: !!oldPriceInfo,
         maxOldPriceQty: oldPriceInfo?.qty ?? 0,
         newPrice: oldPriceInfo?.newPrice ?? product.price,
@@ -6166,7 +6167,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   }
   function removeItem(productId) { setCart(prev => prev.filter(i => i.productId !== productId)); }
 
-  const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  /* Precio que se cobra de verdad: el del producto más el recargo si la venta
+     va con tarjeta. Se recalcula solo al cambiar la forma de pago. */
+  const precioCobrado = (i) => i.price + recargoPorTarjeta(i, payment);
+  const total = cart.reduce((s, i) => s + precioCobrado(i) * i.qty, 0);
+  const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, payment) * i.qty, 0);
   // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
   // imprime la misma máquina—; en efectivo o transferencia queda a criterio
   // de quien cobra, así que ahí sí se pregunta.
@@ -6205,7 +6210,14 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       customer: payment === "Fiado" ? selectedCustomer.name : null,
       customerId: payment === "Fiado" ? selectedCustomer.id : null,
       items: cart.map(i => {
-        const base = { productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty, price: i.price, cost: i.cost, unitType: i.unitType };
+        // Se guarda el precio que se cobró —con recargo si lo hubo— para que la
+        // boleta, la caja y los informes cuadren con lo que pagó el cliente.
+        const recargo = recargoPorTarjeta(i, payment);
+        const base = {
+          productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty,
+          price: i.price + recargo, cost: i.cost, unitType: i.unitType,
+          ...(recargo ? { cardSurcharge: recargo } : {}),
+        };
         if (!i.isOldPriceLine) return base;
         // Se cobró TODO al precio anterior para no mezclar dos precios en la
         // misma boleta. Si la cantidad superó lo que en rigor quedaba a ese
@@ -6516,7 +6528,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                         {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
                       </div>
                     ) : (
-                      <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(i.price)} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                      <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(precioCobrado(i))} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
                     )}
                   </div>
                   <button onClick={() => removeItem(i.productId)} aria-label={`Quitar ${i.name}`} className="flex items-center justify-center min-w-[44px] rounded-lg" style={{ color: C.rust }}><Trash2 size={18} /></button>
@@ -6555,7 +6567,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       <button onClick={() => changeQty(i.productId, 1)} aria-label="Agregar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Plus size={17} /></button>
                     </div>
                   )}
-                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(i.price * i.qty)}</span>
+                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(precioCobrado(i) * i.qty)}</span>
                 </div>
               </div>
             ))}
@@ -6565,6 +6577,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               la misma ficha de la boleta. Antes vivía en un recuadro aparte y
               parecía otra pantalla. */}
           <div className="p-4 space-y-3" style={{ background: C.ink }}>
+            {recargoTotal > 0 && (
+              <div className="rounded-lg px-3 py-2 text-xs" style={{ background: C.inkSoft, color: C.brass }}>
+                Incluye {formatCLP(recargoTotal)} de recargo por pagar cigarros con tarjeta
+                ({formatCLP(RECARGO_TARJETA)} por unidad).
+              </div>
+            )}
             <div className="flex items-baseline justify-between gap-2">
               <span className="text-sm" style={{ color: C.grayLight }}>Total a pagar</span>
               <span className="text-3xl font-bold font-mono leading-none" style={{ color: "#ffffff" }}>{formatCLP(total)}</span>
@@ -8786,6 +8804,27 @@ function findLastPriceDrop(priceHistory) {
    nuevo — así la próxima compra no se aprovecha de una rebaja que en
    realidad era para el lote que llegó después. No se aplica a productos por
    peso: ahí no tiene sentido repartir un mismo pesaje entre dos precios. */
+/* Recargo por pagar los cigarros con tarjeta.
+
+   El margen del tabaco es mínimo y la comisión de la tarjeta se lo come
+   entero, así que el almacén cobra quinientos pesos más por cajetilla cuando
+   no se paga en efectivo. Va por cada cajetilla, no por boleta.
+
+   Se aplica al momento de cobrar y no al agregar al carrito: la forma de pago
+   se elige al final, y si el cliente cambia de opinión el carrito tiene que
+   cambiar con él. */
+const RECARGO_TARJETA = 500;
+const SECCIONES_CON_RECARGO = ["cigarros", "cigarrillos"];
+
+function pagaConTarjeta(formaDePago) {
+  return formaDePago === "Débito" || formaDePago === "Crédito";
+}
+
+function recargoPorTarjeta(item, formaDePago) {
+  if (!pagaConTarjeta(formaDePago)) return 0;
+  return SECCIONES_CON_RECARGO.includes(normalize(item?.category || "")) ? RECARGO_TARJETA : 0;
+}
+
 /* ¿Es pan? La sección la define el negocio en Ajustes; por omisión, "PAN". */
 function esPan(product, breadCategory) {
   const seccion = breadCategory || "PAN";
