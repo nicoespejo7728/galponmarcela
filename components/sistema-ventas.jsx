@@ -5077,6 +5077,29 @@ function buildLegacyImportV2(existingProducts, existingSuppliers) {
 // más. Así, si la sincronización periódica llega justo mientras este mismo
 // dispositivo está guardando algo nuevo, ese registro no desaparece de la
 // vista mientras se termina de escribir — se completa solo en el siguiente ciclo.
+/* El catálogo llega por partes: la sincronización pide solo los productos que
+   cambiaron desde el ciclo anterior. Se fusionan sobre los que ya están en
+   pantalla —y los que vienen marcados como dados de baja se sacan—, en vez de
+   reemplazar la lista entera cada quince segundos.
+
+   Se reordena por nombre solo cuando algo cambió, para conservar el orden con
+   el que venía el catálogo completo. */
+function fusionarProductos(previos, llegados) {
+  if (!Array.isArray(llegados) || llegados.length === 0) return previos;
+  if (!Array.isArray(previos) || previos.length === 0) {
+    return llegados.filter(p => !p?.__eliminado);
+  }
+  const porId = new Map(previos.map(p => [p.id, p]));
+  for (const p of llegados) {
+    if (!p?.id) continue;
+    if (p.__eliminado) porId.delete(p.id);
+    else porId.set(p.id, p);
+  }
+  return Array.from(porId.values()).sort(
+    (a, b) => String(a?.name || "").localeCompare(String(b?.name || ""), "es")
+  );
+}
+
 function mergeById(local, fetched) {
   const map = new Map();
   fetched.forEach(item => map.set(item.id, item));
@@ -13461,7 +13484,9 @@ export default function SistemaVentas() {
       const reciente = { reciente: true };
       const results = await Promise.allSettled([
         loadJSONStrict("business-settings"),
-        loadJSONStrict("products-catalog"),
+        // El catálogo también va acotado: la capa de datos devuelve solo los
+        // productos que cambiaron desde la última vuelta, y acá se fusionan.
+        loadJSONStrict("products-catalog", reciente),
         loadJSONStrict("product-categories"),
         loadJSONStrict("sales-log", reciente),
         loadJSONStrict("movements-log", reciente),
@@ -13475,7 +13500,7 @@ export default function SistemaVentas() {
         loadJSONStrict("purchase-items-log", reciente),
         loadJSONStrict("marcelita-feedback", reciente),
         loadJSONStrict("users"),
-        loadJSONStrict("inventory-counts"),
+        loadJSONStrict("inventory-counts", reciente),
         loadJSONStrict("workers"),
       ]);
       if (cancelled) return;
@@ -13488,7 +13513,7 @@ export default function SistemaVentas() {
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
       // así una lectura vacía puntual nunca borra lo que ya se veía en pantalla.
-      if (p !== undefined) setProducts(prev => (p.length > 0 || prev.length === 0) ? p : prev);
+      if (p !== undefined) setProducts(prev => fusionarProductos(prev, p));
       if (cat !== undefined) setCategories(prev => (cat.length > 0 || prev.length === 0) ? cat : prev);
       if (os !== undefined) setOpenShifts(prev => (os.length > 0 || prev.length === 0) ? os : prev);
       if (sup !== undefined) setSuppliers(prev => (sup.length > 0 || prev.length === 0) ? sup : prev);
