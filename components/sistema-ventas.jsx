@@ -9971,22 +9971,62 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
    CONSUMOS — lo que se lleva el equipo
 --------------------------------------------------------- */
 /* La otra mitad del consumo interno (migración 0020). En el mesón cada
-   persona registra lo suyo con su PIN y sigue atendiendo; acá se revisa
-   junto, que es cuando de verdad importa: cuánto le toca descontar a cada
-   uno en la liquidación.
+   persona registra lo suyo con su PIN y sigue atendiendo; acá se revisa.
 
-   Se agrupa por persona y no por consumo porque esa es la pregunta que se
-   hace al pagar los sueldos. El detalle de qué se llevó está a un clic, para
-   cuando alguien reclama. El descuento se hace fuera del sistema, así que el
-   botón solo anota que ya se hizo — no mueve plata ni escribe un egreso: el
-   consumo se le descuenta a la persona, no lo pierde el negocio. */
+   Son dos preguntas distintas y por eso la pantalla está partida en dos:
+
+   - Arriba, cuánto se está llevando el equipo. Eso se mira por día —que es
+     como pasa— y se resume por semana o por mes para ver si la cosa se está
+     yendo de las manos. Es una estadística: incluye todo, esté descontado o
+     no.
+
+   - Abajo, la cuenta abierta con cada persona: cuánto se le lleva acumulado y
+     todavía no se le descuenta del sueldo. Ese saldo no depende del período
+     que se esté mirando arriba — es la deuda completa, venga de este mes o
+     del anterior.
+
+   El descuento en sí se hace fuera del sistema, en la liquidación. Acá solo
+   se anota que ya se hizo, para que ese consumo deje de aparecer en la cuenta
+   y no se le cobre dos veces a la misma persona. */
+
+const PERIODOS_CONSUMO = [
+  { id: "dia", label: "Día" },
+  { id: "semana", label: "Semana" },
+  { id: "mes", label: "Mes" },
+];
+
+/* El lunes de la semana a la que pertenece una fecha, como "2026-08-17". La
+   semana del almacén parte el lunes, no el domingo. */
+function lunesDe(iso) {
+  const d = new Date(dayKey(iso) + "T12:00:00");
+  const dow = (d.getDay() + 6) % 7;          // 0 = lunes
+  d.setDate(d.getDate() - dow);
+  return dayKey(d.toISOString());
+}
+
+function clavePeriodoConsumo(iso, periodo) {
+  if (periodo === "semana") return lunesDe(iso);
+  return clavePeriodo(iso, periodo === "mes" ? "mes" : "dia");
+}
+
+function nombrePeriodoConsumo(clave, periodo) {
+  if (periodo !== "semana") return nombrePeriodo(clave, periodo === "mes" ? "mes" : "dia");
+  const [a, m, d] = String(clave).split("-").map(Number);
+  const lun = new Date(a, m - 1, d);
+  const dom = new Date(a, m - 1, d + 6);
+  const corto = (x) => x.toLocaleDateString("es-CL", { day: "numeric", month: "short" });
+  return `${corto(lun)} al ${corto(dom)}`;
+}
+
 function ConsumosView({ toast }) {
   const [consumos, setConsumos] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState("");
-  const [verSaldados, setVerSaldados] = useState(false);
-  const [abierto, setAbierto] = useState(null);     // id de persona con el detalle desplegado
+  const [periodo, setPeriodo] = useState("dia");
+  const [clave, setClave] = useState(null);
+  const [abierto, setAbierto] = useState(null);     // id de persona con su detalle desplegado
   const [trabajando, setTrabajando] = useState(null);
+  const [verSaldados, setVerSaldados] = useState(false);
 
   const releer = useCallback(async () => {
     setCargando(true);
@@ -10002,26 +10042,83 @@ function ConsumosView({ toast }) {
 
   useEffect(() => { releer(); }, [releer]);
 
-  const porPersona = useMemo(() => {
+  const quienEs = (c) => c.personId || c.person;
+
+  /* ---- Arriba: la estadística del período ---- */
+
+  const periodosConConsumo = useMemo(() => {
+    const vistos = new Set();
+    for (const c of consumos) vistos.add(clavePeriodoConsumo(c.date, periodo));
+    return Array.from(vistos).sort((a, b) => b.localeCompare(a));
+  }, [consumos, periodo]);
+
+  const claveActual = clave && periodosConConsumo.includes(clave)
+    ? clave
+    : (periodosConConsumo[0] ?? clavePeriodoConsumo(new Date().toISOString(), periodo));
+
+  const delPeriodo = useMemo(
+    () => consumos.filter(c => clavePeriodoConsumo(c.date, periodo) === claveActual),
+    [consumos, periodo, claveActual]
+  );
+
+  const totalPeriodo = delPeriodo.reduce((s, c) => s + c.costTotal, 0);
+
+  const personasDelPeriodo = useMemo(() => {
+    const mapa = new Map();
+    for (const c of delPeriodo) {
+      const k = quienEs(c);
+      const g = mapa.get(k) || { id: k, nombre: c.person, total: 0, cuantos: 0 };
+      g.total += c.costTotal;
+      g.cuantos += 1;
+      mapa.set(k, g);
+    }
+    return Array.from(mapa.values()).sort((a, b) => b.total - a.total);
+  }, [delPeriodo]);
+
+  /* Dentro de una semana o un mes, el día a día: es donde se ve si fue un día
+     suelto o si viene pasando todos los días. */
+  const desglose = useMemo(() => {
+    if (periodo === "dia") return [];
+    const mapa = new Map();
+    for (const c of delPeriodo) {
+      const k = dayKey(c.date);
+      mapa.set(k, (mapa.get(k) || 0) + c.costTotal);
+    }
+    const filas = Array.from(mapa.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const techo = Math.max(1, ...filas.map(([, v]) => v));
+    return filas.map(([k, v]) => ({ clave: k, total: v, parte: v / techo }));
+  }, [delPeriodo, periodo]);
+
+  const posicion = periodosConConsumo.indexOf(claveActual);
+  const irA = (paso) => {
+    const siguiente = periodosConConsumo[posicion + paso];
+    if (siguiente) setClave(siguiente);
+  };
+
+  /* ---- Abajo: la cuenta abierta con cada persona ---- */
+
+  /* A propósito mira TODOS los consumos y no los del período: lo que se le
+     debe descontar a alguien no se borra porque uno esté mirando otra semana. */
+  const cuentas = useMemo(() => {
     const mapa = new Map();
     for (const c of consumos) {
       if (!verSaldados && c.settledAt) continue;
-      const clave = c.personId || c.person;
-      const grupo = mapa.get(clave) || { id: clave, nombre: c.person, lista: [] };
-      grupo.lista.push(c);
-      mapa.set(clave, grupo);
+      const k = quienEs(c);
+      const g = mapa.get(k) || { id: k, nombre: c.person, lista: [] };
+      g.lista.push(c);
+      mapa.set(k, g);
     }
     return Array.from(mapa.values())
       .map(g => ({
         ...g,
         pendiente: g.lista.filter(c => !c.settledAt).reduce((s, c) => s + c.costTotal, 0),
         pendientes: g.lista.filter(c => !c.settledAt).length,
-        total: g.lista.reduce((s, c) => s + c.costTotal, 0),
       }))
+      .filter(g => verSaldados || g.pendientes > 0)
       .sort((a, b) => b.pendiente - a.pendiente || a.nombre.localeCompare(b.nombre, "es"));
   }, [consumos, verSaldados]);
 
-  const totalPendiente = porPersona.reduce((s, g) => s + g.pendiente, 0);
+  const totalPendiente = cuentas.reduce((s, g) => s + g.pendiente, 0);
 
   async function saldar(grupo) {
     const ids = grupo.lista.filter(c => !c.settledAt).map(c => c.id);
@@ -10033,10 +10130,10 @@ function ConsumosView({ toast }) {
       // Si otro administrador marcó los mismos hace un rato, el número no
       // calza: mejor decirlo que dar por hecho que se marcaron todos.
       toast(cuantos === ids.length
-        ? `Listo — ${cuantos} consumo(s) de ${grupo.nombre} quedaron como descontados`
-        : `Se marcaron ${cuantos} de ${ids.length}: el resto ya estaba descontado`, "success");
+        ? `Cuenta de ${grupo.nombre} al día — ${cuantos} consumo(s) quedaron saldados`
+        : `Se saldaron ${cuantos} de ${ids.length}: el resto ya estaba saldado`, "success");
     } catch (e) {
-      toast(friendlyError(e, "No se pudo marcar el descuento"), "error");
+      toast(friendlyError(e, "No se pudo saldar la cuenta"), "error");
     } finally {
       setTrabajando(null);
     }
@@ -10050,93 +10147,210 @@ function ConsumosView({ toast }) {
 
   return (
     <div className="max-w-3xl mx-auto">
-      <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+      <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
         <div>
           <h2 className="font-semibold text-lg" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Consumos del equipo</h2>
           <p className="text-xs mt-0.5" style={{ color: C.gray }}>
-            Lo que cada persona se llevó y registró con su PIN en el mesón. El valor es a costo.
+            Lo que cada persona se llevó y registró con su PIN en el mesón. Los valores son a costo.
           </p>
         </div>
-        <div className="flex gap-2">
-          <Btn size="sm" variant="ghost" icon={RefreshCw} onClick={releer}>Actualizar</Btn>
-          <Btn size="sm" variant="ghost" onClick={() => setVerSaldados(v => !v)}>
-            {verSaldados ? "Solo pendientes" : "Ver también lo descontado"}
-          </Btn>
-        </div>
+        <Btn size="sm" variant="ghost" icon={RefreshCw} onClick={releer}>Actualizar</Btn>
       </div>
 
       {error && (
         <div className="rounded-lg p-3 mb-4 text-sm" style={{ background: C.rustSoft, color: C.rust }}>{error}</div>
       )}
 
-      {totalPendiente > 0 && (
-        <div className="rounded-xl p-4 mb-4 flex items-center justify-between" style={{ background: C.brassSoft }}>
-          <span className="text-sm font-semibold" style={{ color: C.brassText }}>Pendiente de descontar en total</span>
-          <span className="font-mono text-lg font-bold" style={{ color: C.brassText }}>{formatCLP(totalPendiente)}</span>
-        </div>
-      )}
-
-      {porPersona.length === 0 ? (
-        <EmptyState icon={Coffee} title="No hay consumos que revisar"
+      {consumos.length === 0 ? (
+        <EmptyState icon={Coffee} title="Todavía no hay consumos"
           hint="Cuando alguien del equipo se lleve algo y lo registre con su PIN, aparece acá." />
-      ) : porPersona.map(grupo => (
-        <div key={grupo.id} className="rounded-xl mb-3 overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div className="p-4 flex items-center justify-between gap-3 flex-wrap">
-            <div className="min-w-0">
-              <div className="font-semibold text-sm" style={{ color: C.ink }}>{grupo.nombre}</div>
-              <div className="text-xs mt-0.5" style={{ color: C.gray }}>
-                {grupo.pendientes > 0
-                  ? `${grupo.pendientes} consumo(s) sin descontar`
-                  : "Todo descontado"}
-                {" · "}
-                <button className="underline" style={{ color: C.gray }} onClick={() => setAbierto(a => a === grupo.id ? null : grupo.id)}>
-                  {abierto === grupo.id ? "ocultar detalle" : "ver detalle"}
+      ) : (
+        <>
+          {/* Cuánto se llevó el equipo, en el tramo que se quiera mirar. */}
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex gap-1 p-1 rounded-lg" style={{ background: C.paperDark }}>
+              {PERIODOS_CONSUMO.map(x => (
+                <button key={x.id} onClick={() => { setPeriodo(x.id); setClave(null); }}
+                  className="px-4 py-2 rounded-md text-sm font-semibold"
+                  style={periodo === x.id ? { background: C.green, color: "#fff" } : { color: C.inkSoft }}>
+                  {x.label}
                 </button>
-              </div>
+              ))}
             </div>
-            <div className="flex items-center gap-3">
-              <div className="text-right">
-                <div className="font-mono text-base font-bold" style={{ color: grupo.pendiente > 0 ? C.rust : C.gray }}>{formatCLP(grupo.pendiente)}</div>
-                <div className="text-xs" style={{ color: C.grayLight }}>a descontar</div>
-              </div>
-              {grupo.pendientes > 0 && (
-                <Btn size="sm" icon={trabajando === grupo.id ? Loader2 : Check} disabled={trabajando === grupo.id}
-                  onClick={() => saldar(grupo)}>
-                  {trabajando === grupo.id ? "Marcando…" : "Ya se descontó"}
-                </Btn>
-              )}
+            <div className="flex items-center gap-1">
+              <button onClick={() => irA(1)} disabled={posicion < 0 || posicion >= periodosConConsumo.length - 1}
+                className="p-2.5 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}
+                title="Período anterior"><ChevronLeft size={16} /></button>
+              <span className="text-sm font-semibold px-2 min-w-[8rem] text-center" style={{ color: C.ink }}>
+                {nombrePeriodoConsumo(claveActual, periodo)}
+              </span>
+              <button onClick={() => irA(-1)} disabled={posicion <= 0}
+                className="p-2.5 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}
+                title="Período siguiente"><ChevronRight size={16} /></button>
             </div>
           </div>
 
-          {abierto === grupo.id && (
-            <div className="px-4 pb-4 space-y-3" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
-              {grupo.lista.map(c => (
-                <div key={c.id} className="pt-3">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-xs" style={{ color: C.gray }}>
-                      {formatDate(c.date)}{c.reason ? ` · ${c.reason}` : ""}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      {c.settledAt
-                        ? <Badge tone="gray">Descontado {c.settledBy ? `por ${c.settledBy}` : ""}</Badge>
-                        : <Badge tone="brass">Pendiente</Badge>}
-                      <span className="font-mono text-xs font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
-                    </div>
+          <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+            <div className="grid gap-2 grid-cols-2 mb-3">
+              <Cifra etiqueta="Se llevaron" valor={formatCLP(totalPeriodo)} tono={C.rust} />
+              <Cifra etiqueta="Veces" valor={delPeriodo.length} />
+            </div>
+            {personasDelPeriodo.length === 0 ? (
+              <p className="text-sm text-center py-3" style={{ color: C.gray }}>Nadie se llevó nada en este período.</p>
+            ) : (
+              <div>
+                <div className="text-[11px] mb-1" style={{ color: C.gray }}>Quién</div>
+                {personasDelPeriodo.map(g => (
+                  <div key={g.id} className="flex justify-between text-sm py-0.5">
+                    <span className="truncate" style={{ color: C.inkSoft }}>{g.nombre}</span>
+                    <span className="font-mono flex-shrink-0" style={{ color: C.ink }}>{formatCLP(g.total)}</span>
                   </div>
-                  <ul className="mt-1 text-xs space-y-0.5">
-                    {c.items.map((i, idx) => (
-                      <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
-                        <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
-                        <span>{formatCLP(i.cost * i.qty)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+                ))}
+              </div>
+            )}
+          </div>
+
+          {desglose.length > 0 && (
+            <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="text-[11px] mb-2" style={{ color: C.gray }}>Día por día — toca uno para verlo</div>
+              <div className="space-y-1">
+                {desglose.map(f => (
+                  <button key={f.clave} onClick={() => { setPeriodo("dia"); setClave(f.clave); }}
+                    className="w-full flex items-center gap-2 text-left hover:bg-black/[.02] rounded px-1 py-1">
+                    <span className="text-xs w-20 sm:w-24 flex-shrink-0 truncate" style={{ color: C.gray }}>{etiquetaDia(f.clave)}</span>
+                    <span className="flex-1 h-2.5 rounded-full overflow-hidden min-w-0" style={{ background: C.paperDark }}>
+                      <span className="block h-full rounded-full" style={{ width: `${Math.max(2, f.parte * 100)}%`, background: C.rust }} />
+                    </span>
+                    <span className="text-xs font-mono flex-shrink-0 w-20 text-right" style={{ color: C.ink }}>{formatCLP(f.total)}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
-        </div>
-      ))}
+
+          {/* En el día, el detalle de cada consumo: qué se llevó cada uno. */}
+          {periodo === "dia" && delPeriodo.length > 0 && (
+            <div className="rounded-xl overflow-hidden mb-5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="px-4 pt-3 text-[11px]" style={{ color: C.gray }}>Uno por uno</div>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {delPeriodo.map(c => (
+                  <div key={c.id} className="px-4 py-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-sm font-medium" style={{ color: C.ink }}>{c.person}</span>
+                      <div className="flex items-center gap-2">
+                        {c.settledAt
+                          ? <Badge tone="gray">Ya se le descontó</Badge>
+                          : <Badge tone="brass">Por descontar</Badge>}
+                        <span className="font-mono text-sm font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
+                      </div>
+                    </div>
+                    <div className="text-xs" style={{ color: C.gray }}>
+                      {formatDate(c.date)}{c.reason ? ` · ${c.reason}` : ""}
+                    </div>
+                    <ul className="mt-1 text-xs space-y-0.5">
+                      {c.items.map((i, idx) => (
+                        <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
+                          <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
+                          <span>{formatCLP(i.cost * i.qty)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* La cuenta de cada uno. Va aparte y no depende del período de
+              arriba: es la deuda completa, venga de cuando venga. */}
+          <div className="flex items-end justify-between gap-3 mb-2 flex-wrap">
+            <div>
+              <h3 className="font-semibold text-base" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+                Cuenta de cada uno
+              </h3>
+              <p className="text-xs mt-0.5 max-w-lg" style={{ color: C.gray }}>
+                Todo lo que se ha llevado cada persona y todavía no se le descuenta del sueldo, de
+                cualquier fecha. El descuento se hace en la liquidación, fuera del sistema; cuando lo
+                hagas, marca la cuenta acá para que ese consumo deje de sumar y no se le cobre dos veces.
+              </p>
+            </div>
+            <Btn size="sm" variant="ghost" onClick={() => setVerSaldados(v => !v)}>
+              {verSaldados ? "Solo lo pendiente" : "Ver también lo ya descontado"}
+            </Btn>
+          </div>
+
+          {totalPendiente > 0 && (
+            <div className="rounded-xl p-4 mb-3 flex items-center justify-between" style={{ background: C.brassSoft }}>
+              <span className="text-sm font-semibold" style={{ color: C.brassText }}>Por descontar en total</span>
+              <span className="font-mono text-lg font-bold" style={{ color: C.brassText }}>{formatCLP(totalPendiente)}</span>
+            </div>
+          )}
+
+          {cuentas.length === 0 ? (
+            <div className="rounded-xl p-6 text-center" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <p className="text-sm" style={{ color: C.gray }}>Nadie debe nada — todo lo consumido ya está descontado.</p>
+            </div>
+          ) : cuentas.map(grupo => (
+            <div key={grupo.id} className="rounded-xl mb-3 overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="p-4 flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm" style={{ color: C.ink }}>{grupo.nombre}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.gray }}>
+                    {grupo.pendientes > 0
+                      ? `${grupo.pendientes} consumo(s) sin descontar`
+                      : "Todo descontado"}
+                    {" · "}
+                    <button className="underline" style={{ color: C.gray }} onClick={() => setAbierto(a => a === grupo.id ? null : grupo.id)}>
+                      {abierto === grupo.id ? "ocultar detalle" : "ver detalle"}
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <div className="font-mono text-base font-bold" style={{ color: grupo.pendiente > 0 ? C.rust : C.gray }}>{formatCLP(grupo.pendiente)}</div>
+                    <div className="text-xs" style={{ color: C.grayLight }}>por descontar</div>
+                  </div>
+                  {grupo.pendientes > 0 && (
+                    <Btn size="sm" icon={trabajando === grupo.id ? Loader2 : Check} disabled={trabajando === grupo.id}
+                      onClick={() => saldar(grupo)}
+                      title={`Marca los ${formatCLP(grupo.pendiente)} como ya descontados del sueldo de ${grupo.nombre}`}>
+                      {trabajando === grupo.id ? "Marcando…" : "Ya se lo descontamos"}
+                    </Btn>
+                  )}
+                </div>
+              </div>
+
+              {abierto === grupo.id && (
+                <div className="px-4 pb-4 space-y-3" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+                  {grupo.lista.map(c => (
+                    <div key={c.id} className="pt-3">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-xs" style={{ color: C.gray }}>
+                          {formatDate(c.date)}{c.reason ? ` · ${c.reason}` : ""}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {c.settledAt
+                            ? <Badge tone="gray">Ya se le descontó {c.settledBy ? `· ${c.settledBy}` : ""}</Badge>
+                            : <Badge tone="brass">Por descontar</Badge>}
+                          <span className="font-mono text-xs font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
+                        </div>
+                      </div>
+                      <ul className="mt-1 text-xs space-y-0.5">
+                        {c.items.map((i, idx) => (
+                          <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
+                            <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
+                            <span>{formatCLP(i.cost * i.qty)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
