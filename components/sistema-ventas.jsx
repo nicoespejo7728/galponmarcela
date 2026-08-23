@@ -8818,6 +8818,24 @@ function findLastPriceDrop(priceHistory) {
    nuevo — así la próxima compra no se aprovecha de una rebaja que en
    realidad era para el lote que llegó después. No se aplica a productos por
    peso: ahí no tiene sentido repartir un mismo pesaje entre dos precios. */
+/* Marcha blanca.
+
+   Mientras el sistema se pone en marcha, cualquiera del equipo puede corregir
+   cantidades y precios en Inventario: el catálogo viene del Excel y del
+   conteo, y quien encuentra el error es quien está frente a la repisa. Pasada
+   la fecha vuelve el régimen normal —solo administradores— sin que nadie
+   tenga que acordarse de apagarlo.
+
+   La fecha vive en Ajustes y no en el código, para poder estirarla o cortarla
+   sin esperar un despliegue. */
+function enMarchaBlanca(settings) {
+  const hasta = settings?.marchaBlancaHasta;
+  if (!hasta) return false;
+  // Se compara por día, no por instante: la marcha blanca dura todo el día
+  // de su fecha de término.
+  return new Date(`${String(hasta).slice(0, 10)}T23:59:59`) >= new Date();
+}
+
 /* Recargo por pagar los cigarros con tarjeta.
 
    El margen del tabaco es mínimo y la comisión de la tarjeta se lo come
@@ -10781,7 +10799,7 @@ function CorregirNombreModal({ product, onClose, onSave }) {
   );
 }
 
-function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename }) {
+function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename, puedeAjustar }) {
   const [page, setPage] = useState(0);
   const pageSize = 40;
   useEffect(() => { setPage(0); }, [items]);
@@ -10828,27 +10846,28 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
                 <td className="px-4 py-2.5 text-right">
                   <Badge tone={p.stock <= p.minStock ? "rust" : "green"}>{p.stock}{p.unitType === "peso" ? " kg" : ""}</Badge>
                 </td>
-                {role === "admin" && (
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1.5">
+                {/* Durante la marcha blanca todo el equipo puede reponer stock y
+                    corregir precios; eliminar sigue siendo solo del
+                    administrador, porque saca el producto del catálogo. */}
+                <td className="px-4 py-2.5">
+                  <div className="flex justify-end gap-1.5">
+                    {puedeAjustar && (
                       <button title="Reponer stock" onClick={() => onRestock(p)} className="p-2.5 rounded-md" style={{ background: C.greenSoft, color: C.greenDark }}><PackagePlus size={17} /></button>
-                      <button title="Registrar merma" onClick={() => onShrink(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><PackageMinus size={17} /></button>
+                    )}
+                    <button title="Registrar merma" onClick={() => onShrink(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><PackageMinus size={17} /></button>
+                    {puedeAjustar ? (
                       <button title="Editar" onClick={() => onEdit(p)} className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><Pencil size={17} /></button>
-                      <button title="Eliminar" onClick={() => onDelete(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><Trash2 size={17} /></button>
-                    </div>
-                  </td>
-                )}
-                {role !== "admin" && (
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1.5">
-                      {/* Corregir el nombre no cambia plata ni stock: quien está
-                          frente a la repisa es quien ve que dice "COCA COLA 15L"
-                          en vez de 1.5L, y puede arreglarlo sin pedir permiso. */}
+                    ) : (
+                      /* Corregir el nombre no cambia plata ni stock: quien está
+                         frente a la repisa es quien ve que dice "COCA COLA 15L"
+                         en vez de 1.5L, y puede arreglarlo sin pedir permiso. */
                       <button title="Corregir nombre" onClick={() => onRename(p)} className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><Pencil size={17} /></button>
-                      <button title="Registrar merma" onClick={() => onShrink(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><PackageMinus size={17} /></button>
-                    </div>
-                  </td>
-                )}
+                    )}
+                    {role === "admin" && (
+                      <button title="Eliminar" onClick={() => onDelete(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><Trash2 size={17} /></button>
+                    )}
+                  </div>
+                </td>
               </tr>
               );
             })}
@@ -11109,10 +11128,23 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   }
 
   const lowStock = products.filter(p => p.stock <= p.minStock).length;
-  const tableHandlers = { role, suppliers, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: setDeleting, onRename: setRenaming };
+  const puedeAjustar = role === "admin" || enMarchaBlanca(settings);
+  const tableHandlers = { role, suppliers, puedeAjustar, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: setDeleting, onRename: setRenaming };
 
   return (
     <div>
+      {/* Que se note que es temporal: si no, cuando termine parecerá que el
+          sistema les quitó un permiso de la nada. */}
+      {role !== "admin" && enMarchaBlanca(settings) && (
+        <div className="rounded-xl p-3 mb-3 flex items-start gap-2" style={{ background: C.brassSoft }}>
+          <AlertTriangle size={16} style={{ color: C.brassText, marginTop: 2 }} />
+          <p className="text-sm" style={{ color: C.brassText }}>
+            <strong>Marcha blanca hasta el {formatDate(settings.marchaBlancaHasta)}.</strong> Mientras
+            tanto puedes corregir cantidades y precios desde acá. Después de esa fecha esos ajustes
+            vuelven a ser solo de un administrador.
+          </p>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 mb-3">
         <div className="relative flex-1 min-w-[200px]">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
@@ -13165,6 +13197,26 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
   const logoInputRef = useRef(null);
   const restoreInputRef = useRef(null);
 
+  /* La fecha se guarda al tiro: es una decisión de una sola vez y no tiene
+     sentido esconderla detrás de un "Guardar" compartido con el nombre del
+     negocio. Vacío significa cerrarla. */
+  async function setMarchaBlanca(fecha) {
+    const ns = { ...settings, marchaBlancaHasta: fecha || null };
+    setSettings(ns);
+    try {
+      await saveJSON("business-settings", ns);
+      toast(fecha ? `Marcha blanca hasta el ${formatDate(fecha)}` : "Marcha blanca cerrada", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar"), "error");
+    }
+  }
+
+  function sumarDias(dias) {
+    const d = new Date();
+    d.setDate(d.getDate() + dias);
+    return d.toISOString().slice(0, 10);
+  }
+
   async function saveGeneral() {
     const ns = { ...settings, businessName: businessName.trim() || "Mi Negocio", ivaIncluded };
     setSettings(ns); await saveJSON("business-settings", ns);
@@ -13283,6 +13335,25 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           Los precios incluyen IVA (19%) — se desglosa en la factura
         </label>
         <Btn onClick={saveGeneral} icon={Check}>Guardar</Btn>
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Marcha blanca</h3>
+        <p className="text-sm mb-3" style={{ color: C.gray }}>
+          Mientras dure, todo el equipo puede corregir cantidades y precios desde Inventario.
+          Después de esa fecha vuelve a ser solo de administradores, sin que nadie tenga que apagarlo.
+          {enMarchaBlanca(settings)
+            ? ` Ahora está activa hasta el ${formatDate(settings.marchaBlancaHasta)}.`
+            : " Ahora está cerrada."}
+        </p>
+        <Field label="Hasta el día (inclusive)">
+          <input type="date" value={String(settings.marchaBlancaHasta || "").slice(0, 10)}
+            onChange={e => setMarchaBlanca(e.target.value)} className={inputCls} style={inputStyle()} />
+        </Field>
+        <div className="flex flex-wrap gap-2">
+          <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca(sumarDias(7))}>Una semana más</Btn>
+          <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca("")}>Cerrar ahora</Btn>
+        </div>
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
