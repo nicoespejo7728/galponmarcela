@@ -9867,7 +9867,8 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
       const nombre = grupo.lista.find(p => p.id === destino)?.name || "";
       toast(`${desactivados} duplicado(s) unificados en "${nombre}"${movidos ? ` · ${movidos} unidad(es) movidas` : ""}`, "success");
     } catch (e) {
-      toast(friendlyError(e, "No se pudieron unificar"), "error");
+      console.error("[unificar productos]", e);
+      toast(`No se pudieron unificar: ${e?.message || e}`, "error");
     } finally {
       setTrabajando(null);
     }
@@ -10106,7 +10107,12 @@ function CategoriesView({ categories, setCategories, products, setProducts, toas
       setMerging(false);
       toast(`${movidos} producto(s) movidos a "${destino.name}" · ${origenes.length} categoría(s) desactivada(s)`, "success");
     } catch (e) {
-      toast(friendlyError(e, "No se pudieron unificar las categorías"), "error");
+      // Acá se muestra el mensaje crudo a propósito. Es una pantalla de
+      // mantenimiento, la usa un administrador, y "ocurrió un problema
+      // inesperado" no deja nada con qué seguir: si la base rechazó algo,
+      // conviene leer qué fue.
+      console.error("[unificar categorías]", e);
+      toast(`No se pudieron unificar: ${e?.message || e}`, "error");
     }
   }
 
