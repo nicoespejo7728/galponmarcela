@@ -5841,33 +5841,42 @@ function AdminGateModal({ onClose, onEnter, toast }) {
 /* ---------------------------------------------------------
    POS — VENDER
 --------------------------------------------------------- */
+/* Los pesos se escriben siempre en gramos.
+
+   La balanza del mesón muestra gramos y el precio está por kilo; obligar a
+   traducir a "0,250" en medio de una venta era pedir un error de coma. Por
+   dentro el sistema sigue guardando kilos —el stock y el precio son por
+   kilo—, así que la conversión ocurre en el borde: se escribe en gramos y se
+   guarda en kilos. */
+const GRAMOS_POR_KILO = 1000;
+const enGramos = (kg) => Math.round((Number(kg) || 0) * GRAMOS_POR_KILO);
+const desdeGramos = (g) => Number(((Number(g) || 0) / GRAMOS_POR_KILO).toFixed(3));
+
 function WeightPromptModal({ product, onClose, onConfirm }) {
-  const [unit, setUnit] = useState("kg");
-  const [value, setValue] = useState("");
-  const weightKg = unit === "kg" ? Number(value) || 0 : (Number(value) || 0) / 1000;
+  const [gramos, setGramos] = useState("");
+  const weightKg = desdeGramos(gramos);
   const subtotal = weightKg * product.price;
 
   function submit() {
     if (weightKg <= 0) return;
-    onConfirm(Number(weightKg.toFixed(3)));
+    onConfirm(weightKg);
   }
 
   return (
     <Modal title={`Pesar — ${product.name}`} onClose={onClose}>
       <div className="rounded-lg p-3 mb-3 flex justify-between text-sm" style={{ background: C.paperDark }}>
-        <span style={{ color: C.gray }}>Precio por kilogramo</span>
+        <span style={{ color: C.gray }}>Precio por kilo</span>
         <span className="font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(product.price)}</span>
       </div>
-      <div className="flex gap-1.5 mb-3">
-        <button onClick={() => setUnit("kg")} className="flex-1 py-2 rounded-lg text-sm font-medium" style={unit === "kg" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Kilogramos</button>
-        <button onClick={() => setUnit("g")} className="flex-1 py-2 rounded-lg text-sm font-medium" style={unit === "g" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Gramos</button>
-      </div>
-      <Field label={unit === "kg" ? "Peso (kg)" : "Peso (g)"}>
-        <input autoFocus type="number" step={unit === "kg" ? "0.001" : "1"} value={value} onChange={e => setValue(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" />
+      <Field label="Peso en gramos">
+        <input autoFocus type="number" inputMode="numeric" step="1" value={gramos}
+          onChange={e => setGramos(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono text-lg`} style={inputStyle()} placeholder="Ej. 250" />
       </Field>
       {weightKg > 0 && (
         <div className="rounded-lg p-3 mb-4 flex justify-between text-sm font-semibold" style={{ background: C.greenSoft }}>
-          <span style={{ color: C.greenDark }}>Subtotal ({weightKg} kg)</span>
+          <span style={{ color: C.greenDark }}>Subtotal ({enGramos(weightKg)} g)</span>
           <span className="font-mono" style={{ color: C.greenDark }}>{formatCLP(subtotal)}</span>
         </div>
       )}
@@ -6141,7 +6150,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     setCart(prev => prev.map(i => {
       if (i.productId !== productId) return i;
       const q = Math.max(0, Number(newQty) || 0);
-      if (q > i.stock) { toast("No hay más stock disponible", "error"); return i; }
+      if (q > i.stock) { toast(`Solo quedan ${enGramos(i.stock)} g de "${i.name}"`, "error"); return i; }
       return { ...i, qty: q };
     }));
   }
@@ -6537,13 +6546,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                   {i.unitType === "peso" ? (
                     <div className="flex items-center gap-1.5">
                       <input
-                        type="number" step="0.001" value={i.qty}
-                        onChange={e => setWeightQty(i.productId, e.target.value)}
-                        aria-label={`Peso de ${i.name} en kilogramos`}
+                        type="number" inputMode="numeric" step="1" value={enGramos(i.qty)}
+                        onChange={e => setWeightQty(i.productId, desdeGramos(e.target.value))}
+                        aria-label={`Peso de ${i.name} en gramos`}
                         className="w-24 text-center font-mono rounded-lg px-2 py-2"
                         style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}`, color: C.ink }}
                       />
-                      <span className="text-sm" style={{ color: C.gray }}>kg</span>
+                      <span className="text-sm" style={{ color: C.gray }}>g</span>
                     </div>
                   ) : (
                     <div className="flex items-center rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
@@ -6830,7 +6839,7 @@ function ConsumptionAuthModal({ cart, adminPin, onClose, onConfirm, toast }) {
       <div className="rounded-lg p-3 mb-4" style={{ background: C.paperDark }}>
         <div className="text-xs mb-1" style={{ color: C.gray }}>{cart.length} producto(s) en el carrito</div>
         <ul className="text-sm space-y-0.5">
-          {cart.map(i => <li key={i.productId} style={{ color: C.ink }}>{i.unitType === "peso" ? `${i.qty} kg` : `${i.qty}×`} {i.name}</li>)}
+          {cart.map(i => <li key={i.productId} style={{ color: C.ink }}>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</li>)}
         </ul>
         <div className="text-xs mt-2" style={{ color: C.gray }}>Valor referencial (precio venta): {formatCLP(total)}</div>
       </div>
@@ -6857,7 +6866,7 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
         <div className="text-xs" style={{ color: C.gray }}>Autorizado por: {ticket.authorizedBy}</div>
         <div className="pt-2 space-y-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
           {ticket.items.map((i, idx) => (
-            <div key={idx} className="flex justify-between text-xs"><span>{i.unitType === "peso" ? `${i.qty} kg` : `${i.qty}×`} {i.name}</span><span style={{ color: C.gray }}>costo {formatCLP(i.cost * i.qty)}</span></div>
+            <div key={idx} className="flex justify-between text-xs"><span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span><span style={{ color: C.gray }}>costo {formatCLP(i.cost * i.qty)}</span></div>
           ))}
         </div>
         <div className="flex justify-between text-sm font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
@@ -6890,7 +6899,7 @@ function ReceiptModal({ sale, settings, onClose }) {
               ganancia extra que a veces deja) queda para Análisis, no acá. */}
           {sale.items.map((i, idx) => (
             <div key={idx} className="flex justify-between text-xs">
-              <span>{i.unitType === "peso" ? `${i.qty} kg` : `${i.qty}×`} {i.name}</span>
+              <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
               <span>{formatCLP(i.price * i.qty)}</span>
             </div>
           ))}
@@ -7082,7 +7091,7 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], setS
       <Field label="Se vende">
         <div className="grid grid-cols-2 gap-1.5">
           <button type="button" onClick={() => set("unitType", "unidad")} className="py-2 rounded-lg text-sm font-medium" style={!isPeso ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Por unidad</button>
-          <button type="button" onClick={() => set("unitType", "peso")} className="py-2 rounded-lg text-sm font-medium" style={isPeso ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Por peso (kg)</button>
+          <button type="button" onClick={() => set("unitType", "peso")} className="py-2 rounded-lg text-sm font-medium" style={isPeso ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Por peso (gramos)</button>
         </div>
       </Field>
 
@@ -7373,7 +7382,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
             </div>
             <div className="flex gap-1">
               <button type="button" onClick={() => onChange({ ...item, unitType: "unidad" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType !== "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Unidad</button>
-              <button type="button" onClick={() => onChange({ ...item, unitType: "peso" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (kg)</button>
+              <button type="button" onClick={() => onChange({ ...item, unitType: "peso" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (gramos)</button>
             </div>
           </div>
         ) : (
@@ -7386,8 +7395,13 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
       </div>
       <Badge tone={item.isNew ? "brass" : "green"}>{item.isNew ? "nuevo" : "existente"}</Badge>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>{item.unitType === "peso" ? "recibes (kg)" : "recibes"}</span>
-        <input type="number" step={item.unitType === "peso" ? "0.001" : "1"} value={item.qty} onChange={e => onChange({ ...item, qty: e.target.value })} className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
+        <span className="text-[10px]" style={{ color: C.gray }}>{item.unitType === "peso" ? "recibes (g)" : "recibes"}</span>
+        {/* En gramos, como en la caja: por dentro se sigue guardando en kilos. */}
+        <input
+          type="number" inputMode="numeric" step="1"
+          value={item.unitType === "peso" ? enGramos(item.qty) : item.qty}
+          onChange={e => onChange({ ...item, qty: item.unitType === "peso" ? desdeGramos(e.target.value) : e.target.value })}
+          className={`${inputCls} font-mono w-20 text-center`} style={inputStyle()} />
       </div>
       <div className="flex flex-col items-center">
         <span className="text-[10px]" style={{ color: C.gray }}>costo neto</span>
@@ -7466,7 +7480,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   }, [nameQuery, products]);
 
   function addExistingDraft(p) {
-    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: 1, netCost: p.cost || 0 }]);
+    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: 1, netCost: p.cost || 0, unitType: p.unitType === "peso" ? "peso" : "unidad" }]);
     setNameQuery("");
   }
   function addNewDraft() {
@@ -7497,7 +7511,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         return copy;
       }
       if (found) {
-        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: 1, netCost: found.cost || 0 }];
+        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: 1, netCost: found.cost || 0, unitType: found.unitType === "peso" ? "peso" : "unidad" }];
       }
       return [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: clean, name: "", category: "", qty: 1, netCost: 0, unitType: "unidad" }];
     });
@@ -7536,7 +7550,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         const match = findProductMatch(products, it.name, it.code);
         const detectedUnitType = it.unitType === "peso" ? "peso" : "unidad";
         return match
-          ? { tempId: uid("draft"), isNew: false, productId: match.id, barcode: match.barcode, name: match.name, category: match.category, qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0 }
+          ? { tempId: uid("draft"), isNew: false, productId: match.id, barcode: match.barcode, name: match.name, category: match.category, qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, unitType: match.unitType === "peso" ? "peso" : "unidad" }
           : { tempId: uid("draft"), isNew: true, productId: null, barcode: it.code || "", name: it.name || "", category: "", qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, unitType: detectedUnitType };
       });
       setDraftItems(prev => [...prev, ...mapped]);
@@ -12495,7 +12509,7 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
               <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Se vende por</span>
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" onClick={() => setNewForm(f => ({ ...f, unitType: "unidad" }))} className="py-2 rounded-lg text-sm font-medium" style={newForm.unitType === "unidad" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Unidad</button>
-                <button type="button" onClick={() => setNewForm(f => ({ ...f, unitType: "peso" }))} className="py-2 rounded-lg text-sm font-medium" style={newForm.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (kg)</button>
+                <button type="button" onClick={() => setNewForm(f => ({ ...f, unitType: "peso" }))} className="py-2 rounded-lg text-sm font-medium" style={newForm.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (gramos)</button>
               </div>
             </label>
 
