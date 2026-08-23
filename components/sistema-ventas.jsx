@@ -21,6 +21,7 @@ import {
   identificarPorPin,
   registrarConteoInventarioGeneral,
   unificarCategorias,
+  unificarProductos,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -9761,6 +9762,210 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
    0007): cualquiera del equipo puede seguir escribiendo una sección nueva
    al recibir mercadería, esta pantalla solo agrega la administración.
 --------------------------------------------------------- */
+/* Revisar el catálogo.
+
+   Después del inventario general quedaron tres clases de cabos sueltos: el
+   mismo producto partido en dos porque la cámara leyó mal el código, y
+   productos con stock pero sin código de barras real, sin precio o sin
+   sección. Esta pantalla los junta en un solo lugar, con la acción al lado
+   del problema, en vez de hacer buscarlos entre cinco mil. */
+function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, role, session, toast }) {
+  const [seccion, setSeccion] = useState("duplicados");
+  const [elegido, setElegido] = useState({});     // clave del grupo → id que se conserva
+  const [trabajando, setTrabajando] = useState(null);
+  const [editando, setEditando] = useState(null);
+
+  const activos = products;
+
+  /* Se agrupa por nombre normalizado: sin tildes, sin espacios ni signos.
+     Así "COCA COLA 1.5L" y "Coca-Cola 1,5 L" caen juntas. */
+  const duplicados = useMemo(() => {
+    const porClave = new Map();
+    for (const p of activos) {
+      const clave = normalize(p.name).replace(/[^a-z0-9]/g, "");
+      if (!clave) continue;
+      porClave.set(clave, [...(porClave.get(clave) || []), p]);
+    }
+    return Array.from(porClave.entries())
+      .filter(([, lista]) => lista.length > 1)
+      .map(([clave, lista]) => ({ clave, nombre: lista[0].name, lista }))
+      .sort((a, b) => b.lista.length - a.lista.length || a.nombre.localeCompare(b.nombre, "es"));
+  }, [activos]);
+
+  const sinCodigo = useMemo(
+    () => activos.filter(p => p.stock > 0 && String(p.barcode || "").startsWith("INT-")), [activos]);
+  const sinPrecio = useMemo(
+    () => activos.filter(p => p.stock > 0 && !(p.price > 0)), [activos]);
+  const sinSeccion = useMemo(
+    () => activos.filter(p => !p.category || normalize(p.category) === "sin clasificar"), [activos]);
+
+  /* Cuál conviene conservar, en este orden:
+
+     1. El que tiene código de barras de verdad, no uno interno: es el que la
+        pistola va a leer en el mesón.
+     2. El más antiguo. Cuando la cámara lee mal durante un conteo se crea una
+        ficha nueva; la original —con el código bueno— ya estaba en el
+        catálogo.
+     3. El que tiene precio, y por último el que trae más stock.
+
+     Es solo la propuesta: la decisión final la toma quien mira la repisa. */
+  function porOmision(lista) {
+    const interno = (p) => (String(p.barcode || "").startsWith("INT-") ? 1 : 0);
+    const cuando = (p) => (p.createdAt ? new Date(p.createdAt).getTime() : Infinity);
+    return [...lista].sort((a, b) =>
+      interno(a) - interno(b)
+      || cuando(a) - cuando(b)
+      || (a.price > 0 ? 0 : 1) - (b.price > 0 ? 0 : 1)
+      || (b.stock || 0) - (a.stock || 0)
+    )[0]?.id;
+  }
+
+  async function unificar(grupo) {
+    const destino = elegido[grupo.clave] || porOmision(grupo.lista);
+    const origenes = grupo.lista.filter(p => p.id !== destino).map(p => p.id);
+    if (!destino || origenes.length === 0) return;
+    setTrabajando(grupo.clave);
+    try {
+      const { movidos, desactivados } = await unificarProductos(destino, origenes);
+      const alDia = await loadJSON("products-catalog", products);
+      setProducts(alDia);
+      const nombre = grupo.lista.find(p => p.id === destino)?.name || "";
+      toast(`${desactivados} duplicado(s) unificados en "${nombre}"${movidos ? ` · ${movidos} unidad(es) movidas` : ""}`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudieron unificar"), "error");
+    } finally {
+      setTrabajando(null);
+    }
+  }
+
+  async function guardarProducto(p) {
+    try {
+      const latest = await loadJSON("products-catalog", products);
+      const np = latest.map(x => x.id === p.id ? p : x);
+      setProducts(np);
+      await saveJSON("products-catalog", np);
+      setEditando(null);
+      toast("Producto actualizado", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar"), "error");
+    }
+  }
+
+  const SECCIONES = [
+    { id: "duplicados", label: "Duplicados", cuenta: duplicados.length },
+    { id: "sinCodigo", label: "Sin código", cuenta: sinCodigo.length },
+    { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
+    { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
+  ];
+
+  const listaSimple = seccion === "sinCodigo" ? sinCodigo
+    : seccion === "sinPrecio" ? sinPrecio
+    : seccion === "sinSeccion" ? sinSeccion : null;
+
+  const AYUDA = {
+    duplicados: "El mismo producto quedó en dos fichas —la cámara del teléfono leyó mal el código— y el stock está en la que la pistola no encuentra. Elige cuál se conserva: el stock se junta ahí y las otras se desactivan, sin perder su historial.",
+    sinCodigo: "Tienen stock pero su código es interno, así que la pistola no los encuentra. Ábrelos y escanea el código real del envase.",
+    sinPrecio: "Tienen stock y no se pueden cobrar hasta que alguien les ponga precio.",
+    sinSeccion: "Sin sección no aparecen agrupados en Inventario ni en el catálogo rápido.",
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {SECCIONES.map(s => (
+          <button
+            key={s.id} onClick={() => setSeccion(s.id)} aria-pressed={seccion === s.id}
+            className="px-4 rounded-lg text-sm font-semibold transition"
+            style={seccion === s.id
+              ? { background: C.green, color: "#fff" }
+              : { background: "#fff", color: C.inkSoft, border: `1.5px solid ${C.paperLine}` }}
+          >{s.label} <span className="font-mono">({s.cuenta})</span></button>
+        ))}
+      </div>
+
+      <p className="text-sm mb-3" style={{ color: C.gray }}>{AYUDA[seccion]}</p>
+
+      {seccion === "duplicados" && (
+        duplicados.length === 0
+          ? <EmptyState icon={Check} title="Sin duplicados" hint="No hay dos productos activos con el mismo nombre." />
+          : (
+            <div className="space-y-3">
+              {duplicados.map(g => {
+                const destino = elegido[g.clave] || porOmision(g.lista);
+                return (
+                  <div key={g.clave} className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                    <div className="px-4 py-2.5 flex items-center justify-between gap-2" style={{ background: C.paperDark }}>
+                      <span className="text-sm font-semibold" style={{ color: C.ink }}>{g.nombre}</span>
+                      <span className="text-xs" style={{ color: C.gray }}>{g.lista.length} fichas</span>
+                    </div>
+                    <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                      {g.lista.map(p => (
+                        <label key={p.id} className="flex items-center gap-3 px-4 py-3 cursor-pointer"
+                          style={{ background: p.id === destino ? C.greenSoft : "transparent" }}>
+                          <input type="radio" name={`dest-${g.clave}`} checked={p.id === destino}
+                            onChange={() => setElegido(prev => ({ ...prev, [g.clave]: p.id }))}
+                            className="w-4 h-4" style={{ accentColor: C.green }} />
+                          <span className="flex-1 min-w-0">
+                            <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
+                            <span className="block text-xs font-mono" style={{ color: C.gray }}>{p.barcode}</span>
+                          </span>
+                          <span className="text-sm font-mono" style={{ color: C.ink }}>{p.stock}</span>
+                          <span className="text-sm font-mono w-20 text-right" style={{ color: p.price > 0 ? C.ink : C.rust }}>
+                            {p.price > 0 ? formatCLP(p.price) : "sin precio"}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderTop: `1px solid ${C.paperLine}` }}>
+                      <span className="text-xs" style={{ color: C.gray }}>Se conserva el marcado; el resto se desactiva.</span>
+                      <Btn size="sm" icon={trabajando === g.clave ? Loader2 : Blend}
+                        disabled={trabajando === g.clave} onClick={() => unificar(g)}>
+                        {trabajando === g.clave ? "Unificando…" : "Unificar"}
+                      </Btn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+      )}
+
+      {listaSimple && (
+        listaSimple.length === 0
+          ? <EmptyState icon={Check} title="Nada pendiente aquí" hint="Todos los productos con stock están completos en este punto." />
+          : (
+            <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {listaSimple.slice(0, 200).map(p => (
+                  <div key={p.id} className="px-4 py-3 flex items-center gap-3">
+                    <span className="flex-1 min-w-0">
+                      <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
+                      <span className="block text-xs font-mono" style={{ color: C.gray }}>
+                        {p.barcode} · stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"} · {p.category || "sin sección"}
+                      </span>
+                    </span>
+                    <Btn size="sm" variant="ghost" icon={Pencil} onClick={() => setEditando(p)}>Completar</Btn>
+                  </div>
+                ))}
+              </div>
+              {listaSimple.length > 200 && (
+                <p className="text-xs px-4 py-3" style={{ color: C.gray, borderTop: `1px solid ${C.paperLine}` }}>
+                  Se muestran los primeros 200 de {listaSimple.length}. A medida que los completes van apareciendo los siguientes.
+                </p>
+              )}
+            </div>
+          )
+      )}
+
+      {editando && (
+        <ProductModal initial={editando} onClose={() => setEditando(null)} onSave={guardarProducto}
+          products={products} suppliers={suppliers} setSuppliers={setSuppliers}
+          categories={categories} role={role} session={session} toast={toast} />
+      )}
+    </div>
+  );
+}
+
 function CategoriesView({ categories, setCategories, products, setProducts, toast }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
@@ -13659,6 +13864,7 @@ const GRUPOS = {
       { id: "conteos", label: "Conteos", icon: ClipboardList },
       { id: "transformar", label: "Transformar", icon: Blend },
       { id: "categorias", label: "Categorías", icon: Tags },
+      { id: "revisar", label: "Revisar", icon: ClipboardCheck },
     ]},
     { titulo: "Administración", items: [
       { id: "proveedores", label: "Proveedores", icon: Building2 },
@@ -14311,6 +14517,7 @@ export default function SistemaVentas() {
         {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
         {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
+        {tab === "revisar" && rolEfectivo === "admin" && <ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} />}
         {tab === "proveedores" && rolEfectivo === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} />}
         {tab === "clientes" && rolEfectivo === "admin" && <ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} />}
