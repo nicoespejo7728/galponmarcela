@@ -25,6 +25,9 @@ import {
   leerDuplicadosDescartados,
   descartarDuplicadoDeProductos,
   revertirDescarte,
+  registrarConsumo,
+  leerConsumosInternos,
+  marcarConsumosDescontados,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -41,7 +44,7 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight
+  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -5344,7 +5347,7 @@ const MARCELITA_BASE_PROMPT = `Eres "Marcelita", la asistente virtual del sistem
 
 Ayudas con varias cosas:
 1. Dudas sobre cómo usar el sistema. Estas son sus secciones:
-   - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, consumo interno autorizado con PIN. Antes de confirmar cada venta se pide elegir quién la realiza e ingresar su PIN de vendedor (ese PIN se configura por persona en Usuarios y es distinto del PIN de administrador de Ajustes) —la caja es una sola compartida por todos, así que esto es lo que deja saber a quién adjudicar cada venta.
+   - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, y consumo interno que cada persona registra con su propio PIN de vendedor (lo que hay que descontarle se revisa después en Administración → Consumos). Antes de confirmar cada venta se pide elegir quién la realiza e ingresar su PIN de vendedor (ese PIN se configura por persona en Usuarios y es distinto del PIN de administrador de Ajustes) —la caja es una sola compartida por todos, así que esto es lo que deja saber a quién adjudicar cada venta.
    - Caja: una sola caja compartida por todo el equipo (no una por persona) — cualquiera cobra en ella una vez abierta, retiros y refuerzos de efectivo, y al cerrar la cuadratura muestra un desglose de cuánto vendió cada vendedor.
    - Boletas: historial de ventas con número correlativo único.
    - Inventario: catálogo de productos, alertas de stock bajo, reposición de stock, registro de mermas (pérdidas/robos) con autorización de administrador, productos de "acceso rápido" sin código de barras.
@@ -6359,40 +6362,41 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     }
   }
 
-  async function registerConsumption({ responsible, reason }) {
+  /* El consumo queda a nombre de quien puso el PIN, y ahí termina el trámite
+     en el mesón. Ya no se pide el nombre escrito a mano ni el PIN de un
+     administrador: eso obligaba a ir a buscar a alguien para llevarse una
+     colación. Lo que hay que descontarle a cada persona se revisa después,
+     junto, desde Administración → Consumos.
+
+     Tampoco se escribe un movimiento de egreso: el consumo no es un gasto del
+     negocio, es algo que se le descuenta a la persona. Anotarlo como egreso
+     además de descontárselo sería contarlo dos veces. */
+  async function registerConsumption({ persona, reason }) {
     if (cart.length === 0) return;
-    const costTotal = cart.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
-    const date = new Date().toISOString();
-    const ticket = {
-      id: uid("cons"),
-      date,
-      responsible,
-      reason,
-      authorizedBy: session.name,
-      items: cart.map(i => ({ productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty, cost: i.cost, price: i.price, unitType: i.unitType })),
-      costTotal,
-    };
-    const latestProducts = await loadJSON("products-catalog", products);
-    const newProducts = latestProducts.map(p => {
-      const item = cart.find(i => i.productId === p.id);
+    const items = cart.map(i => ({
+      productId: i.productId, name: i.name, barcode: i.barcode,
+      qty: i.qty, cost: i.cost, price: i.price, unitType: i.unitType,
+    }));
+    const costTotal = items.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
+
+    await registrarConsumo({ perfilId: persona.id, motivo: reason, items });
+
+    // La base ya descontó el stock dentro de la transacción; acá solo se
+    // refleja en pantalla para que el catálogo no muestre el saldo de antes
+    // hasta la próxima sincronización.
+    setProducts(prev => prev.map(p => {
+      const item = items.find(i => i.productId === p.id);
       if (!item) return p;
       const nextStock = Math.max(0, p.stock - item.qty);
       return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+    }));
+
+    setConsumptionTicket({
+      id: uid("cons"), date: new Date().toISOString(),
+      responsible: persona.name, reason, items, costTotal,
     });
-    const latestMovements = await loadJSON("movements-log", movements);
-    const newMovements = [{
-      id: uid("mov"), date, type: "egreso",
-      concept: `Consumo interno${responsible ? `: ${responsible}` : ""}`,
-      amount: costTotal, category: "Consumo interno", auto: true,
-    }, ...latestMovements];
-
-    setProducts(newProducts); setMovements(newMovements);
-    await saveJSON("products-catalog", newProducts, { origen: "consumo_interno" });
-    await saveJSON("movements-log", newMovements);
-
-    setConsumptionTicket(ticket);
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false); setConsumptionOpen(false);
-    toast("Consumo interno registrado, stock actualizado", "success");
+    toast(`Consumo registrado a nombre de ${persona.name}`, "success");
   }
 
   // Sin caja abierta no se puede empezar a vender: una venta que ocurriera
@@ -6700,12 +6704,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
             <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0) || (payment === "Fiado" && !selectedCustomer)} icon={Check}>Cobrar y emitir</Btn>
 
-            {role === "admin" && (
-              <div className="pt-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
-                <Btn size="sm" full variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
-                <p className="text-xs mt-2 text-center" style={{ color: C.grayLight }}>Consumo del local o los dueños: descuenta stock, no genera boleta.</p>
-              </div>
-            )}
+            {/* Ya no es solo para administradores: cualquiera del equipo lo
+                registra con su PIN y queda a su nombre. El control pasó de
+                pedir permiso antes a revisarlo después. */}
+            <div className="pt-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
+              <Btn size="sm" full variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+              <p className="text-xs mt-2 text-center" style={{ color: C.grayLight }}>Lo que se lleva alguien del equipo: descuenta stock, no genera boleta.</p>
+            </div>
           </div>
         </section>
       </div>
@@ -6735,7 +6740,6 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       {consumptionOpen && (
         <ConsumptionAuthModal
           cart={cart}
-          adminPin={settings.adminPin}
           onClose={() => setConsumptionOpen(false)}
           onConfirm={registerConsumption}
           toast={toast}
@@ -6812,43 +6816,76 @@ function ProductoNuevoEnVentaModal({ barcode, onClose, onConfirm }) {
   );
 }
 
-function ConsumptionAuthModal({ cart, adminPin, onClose, onConfirm, toast }) {
-  const [responsible, setResponsible] = useState("");
-  const [reason, setReason] = useState("");
+/* Llevarse algo del almacén es una cosa de todos los días y antes costaba
+   tres campos y buscar a un administrador. Ahora se pide una sola cosa: el
+   PIN de vendedor, el mismo que ya se escribe antes de cada venta. Con eso el
+   consumo queda a nombre del perfil correcto —no de un nombre escrito a mano,
+   que se anota de cinco maneras distintas y después no se puede sumar— y lo
+   que hay que descontarle a cada uno se revisa junto en Administración. */
+function ConsumptionAuthModal({ cart, onClose, onConfirm, toast }) {
   const [pin, setPin] = useState("");
+  const [reason, setReason] = useState("");
+  const [persona, setPersona] = useState(null);
+  const [error, setError] = useState("");
+  const [trabajando, setTrabajando] = useState(false);
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
 
   async function submit() {
-    if (!responsible.trim()) return toast("Indica quién retira los productos", "error");
-    // El PIN se comprueba en la base, donde está guardado con bcrypt: nunca
-    // llega al navegador. Sirve el PIN del negocio o el personal de cualquier
-    // administrador. Si la consulta falla, se dice qué falló — no "PIN
-    // incorrecto", que manda a buscar el problema donde no está.
+    if (trabajando) return;
+    const limpio = pin.trim();
+    if (!persona && limpio.length < 4) return setError("Escribe tu PIN de vendedor");
+    setTrabajando(true);
+    setError("");
     try {
-      if (!(await autorizarConPin(pin))) {
-        return toast("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+      // El PIN se compara en la base, contra los hashes: acá solo se pregunta
+      // de quién es. Se guarda la persona ya identificada para que un fallo al
+      // registrar no obligue a escribir el PIN otra vez.
+      const quien = persona || await identificarPorPin(limpio);
+      if (!quien) {
+        setPin("");
+        return setError("PIN incorrecto. Si todavía no tienes uno, pídele a un administrador que te lo asigne en Usuarios.");
       }
+      setPersona(quien);
+      await onConfirm({ persona: quien, reason: reason.trim() });
     } catch (e) {
-      return toast(friendlyError(e, "No se pudo comprobar el PIN"), "error");
+      setError(friendlyError(e, "No se pudo registrar el consumo"));
+    } finally {
+      setTrabajando(false);
     }
-    onConfirm({ responsible: responsible.trim(), reason: reason.trim() });
   }
 
   return (
-    <Modal title="Autorizar consumo interno" onClose={onClose}>
+    <Modal title="Consumo interno" onClose={onClose}>
       <div className="rounded-lg p-3 mb-4" style={{ background: C.paperDark }}>
-        <div className="text-xs mb-1" style={{ color: C.gray }}>{cart.length} producto(s) en el carrito</div>
+        <div className="text-xs mb-1" style={{ color: C.gray }}>{cart.length} producto(s) que te llevas</div>
         <ul className="text-sm space-y-0.5">
           {cart.map(i => <li key={i.productId} style={{ color: C.ink }}>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</li>)}
         </ul>
         <div className="text-xs mt-2" style={{ color: C.gray }}>Valor referencial (precio venta): {formatCLP(total)}</div>
       </div>
-      <Field label="Trabajador o dueño que retira"><input autoFocus value={responsible} onChange={e => setResponsible(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Nombre de quien consume" /></Field>
-      <Field label="Motivo (opcional)"><input value={reason} onChange={e => setReason(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Colación, uso personal…" /></Field>
-      <Field label="PIN de administrador (el del negocio o el tuyo, si eres admin)"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
+      <Field label="Tu PIN de vendedor">
+        <input autoFocus type="password" inputMode="numeric" maxLength={6} value={pin}
+          onChange={e => { setPin(e.target.value); setError(""); setPersona(null); }}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono text-center text-lg tracking-[0.4em]`} style={inputStyle()} placeholder="••••" />
+      </Field>
+      <Field label="Motivo (opcional)">
+        <input value={reason} onChange={e => setReason(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={inputCls} style={inputStyle()} placeholder="Ej. Colación, uso personal…" />
+      </Field>
+      {error && <p className="text-xs mb-3" style={{ color: C.rust }}>{error}</p>}
+      <div className="rounded-lg p-3 mb-4" style={{ background: C.brassSoft }}>
+        <p className="text-xs" style={{ color: C.brassText }}>
+          Queda anotado a tu nombre y se descuenta del stock al toque. Un administrador
+          revisa después, en Consumos, cuánto hay que descontar.
+        </p>
+      </div>
       <div className="flex gap-2">
-        <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
-        <Btn full variant="rust" icon={Lock} onClick={submit}>Autorizar y descontar stock</Btn>
+        <Btn variant="ghost" full onClick={onClose} disabled={trabajando}>Cancelar</Btn>
+        <Btn full variant="rust" icon={trabajando ? Loader2 : Check} disabled={trabajando} onClick={submit}>
+          {trabajando ? "Registrando…" : "Registrar consumo"}
+        </Btn>
       </div>
     </Modal>
   );
@@ -6863,7 +6900,6 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
       <div className="font-mono text-sm space-y-2">
         <div className="text-xs" style={{ color: C.gray }}>{formatDate(ticket.date)}</div>
         <div className="text-xs" style={{ color: C.gray }}>Retira: <span style={{ color: C.ink }}>{ticket.responsible}</span>{ticket.reason ? ` · ${ticket.reason}` : ""}</div>
-        <div className="text-xs" style={{ color: C.gray }}>Autorizado por: {ticket.authorizedBy}</div>
         <div className="pt-2 space-y-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
           {ticket.items.map((i, idx) => (
             <div key={idx} className="flex justify-between text-xs"><span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span><span style={{ color: C.gray }}>costo {formatCLP(i.cost * i.qty)}</span></div>
@@ -9836,6 +9872,180 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
    0007): cualquiera del equipo puede seguir escribiendo una sección nueva
    al recibir mercadería, esta pantalla solo agrega la administración.
 --------------------------------------------------------- */
+/* ---------------------------------------------------------
+   CONSUMOS — lo que se lleva el equipo
+--------------------------------------------------------- */
+/* La otra mitad del consumo interno (migración 0020). En el mesón cada
+   persona registra lo suyo con su PIN y sigue atendiendo; acá se revisa
+   junto, que es cuando de verdad importa: cuánto le toca descontar a cada
+   uno en la liquidación.
+
+   Se agrupa por persona y no por consumo porque esa es la pregunta que se
+   hace al pagar los sueldos. El detalle de qué se llevó está a un clic, para
+   cuando alguien reclama. El descuento se hace fuera del sistema, así que el
+   botón solo anota que ya se hizo — no mueve plata ni escribe un egreso: el
+   consumo se le descuenta a la persona, no lo pierde el negocio. */
+function ConsumosView({ toast }) {
+  const [consumos, setConsumos] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState("");
+  const [verSaldados, setVerSaldados] = useState(false);
+  const [abierto, setAbierto] = useState(null);     // id de persona con el detalle desplegado
+  const [trabajando, setTrabajando] = useState(null);
+
+  const releer = useCallback(async () => {
+    setCargando(true);
+    try {
+      setConsumos(await leerConsumosInternos());
+      setError("");
+    } catch (e) {
+      setError(friendlyError(e, "No se pudieron leer los consumos"));
+    } finally {
+      setCargando(false);
+    }
+  }, []);
+
+  useEffect(() => { releer(); }, [releer]);
+
+  const porPersona = useMemo(() => {
+    const mapa = new Map();
+    for (const c of consumos) {
+      if (!verSaldados && c.settledAt) continue;
+      const clave = c.personId || c.person;
+      const grupo = mapa.get(clave) || { id: clave, nombre: c.person, lista: [] };
+      grupo.lista.push(c);
+      mapa.set(clave, grupo);
+    }
+    return Array.from(mapa.values())
+      .map(g => ({
+        ...g,
+        pendiente: g.lista.filter(c => !c.settledAt).reduce((s, c) => s + c.costTotal, 0),
+        pendientes: g.lista.filter(c => !c.settledAt).length,
+        total: g.lista.reduce((s, c) => s + c.costTotal, 0),
+      }))
+      .sort((a, b) => b.pendiente - a.pendiente || a.nombre.localeCompare(b.nombre, "es"));
+  }, [consumos, verSaldados]);
+
+  const totalPendiente = porPersona.reduce((s, g) => s + g.pendiente, 0);
+
+  async function saldar(grupo) {
+    const ids = grupo.lista.filter(c => !c.settledAt).map(c => c.id);
+    if (!ids.length) return;
+    setTrabajando(grupo.id);
+    try {
+      const cuantos = await marcarConsumosDescontados(ids);
+      await releer();
+      // Si otro administrador marcó los mismos hace un rato, el número no
+      // calza: mejor decirlo que dar por hecho que se marcaron todos.
+      toast(cuantos === ids.length
+        ? `Listo — ${cuantos} consumo(s) de ${grupo.nombre} quedaron como descontados`
+        : `Se marcaron ${cuantos} de ${ids.length}: el resto ya estaba descontado`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo marcar el descuento"), "error");
+    } finally {
+      setTrabajando(null);
+    }
+  }
+
+  if (cargando) {
+    return <div className="flex items-center justify-center py-20 gap-2" style={{ color: C.gray }}>
+      <Loader2 size={18} className="animate-spin" /> <span className="text-sm">Leyendo los consumos…</span>
+    </div>;
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto">
+      <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+        <div>
+          <h2 className="font-semibold text-lg" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Consumos del equipo</h2>
+          <p className="text-xs mt-0.5" style={{ color: C.gray }}>
+            Lo que cada persona se llevó y registró con su PIN en el mesón. El valor es a costo.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Btn size="sm" variant="ghost" icon={RefreshCw} onClick={releer}>Actualizar</Btn>
+          <Btn size="sm" variant="ghost" onClick={() => setVerSaldados(v => !v)}>
+            {verSaldados ? "Solo pendientes" : "Ver también lo descontado"}
+          </Btn>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg p-3 mb-4 text-sm" style={{ background: C.rustSoft, color: C.rust }}>{error}</div>
+      )}
+
+      {totalPendiente > 0 && (
+        <div className="rounded-xl p-4 mb-4 flex items-center justify-between" style={{ background: C.brassSoft }}>
+          <span className="text-sm font-semibold" style={{ color: C.brassText }}>Pendiente de descontar en total</span>
+          <span className="font-mono text-lg font-bold" style={{ color: C.brassText }}>{formatCLP(totalPendiente)}</span>
+        </div>
+      )}
+
+      {porPersona.length === 0 ? (
+        <EmptyState icon={Coffee} title="No hay consumos que revisar"
+          hint="Cuando alguien del equipo se lleve algo y lo registre con su PIN, aparece acá." />
+      ) : porPersona.map(grupo => (
+        <div key={grupo.id} className="rounded-xl mb-3 overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="p-4 flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <div className="font-semibold text-sm" style={{ color: C.ink }}>{grupo.nombre}</div>
+              <div className="text-xs mt-0.5" style={{ color: C.gray }}>
+                {grupo.pendientes > 0
+                  ? `${grupo.pendientes} consumo(s) sin descontar`
+                  : "Todo descontado"}
+                {" · "}
+                <button className="underline" style={{ color: C.gray }} onClick={() => setAbierto(a => a === grupo.id ? null : grupo.id)}>
+                  {abierto === grupo.id ? "ocultar detalle" : "ver detalle"}
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="text-right">
+                <div className="font-mono text-base font-bold" style={{ color: grupo.pendiente > 0 ? C.rust : C.gray }}>{formatCLP(grupo.pendiente)}</div>
+                <div className="text-xs" style={{ color: C.grayLight }}>a descontar</div>
+              </div>
+              {grupo.pendientes > 0 && (
+                <Btn size="sm" icon={trabajando === grupo.id ? Loader2 : Check} disabled={trabajando === grupo.id}
+                  onClick={() => saldar(grupo)}>
+                  {trabajando === grupo.id ? "Marcando…" : "Ya se descontó"}
+                </Btn>
+              )}
+            </div>
+          </div>
+
+          {abierto === grupo.id && (
+            <div className="px-4 pb-4 space-y-3" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+              {grupo.lista.map(c => (
+                <div key={c.id} className="pt-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs" style={{ color: C.gray }}>
+                      {formatDate(c.date)}{c.reason ? ` · ${c.reason}` : ""}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {c.settledAt
+                        ? <Badge tone="gray">Descontado {c.settledBy ? `por ${c.settledBy}` : ""}</Badge>
+                        : <Badge tone="brass">Pendiente</Badge>}
+                      <span className="font-mono text-xs font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
+                    </div>
+                  </div>
+                  <ul className="mt-1 text-xs space-y-0.5">
+                    {c.items.map((i, idx) => (
+                      <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
+                        <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
+                        <span>{formatCLP(i.cost * i.qty)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* Revisar el catálogo.
 
    Después del inventario general quedaron tres clases de cabos sueltos: el
@@ -14089,6 +14299,7 @@ const GRUPOS = {
       { id: "proveedores", label: "Proveedores", icon: Building2 },
       { id: "clientes", label: "Fiado", icon: CreditCard },
       { id: "egresos", label: "Egresos", icon: ArrowDownCircle },
+      { id: "consumos", label: "Consumos", icon: Coffee },
       { id: "sueldos", label: "Sueldos", icon: Users },
       { id: "finanzas", label: "Finanzas", icon: Wallet },
       { id: "analisis", label: "Análisis", icon: BarChart3 },
@@ -14736,6 +14947,7 @@ export default function SistemaVentas() {
         {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
         {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
+        {tab === "consumos" && rolEfectivo === "admin" && <ConsumosView toast={toast} />}
         {tab === "revisar" && rolEfectivo === "admin" && <ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} />}
         {tab === "proveedores" && rolEfectivo === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} />}

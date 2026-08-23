@@ -90,8 +90,11 @@ Las cuentas nuevas se crean desde la pestaña **Usuarios**, y solo un
 administrador puede hacerlo. Eliminar una cuenta la desactiva en vez de
 borrarla: sus ventas, turnos y recepciones deben seguir en el historial.
 
-El PIN de administrador (mermas y consumo interno) se guarda con bcrypt en la
-base y se cambia desde **Ajustes**.
+Hay dos PIN y conviene no confundirlos. El **PIN de administrador** (mermas,
+aprobaciones) es uno solo para el negocio, se guarda con bcrypt y se cambia
+desde **Ajustes**. El **PIN de vendedor** es propio de cada persona, se asigna
+en **Usuarios**, y con él se identifica quién hace cada venta y quién registra
+cada consumo interno.
 
 ## Base de datos
 
