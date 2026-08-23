@@ -6014,7 +6014,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [nameQuery, setNameQuery] = useState("");
   const [payment, setPayment] = useState("Efectivo");
   const [cashReceived, setCashReceived] = useState("");
-  const [boletaEmitida, setBoletaEmitida] = useState(true);
+  // Por omisión, sin boleta: en el mesón la mayoría de las ventas en efectivo o
+  // por transferencia no la llevan, y dejarlo marcado en "sí" hacía que se
+  // registraran como emitidas por no cambiarlo. Con débito y crédito no se
+  // pregunta: ahí la boleta sale sola.
+  const [boletaEmitida, setBoletaEmitida] = useState(false);
   const [receipt, setReceipt] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
   const [ventaNueva, setVentaNueva] = useState(null);
@@ -6252,7 +6256,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     }
 
     setReceipt(sale);
-    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(true);
+    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false);
     setSelectedCustomer(null); setCustomerQuery("");
     toast(`Venta #${numeroReal} registrada`, "success");
     setTimeout(() => inputRef.current?.focus(), 50);
@@ -6362,7 +6366,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     await saveJSON("movements-log", newMovements);
 
     setConsumptionTicket(ticket);
-    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(true); setConsumptionOpen(false);
+    setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false); setConsumptionOpen(false);
     toast("Consumo interno registrado, stock actualizado", "success");
   }
 
