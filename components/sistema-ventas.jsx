@@ -5907,10 +5907,19 @@ function QuickCatalogPanel({ products, onAdd }) {
     presentes.sort((a, b) => puesto(a) - puesto(b) || String(a).localeCompare(String(b), "es"));
     return ["Todos", ...presentes];
   }, [uncoded]);
-  const filtered = useMemo(
-    () => activeCategory === "Todos" ? uncoded : uncoded.filter(p => p.category === activeCategory),
-    [uncoded, activeCategory]
-  );
+  /* Lo que no hay se va al final. La ficha sin stock no se puede tocar —está
+     deshabilitada— así que mezclada entre las demás solo hace estorbo: obliga
+     a saltársela con la vista en la mitad del tablero, mientras el cliente
+     espera. Dentro de cada mitad se conserva el orden alfabético con que llega
+     el catálogo, para que las fichas no bailen de lugar entre una venta y la
+     siguiente. */
+  const filtered = useMemo(() => {
+    const enCategoria = activeCategory === "Todos"
+      ? uncoded : uncoded.filter(p => p.category === activeCategory);
+    const hay = [], noHay = [];
+    for (const p of enCategoria) ((p.stock > 0) ? hay : noHay).push(p);
+    return [...hay, ...noHay];
+  }, [uncoded, activeCategory]);
 
   return (
     <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
