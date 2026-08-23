@@ -10097,11 +10097,23 @@ function ConsumosView({ toast }) {
 
   /* ---- Abajo: la cuenta abierta con cada persona ---- */
 
+  /* Quiénes componen la casa hoy, sacado de los propios consumos: si mañana
+     se destilda a alguien en Usuarios, esta lista cambia sola. */
+  const genteDeLaCasa = useMemo(
+    () => Array.from(new Set(consumos.filter(c => c.esCasa).map(c => c.registeredBy))).sort(),
+    [consumos]
+  );
+
   /* A propósito mira TODOS los consumos y no los del período: lo que se le
-     debe descontar a alguien no se borra porque uno esté mirando otra semana. */
+     debe descontar a alguien no se borra porque uno esté mirando otra semana.
+
+     La casa queda fuera: lo que se llevan los dueños no se le descuenta del
+     sueldo a nadie, así que no es una cuenta por cobrar. Su total se mira
+     arriba, en el resumen del período. */
   const cuentas = useMemo(() => {
     const mapa = new Map();
     for (const c of consumos) {
+      if (c.esCasa) continue;
       if (!verSaldados && c.settledAt) continue;
       const k = quienEs(c);
       const g = mapa.get(k) || { id: k, nombre: c.person, lista: [] };
@@ -10236,11 +10248,16 @@ function ConsumosView({ toast }) {
                 {delPeriodo.map(c => (
                   <div key={c.id} className="px-4 py-3">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="text-sm font-medium" style={{ color: C.ink }}>{c.person}</span>
+                      <span className="text-sm font-medium" style={{ color: C.ink }}>
+                        {c.person}
+                        {c.esCasa && <span className="font-normal" style={{ color: C.gray }}> · lo registró {c.registeredBy}</span>}
+                      </span>
                       <div className="flex items-center gap-2">
-                        {c.settledAt
-                          ? <Badge tone="gray">Ya se le descontó</Badge>
-                          : <Badge tone="brass">Por descontar</Badge>}
+                        {c.esCasa
+                          ? <Badge tone="gray">De la casa</Badge>
+                          : c.settledAt
+                            ? <Badge tone="gray">Ya se le descontó</Badge>
+                            : <Badge tone="brass">Por descontar</Badge>}
                         <span className="font-mono text-sm font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
                       </div>
                     </div>
@@ -10273,6 +10290,12 @@ function ConsumosView({ toast }) {
                 cualquier fecha. El descuento se hace en la liquidación, fuera del sistema; cuando lo
                 hagas, marca la cuenta acá para que ese consumo deje de sumar y no se le cobre dos veces.
               </p>
+              {genteDeLaCasa.length > 0 && (
+                <p className="text-xs mt-1 max-w-lg" style={{ color: C.grayLight }}>
+                  El consumo de la casa ({genteDeLaCasa.join(", ")}) no aparece acá: no se le descuenta
+                  a nadie. Va junto, como CASA, en el resumen de arriba.
+                </p>
+              )}
             </div>
             <Btn size="sm" variant="ghost" onClick={() => setVerSaldados(v => !v)}>
               {verSaldados ? "Solo lo pendiente" : "Ver también lo ya descontado"}
@@ -13692,6 +13715,7 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
     password: "",
     role: initial?.role || "vendedor",
     pin: initial?.pin || "",
+    houseConsumption: initial?.houseConsumption === true,
   });
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
 
@@ -13722,6 +13746,7 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
       password: form.password ? form.password : (initial?.password || ""),
       role: form.role,
       pin: form.pin.trim(),
+      houseConsumption: form.houseConsumption,
       createdAt: initial?.createdAt || new Date().toISOString(),
     });
   }
@@ -13742,6 +13767,19 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
           <button type="button" onClick={() => set("role", "admin")} className="py-2 rounded-lg text-sm font-medium" style={form.role === "admin" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Administrador</button>
         </div>
       </Field>
+      {/* Los dueños no se descuentan el consumo a sí mismos: lo que se llevan
+          es de la casa, y en el panel de Consumos va todo junto bajo "CASA"
+          en vez de quedar como tres cuentas por cobrar. */}
+      <label className="flex items-start gap-2 mb-4 text-sm cursor-pointer" style={{ color: C.ink }}>
+        <input type="checkbox" className="mt-1" checked={form.houseConsumption}
+          onChange={e => set("houseConsumption", e.target.checked)} />
+        <span>
+          Su consumo interno es de la casa
+          <span className="block text-xs" style={{ color: C.gray }}>
+            En Consumos se junta con el de los demás dueños, como "CASA", y no se le descuenta del sueldo.
+          </span>
+        </span>
+      </label>
       <Btn full icon={Check} onClick={submit}>Guardar</Btn>
     </Modal>
   );
