@@ -6102,6 +6102,31 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     setWeightPromptProduct(null);
   }
 
+  /* Cantidad escrita a mano en el carrito. Para llevar doce panes es más
+     rápido escribir 12 que apretar doce veces el "+".
+
+     Se deja el campo vacío mientras se escribe —si no, borrar para corregir
+     dejaría un 0 y la línea desaparecería a mitad de camino— y recién al
+     salir del campo, o al apretar Enter, se decide: 0 o vacío quita la línea. */
+  function setUnitQty(productId, texto) {
+    setCart(prev => prev.map(i => {
+      if (i.productId !== productId) return i;
+      if (texto === "") return { ...i, qtyTexto: "" };
+      const q = Math.max(0, Math.floor(Number(texto) || 0));
+      if (q > i.stock) {
+        toast(`Solo quedan ${i.stock} de "${i.name}"`, "error");
+        return { ...i, qty: i.stock, qtyTexto: undefined };
+      }
+      return { ...i, qty: q, qtyTexto: undefined };
+    }));
+  }
+
+  function confirmarUnitQty(productId) {
+    setCart(prev => prev
+      .map(i => (i.productId === productId ? { ...i, qtyTexto: undefined } : i))
+      .filter(i => i.qty > 0));
+  }
+
   function setWeightQty(productId, newQty) {
     setCart(prev => prev.map(i => {
       if (i.productId !== productId) return i;
@@ -6502,7 +6527,22 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                   ) : (
                     <div className="flex items-center rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
                       <button onClick={() => changeQty(i.productId, -1)} aria-label="Quitar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Minus size={17} /></button>
-                      <span className="w-12 text-center text-base font-mono font-bold" style={{ color: C.ink }}>{i.qty}</span>
+                      <input
+                        type="number" inputMode="numeric" min="0" step="1"
+                        value={i.qtyTexto !== undefined ? i.qtyTexto : i.qty}
+                        onChange={e => setUnitQty(i.productId, e.target.value)}
+                        onBlur={() => confirmarUnitQty(i.productId)}
+                        onKeyDown={e => {
+                          if (e.key !== "Enter") return;
+                          confirmarUnitQty(i.productId);
+                          // De vuelta al lector: es donde sigue la venta.
+                          setTimeout(() => inputRef.current?.focus(), 0);
+                        }}
+                        onFocus={e => e.target.select()}
+                        aria-label={`Cantidad de ${i.name}`}
+                        className="w-14 text-center text-base font-mono font-bold outline-none"
+                        style={{ color: C.ink, background: "#fff", border: "none" }}
+                      />
                       <button onClick={() => changeQty(i.productId, 1)} aria-label="Agregar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Plus size={17} /></button>
                     </div>
                   )}
