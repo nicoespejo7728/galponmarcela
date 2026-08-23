@@ -5876,7 +5876,19 @@ function QuickCatalogPanel({ products, onAdd }) {
   // incluye, por compatibilidad, los productos antiguos sin código de barras
   // real (creados antes de que existiera esta casilla, con código interno INT-).
   const uncoded = useMemo(() => products.filter(p => p.quickAccess === true || (p.barcode && p.barcode.startsWith("INT-"))), [products]);
-  const categories = useMemo(() => ["Todos", ...new Set(uncoded.map(p => p.category).filter(Boolean))], [uncoded]);
+  const categories = useMemo(() => {
+    const presentes = Array.from(new Set(uncoded.map(p => p.category).filter(Boolean)));
+    // Orden del mesón: primero lo que más se vende y más se toca en el día.
+    // El resto queda detrás, en orden alfabético, para que no baile de un día
+    // para otro según qué producto se creó primero.
+    const puesto = (nombre) => {
+      const n = normalize(nombre);
+      const i = ["pan", "fruta", "verdura", "cecina"].findIndex(k => n.includes(k));
+      return i === -1 ? 99 : i;
+    };
+    presentes.sort((a, b) => puesto(a) - puesto(b) || String(a).localeCompare(String(b), "es"));
+    return ["Todos", ...presentes];
+  }, [uncoded]);
   const filtered = useMemo(
     () => activeCategory === "Todos" ? uncoded : uncoded.filter(p => p.category === activeCategory),
     [uncoded, activeCategory]
