@@ -6066,11 +6066,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  const nameMatches = useMemo(() => {
-    if (nameQuery.trim().length < 2) return [];
-    const q = normalize(nameQuery);
-    return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q)).slice(0, 8);
-  }, [nameQuery, products]);
+  const nameHits = useMemo(
+    () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(products, nameQuery),
+    [nameQuery, products]);
+  const nameMatches = nameHits.lista;
 
   const customerMatches = useMemo(() => {
     if (customerQuery.trim().length < 1) return [];
@@ -6469,7 +6468,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               className={`${inputCls} pl-10`} style={inputStyle()}
             />
             {nameMatches.length > 0 && (
-              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
                 {nameMatches.map(p => (
                   <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
                     <span className="truncate" style={{ color: C.ink }}>{p.name}</span>
@@ -6479,6 +6478,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                     </span>
                   </button>
                 ))}
+                <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
               </div>
             )}
           </div>
@@ -7582,11 +7582,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     toast("Proveedor registrado", "success");
   }
 
-  const nameMatches = useMemo(() => {
-    if (nameQuery.trim().length < 2) return [];
-    const q = normalize(nameQuery);
-    return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q)).slice(0, 8);
-  }, [nameQuery, products]);
+  const nameHits = useMemo(
+    () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(products, nameQuery),
+    [nameQuery, products]);
+  const nameMatches = nameHits.lista;
 
   function addExistingDraft(p) {
     // Los que llegan por kilo parten en un kilo, no en una unidad: así el
@@ -7937,13 +7936,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
               <input value={nameQuery} onChange={e => setNameQuery(e.target.value)} placeholder="Busca un producto existente por nombre o código…" className={`${inputCls} pl-9`} style={inputStyle()} />
               {nameMatches.length > 0 && (
-                <div className="absolute z-10 left-0 right-0 mt-1.5 rounded-lg overflow-hidden shadow-lg" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+                <div className="absolute z-10 left-0 right-0 mt-1.5 rounded-lg overflow-hidden shadow-lg max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
                   {nameMatches.map(p => (
                     <button key={p.id} onClick={() => addExistingDraft(p)} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-black/[.03] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
                       <span style={{ color: C.ink }}>{p.name}</span>
                       <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}</span>
                     </button>
                   ))}
+                  <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
                 </div>
               )}
             </div>
@@ -8966,6 +8966,52 @@ function pagaConTarjeta(formaDePago) {
 function recargoPorTarjeta(item, formaDePago) {
   if (!pagaConTarjeta(formaDePago)) return 0;
   return SECCIONES_CON_RECARGO.includes(normalize(item?.category || "")) ? RECARGO_TARJETA : 0;
+}
+
+/* Buscar un producto por nombre o código, para los desplegables del mesón,
+   la recepción y la transformación.
+
+   Antes cada uno cortaba en ocho resultados y ahí se acababa: si lo que
+   buscabas era el noveno, no había forma de llegar —el desplegable ni
+   siquiera se podía recorrer—. Con casi cinco mil productos, escribir "leche"
+   deja fuera lo que uno busca más veces de las que uno quisiera.
+
+   Se sube el tope y el desplegable se hace recorrible, pero eso solo no
+   arregla nada: una lista de doscientos es igual de inútil. Lo que la
+   arregla es el orden. Primero lo que empieza con lo escrito —quien escribe
+   "coca" busca COCA COLA, no AGUA CON GAS MARCA COCA—, después lo que tiene
+   stock, que es lo que se puede vender hoy, y recién ahí el resto,
+   alfabético. Así lo que se busca suele estar en las primeras dos líneas y el
+   resto del listado es la red por si acaso. */
+const TOPE_BUSQUEDA = 60;
+
+function buscarProductos(products, texto, tope = TOPE_BUSQUEDA) {
+  const q = normalize(texto).trim();
+  if (!q) return { lista: [], total: 0 };
+  const encontrados = [];
+  for (const p of products) {
+    const nombre = normalize(p.name);
+    const codigo = normalize(p.barcode);
+    const empieza = nombre.startsWith(q) || codigo.startsWith(q);
+    if (!empieza && !nombre.includes(q) && !codigo.includes(q)) continue;
+    encontrados.push({ p, empieza, hay: (Number(p.stock) || 0) > 0 });
+  }
+  encontrados.sort((a, b) =>
+    (b.empieza - a.empieza) || (b.hay - a.hay) ||
+    String(a.p.name).localeCompare(String(b.p.name), "es"));
+  return { lista: encontrados.slice(0, tope).map(x => x.p), total: encontrados.length };
+}
+
+/* Aviso al pie del desplegable cuando la búsqueda encontró más de lo que
+   cabe: sin esto, el listado se corta en silencio y uno cree que el producto
+   no existe. */
+function MasResultados({ mostrados, total }) {
+  if (total <= mostrados) return null;
+  return (
+    <div className="px-3 py-2 text-xs text-center" style={{ background: C.paperDark, color: C.gray }}>
+      Se muestran {mostrados} de {total}. Escribe un poco más para afinar la búsqueda.
+    </div>
+  );
 }
 
 /* ¿Es pan? La sección la define el negocio en Ajustes; por omisión, "PAN". */
@@ -13115,11 +13161,8 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
     [categoriasExistentes]
   );
 
-  const matches = useMemo(() => {
-    if (query.trim().length < 1) return [];
-    const q = normalize(query);
-    return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q)).slice(0, 12);
-  }, [query, products]);
+  const hits = useMemo(() => buscarProductos(products, query), [query, products]);
+  const matches = hits.lista;
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const totalContadosHoy = useMemo(
@@ -13315,7 +13358,7 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
             <Btn full size="lg" variant="dark" icon={Camera} onClick={() => setScannerOpen(true)}>Escanear código</Btn>
 
             {matches.length > 0 && (
-              <div className="mt-3 rounded-xl overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+              <div className="mt-3 rounded-xl overflow-hidden max-h-[55vh] overflow-y-auto overscroll-contain" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
                 {matches.map(p => {
                   const yaContado = contadosHoyPorProducto.get(p.id);
                   return (
@@ -13331,6 +13374,7 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
                     </button>
                   );
                 })}
+                <MasResultados mostrados={matches.length} total={hits.total} />
               </div>
             )}
             {query.trim().length > 0 && matches.length === 0 && (
@@ -13397,11 +13441,8 @@ function ProductSearchSelect({ products, value, onSelect, placeholder }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const selected = products.find(p => p.id === value);
-  const matches = useMemo(() => {
-    if (!query.trim()) return [];
-    const q = normalize(query);
-    return products.filter(p => normalize(p.name).includes(q)).slice(0, 8);
-  }, [query, products]);
+  const hits = useMemo(() => buscarProductos(products, query), [query, products]);
+  const matches = hits.lista;
 
   return (
     <div className="relative flex-1 min-w-[160px]">
@@ -13414,13 +13455,14 @@ function ProductSearchSelect({ products, value, onSelect, placeholder }) {
         className={`${inputCls} text-sm`} style={inputStyle()}
       />
       {open && matches.length > 0 && (
-        <div className="absolute z-20 top-full left-0 right-0 mt-1 rounded-lg overflow-hidden shadow-lg max-h-56 overflow-y-auto" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <div className="absolute z-20 top-full left-0 right-0 mt-1 rounded-lg overflow-hidden shadow-lg max-h-[50vh] sm:max-h-72 overflow-y-auto overscroll-contain" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           {matches.map(p => (
             <button key={p.id} type="button" onMouseDown={e => e.preventDefault()} onClick={() => { onSelect(p.id); setQuery(""); setOpen(false); }} className="w-full text-left px-3 py-2 text-sm hover:bg-black/[.03] flex items-center justify-between" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
               <span style={{ color: C.ink }}>{p.name}</span>
               <span className="text-xs font-mono flex-shrink-0 ml-2" style={{ color: C.gray }}>stock {p.stock}</span>
             </button>
           ))}
+          <MasResultados mostrados={matches.length} total={hits.total} />
         </div>
       )}
     </div>
