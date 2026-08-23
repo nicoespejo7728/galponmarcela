@@ -38,7 +38,7 @@ import { cargarCatalogos } from "@/lib/datos/catalogos";
 import { nuevoId } from "@/lib/datos/traduccion";
 import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
 import {
-  ROLLOS_D110, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
+  ROLLOS, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
 import { normalizarRespaldo } from "@/lib/datos/respaldo";
@@ -10627,7 +10627,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
   const [cuantas, setCuantas] = useState({});     // id → cuántas etiquetas
   const [trabajando, setTrabajando] = useState(false);
   const [rolloId, setRolloId] = useState(ROLLO_POR_OMISION.id);
-  const rollo = ROLLOS_D110.find(r => r.id === rolloId) || ROLLO_POR_OMISION;
+  const rollo = ROLLOS.find(r => r.id === rolloId) || ROLLO_POR_OMISION;
   const medida = medirCodigo(rollo.largo - 2);   // menos un milímetro de margen a cada lado
   const cabe = queCabe(rollo.ancho);
 
@@ -10759,10 +10759,10 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
             <span className="text-xs font-semibold" style={{ color: C.ink }}>Rollo</span>
             <select value={rolloId} onChange={e => setRolloId(e.target.value)}
               className={`${inputCls} text-sm`} style={{ ...inputStyle(), width: "auto" }}>
-              {ROLLOS_D110.map(r => <option key={r.id} value={r.id}>{r.etiqueta}</option>)}
+              {ROLLOS.map(r => <option key={r.id} value={r.id}>{r.etiqueta}</option>)}
             </select>
             <span className="text-xs" style={{ color: C.gray }}>
-              La medida va impresa en el rollo o en su caja.
+              Va impresa en el rollo o en su caja · para {rollo.impresora}
             </span>
           </div>
 
@@ -10802,8 +10802,9 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
           <p className="text-xs mt-3 pt-3" style={{ color: C.gray, borderTop: `1px dashed ${C.paperLine}` }}>
             La Niimbot no aparece en el menú de imprimir del navegador: imprime por Bluetooth desde su
             propia aplicación. "Etiquetas para la Niimbot" baja las imágenes del porte exacto del rollo
-            ({rollo.ancho} × {rollo.largo} mm) para importarlas ahí — una por producto, y las copias se
+            ({rollo.largo} × {rollo.ancho} mm) para importarlas ahí — una por producto, y las copias se
             eligen en la aplicación. "Hoja para imprimir" es para una impresora corriente.
+            {rollo.ancho > 15 && " Ojo: un rollo de más de 15 mm de ancho no entra en una D110 — es de las B1, B21 o B18."}
           </p>
         </div>
       )}
