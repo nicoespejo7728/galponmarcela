@@ -43,6 +43,10 @@ import {
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
 import {
+  FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
+  precioSugerido, explicarPrecio, redondearBonito, IVA,
+} from "@/lib/precios";
+import {
   balanza, hayWebSerial, porQueNoSePuede, pedirPuerto, puertosAutorizados,
   leerAjustesGuardados, guardarAjustes, olvidarAjustes,
   leerTrama, pareceBasura, legible, PREGUNTAS, BAUDIOS, UNIDAD_POR_OMISION,
@@ -5134,12 +5138,42 @@ function mergeById(local, fetched) {
 
 /* ---------------------------------------------------------
    RECEPCIÓN DE PEDIDOS — helpers
-   Precio sugerido = neto + IVA 19% + ganancia mínima 30% sobre el valor con IVA
+
+   El precio sugerido sale del costo NETO: neto + 19% de IVA + 30% de ganancia
+   mínima sobre el valor con IVA. La cuenta vive en lib/precios.js junto con la
+   conversión de lo que dice la factura —que puede venir con IVA incluido— al
+   neto que se guarda. Acá queda el nombre viejo porque lo llaman seis
+   pantallas y no hay nada que ganar renombrándolo.
 --------------------------------------------------------- */
-function suggestPrice(netCost) {
-  const withTax = netCost * 1.19;
-  const withMargin = withTax * 1.30;
-  return Math.ceil(withMargin / 10) * 10;
+const suggestPrice = precioSugerido;
+
+/* El selector de cómo viene el precio en la factura.
+
+   Se usa igual en la recepción (por línea y para toda la factura) y en la
+   ficha del producto: es la misma pregunta en los tres lugares, y tres
+   redacciones distintas de la misma pregunta serían tres formas de
+   equivocarse. */
+function SelectorFormaCosto({ forma, onCambiar, compacto = false, deshabilitado = false }) {
+  return (
+    <div className={compacto ? "flex gap-1" : "flex gap-1.5"} role="group"
+         aria-label="Cómo viene el precio en la factura">
+      {FORMAS_DE_COSTO.map(f => {
+        const puesto = (forma || FORMA_POR_OMISION) === f.id;
+        return (
+          <button key={f.id} type="button" disabled={deshabilitado}
+            onClick={() => onCambiar(f.id)} aria-pressed={puesto} title={f.ayuda}
+            className={compacto
+              ? "px-2 py-1 rounded-md text-[10px] font-semibold whitespace-nowrap"
+              : "px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"}
+            style={puesto
+              ? { background: C.brass, color: C.ink }
+              : { background: C.paperDark, color: C.gray }}>
+            {compacto ? f.corto : f.etiqueta}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 // Agrega una entrada al historial de costo/precio de un producto, solo si
@@ -7282,6 +7316,31 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], setS
   const suggested = suggestPrice(computedCostPerKg);
   const [confirmedLoss, setConfirmedLoss] = useState(false);
 
+  /* Igual que en Recepción: `form.cost` es SIEMPRE el neto, y el selector dice
+     cómo hay que leer el número que se escribe. Se arranca en "neto" también
+     al editar, porque lo guardado ya es neto y mostrarlo tal cual es lo
+     honesto; si alguien va a escribir el precio de una factura con IVA,
+     cambia el selector y escribe el número de la factura. */
+  const [formaCosto, setFormaCosto] = useState(FORMA_POR_OMISION);
+  const [costoEscrito, setCostoEscrito] = useState(null);
+  const costoEnPantalla = costoEscrito !== null
+    ? costoEscrito
+    : (form.cost === "" || form.cost === undefined || form.cost === null
+        ? ""
+        : redondearBonito(comoEnLaFactura(form.cost, formaCosto)));
+
+  function cambiarCosto(texto) {
+    setCostoEscrito(texto);
+    set("cost", texto === "" ? "" : netoDesde(texto, formaCosto));
+  }
+  function cambiarFormaCosto(nueva) {
+    setFormaCosto(nueva);
+    const escrito = costoEnPantalla;
+    setCostoEscrito(escrito);
+    set("cost", escrito === "" ? "" : netoDesde(escrito, nueva));
+  }
+  const cuentaCosto = explicarPrecio(Number(costoEnPantalla) || 0, formaCosto);
+
   // Regla de margen: nunca se debe vender un producto a un precio igual o
   // menor que su costo con el 19% de IVA incluido (el "neto con el 19%") —
   // esa es la única línea que no se puede cruzar. El margen del 30% que
@@ -7425,7 +7484,17 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], setS
 
       <div className="grid grid-cols-2 gap-3">
         {!useTotalPaidMode && (
-          <Field label={`Costo (neto${isPeso ? " por kg" : ""})`}><input type="number" value={form.cost} onChange={e => set("cost", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} /></Field>
+          <Field label={`Costo${isPeso ? " por kg" : ""} (${formaCosto === "conIva" ? "con IVA" : "neto"})`}>
+            <input type="number" value={costoEnPantalla} onChange={e => cambiarCosto(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} />
+            {/* Acá hay espacio, así que van las palabras completas: es la
+                misma pregunta que en Recepción y conviene que se lea igual. */}
+            <div className="mt-1.5"><SelectorFormaCosto forma={formaCosto} onCambiar={cambiarFormaCosto} /></div>
+            {cuentaCosto.partida > 0 && (
+              <p className="text-[11px] mt-1 font-mono" style={{ color: C.gray }}>
+                {formatCLP(cuentaCosto.partida)} + {cuentaCosto.cuenta} = {formatCLP(cuentaCosto.precio)}
+              </p>
+            )}
+          </Field>
         )}
         {needsApproval ? (
           <Field label={isPeso ? "Precio sugerido por kg" : "Precio sugerido"}>
@@ -7518,8 +7587,15 @@ function RestockModal({ product, onClose, onConfirm }) {
   const [kg, setKg] = useState("");
   const [pricePerKg, setPricePerKg] = useState("");
 
+  /* Lo que se escribe acá también sale de una factura, así que vale la misma
+     pregunta que en Recepción: el egreso y el costo por unidad se guardan en
+     neto, y el selector dice cómo leer el número tecleado. */
+  const [formaCosto, setFormaCosto] = useState(FORMA_POR_OMISION);
   const computedQty = kgMode ? (Number(kg) || 0) * product.unitsPerKg : (Number(qty) || 0);
-  const computedCostPerUnit = kgMode ? (product.unitsPerKg ? (Number(pricePerKg) || 0) / product.unitsPerKg : 0) : (Number(cost) || 0);
+  const escritoPorUnidad = kgMode
+    ? (product.unitsPerKg ? (Number(pricePerKg) || 0) / product.unitsPerKg : 0)
+    : (Number(cost) || 0);
+  const computedCostPerUnit = netoDesde(escritoPorUnidad, formaCosto);
   const total = computedQty * computedCostPerUnit;
   const suggestedSalePrice = computedCostPerUnit > 0 ? suggestPrice(computedCostPerUnit) : 0;
 
@@ -7557,8 +7633,20 @@ function RestockModal({ product, onClose, onConfirm }) {
         </>
       )}
 
+      <div className="rounded-lg p-3 mb-3" style={{ background: C.brassSoft }}>
+        <div className="text-xs font-semibold mb-1.5" style={{ color: C.brassText }}>
+          {kgMode ? "El precio por Kg que escribiste viene…" : "El costo que escribiste viene…"}
+        </div>
+        <SelectorFormaCosto forma={formaCosto} onCambiar={setFormaCosto} />
+        <p className="text-[11px] mt-1.5" style={{ color: C.brassText, opacity: 0.9 }}>
+          {formaCosto === "conIva"
+            ? "Con el 19% adentro: se descuenta para guardar el costo real y el precio recomendado sólo lleva el 30%."
+            : "Sin IVA: el precio recomendado lleva el 19% y después el 30%."}
+        </p>
+      </div>
+
       <div className="rounded-lg p-3 mb-4 flex justify-between text-sm" style={{ background: C.paperDark }}>
-        <span style={{ color: C.gray }}>Egreso total</span><span className="font-mono font-semibold" style={{ color: C.rust }}>{formatCLP(total)}</span>
+        <span style={{ color: C.gray }}>Egreso total (neto)</span><span className="font-mono font-semibold" style={{ color: C.rust }}>{formatCLP(total)}</span>
       </div>
       <Btn full icon={Check} disabled={computedQty <= 0} onClick={confirm}>Confirmar ingreso de stock</Btn>
     </Modal>
@@ -7674,15 +7762,41 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
   // viene la boleta. El botón queda al lado por si un día llegan sueltas.
   const [enKilo, setEnKilo] = useState(porKilo > 0);
   const porKiloActivo = porKilo > 0 && enKilo;
-  const costoPorKilo = porKiloActivo ? (Number(item.netCost) || 0) * porKilo : 0;
+
+  /* Adentro `netCost` es siempre el neto. En el campo, en cambio, va lo que
+     dice la factura: si el proveedor cobra con IVA incluido, quien recibe
+     tiene que poder escribir el número que está leyendo, no dividirlo en la
+     cabeza. `costoEscrito` guarda ese número tal cual se tecleó, para que el
+     campo no baile solo por el ida y vuelta de dividir y multiplicar. */
+  const forma = item.formaCosto || FORMA_POR_OMISION;
+  const escritoPorUnidad = item.costoEscrito !== undefined && item.costoEscrito !== null
+    ? item.costoEscrito
+    : redondearBonito(comoEnLaFactura(item.netCost, forma));
+  const costoPorKilo = porKiloActivo
+    ? redondearBonito(comoEnLaFactura(item.netCost, forma) * porKilo) : 0;
+  const cuenta = explicarPrecio(Number(escritoPorUnidad) || 0, forma);
 
   function cambiarKilos(texto) {
     const kg = Number(texto) || 0;
     onChange({ ...item, qty: Math.round(kg * porKilo) });
   }
+  function cambiarCostoPorUnidad(texto) {
+    onChange({ ...item, costoEscrito: texto, netCost: netoDesde(texto, forma) });
+  }
   function cambiarCostoPorKilo(texto) {
     const porKg = Number(texto) || 0;
-    onChange({ ...item, netCost: porKg ? porKg / porKilo : 0 });
+    const unitario = porKg ? porKg / porKilo : 0;
+    onChange({ ...item, costoEscrito: unitario || "", netCost: netoDesde(unitario, forma) });
+  }
+  /* Al cambiar el selector NO se toca el número escrito: lo que cambia es qué
+     significa. Escribir 1.190 y decir "con IVA" tiene que dejar el mismo
+     número en el campo y otro costo por dentro. */
+  function cambiarForma(nueva) {
+    onChange({
+      ...item, formaCosto: nueva, formaTocada: true,
+      netCost: netoDesde(escritoPorUnidad, nueva),
+      costoEscrito: escritoPorUnidad,
+    });
   }
   const sortedCategories = useMemo(
     () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
@@ -7760,14 +7874,19 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
         )}
       </div>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>{porKiloActivo ? "costo por kilo" : "costo neto"}</span>
+        <span className="text-[10px]" style={{ color: C.gray }}>
+          {porKiloActivo ? "costo por kilo" : "costo"} {forma === "conIva" ? "(con IVA)" : "(neto)"}
+        </span>
         <input type="number" step={porKiloActivo ? "1" : "any"}
-          value={porKiloActivo ? (costoPorKilo || "") : item.netCost}
-          onChange={e => porKiloActivo ? cambiarCostoPorKilo(e.target.value) : onChange({ ...item, netCost: e.target.value })}
+          value={porKiloActivo ? (costoPorKilo || "") : escritoPorUnidad}
+          onChange={e => porKiloActivo ? cambiarCostoPorKilo(e.target.value) : cambiarCostoPorUnidad(e.target.value)}
           className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()} />
+        {/* El selector va pegado al campo, no arriba en un rincón: la pregunta
+            es sobre ESTE número y hay que poder contestarla mirándolo. */}
+        <div className="mt-1"><SelectorFormaCosto forma={forma} onCambiar={cambiarForma} compacto /></div>
         {porKiloActivo && (
           <span className="text-[10px] mt-0.5" style={{ color: C.gray }}>
-            {formatCLP(Number(item.netCost) || 0)} c/u
+            {formatCLP(Number(escritoPorUnidad) || 0)} c/u
           </span>
         )}
       </div>
@@ -7784,6 +7903,14 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
             administrador, queda como propuesta hasta que alguien la apruebe. */}
         <span className="text-[10px]" style={{ color: C.gray }}>{role === "admin" ? "precio de venta" : "precio propuesto"}</span>
         <input type="number" value={item.finalPrice ?? suggested} onChange={e => onChange({ ...item, finalPrice: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
+        {/* La cuenta a la vista. Sin esto el selector es un interruptor que
+            nadie sabe si dejó bien puesto: acá se lee que a $1.190 con IVA se
+            le suma sólo el 30%, y a $1.000 netos el 19% y el 30%. */}
+        {cuenta.partida > 0 && (
+          <span className="text-[10px] mt-0.5 font-mono" style={{ color: C.gray }}>
+            {formatCLP(cuenta.partida)} + {cuenta.cuenta} = {formatCLP(cuenta.precio)}
+          </span>
+        )}
       </div>
       <button onClick={onRemove} style={{ color: C.rust }}><Trash2 size={15} /></button>
     </div>
@@ -7800,6 +7927,10 @@ const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Crédito con el 
 function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast }) {
   const [subTab, setSubTab] = useState("manual");
   const [draftItems, setDraftItems] = useState([]);
+  /* Cómo vienen los precios en ESTA factura. Casi siempre un proveedor es
+     todo de una forma, así que se pone una vez arriba y baja a todas las
+     líneas; la que haya que corregir se corrige en su propia línea. */
+  const [formaFactura, setFormaFactura] = useState(FORMA_POR_OMISION);
   const [supplier, setSupplier] = useState("");
   const [supplierId, setSupplierId] = useState(null);
   const [supplierQuery, setSupplierQuery] = useState("");
@@ -7852,14 +7983,28 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   function addExistingDraft(p) {
     // Los que llegan por kilo parten en un kilo, no en una unidad: así el
     // casillero muestra "1" y no "0,083" apenas se agrega la línea.
-    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: unidadesPorKilo(p) || 1, netCost: p.cost || 0, unitType: p.unitType === "peso" ? "peso" : "unidad" }]);
+    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: false, productId: p.id, barcode: p.barcode, name: p.name, category: p.category, qty: unidadesPorKilo(p) || 1, netCost: p.cost || 0, formaCosto: formaFactura, unitType: p.unitType === "peso" ? "peso" : "unidad" }]);
     setNameQuery("");
   }
   function addNewDraft() {
-    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: "", name: "", category: "", qty: 1, netCost: 0, unitType: "unidad" }]);
+    setDraftItems(prev => [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: "", name: "", category: "", qty: 1, netCost: 0, formaCosto: formaFactura, unitType: "unidad" }]);
   }
   function updateDraft(tempId, updated) {
     setDraftItems(prev => prev.map(d => d.tempId === tempId ? updated : d));
+  }
+  /* Cambiar la forma de la factura baja a todas las líneas, MENOS a las que
+     alguien ya corrigió a mano: pisarle la corrección a quien se tomó el
+     trabajo de hacerla es la manera más rápida de que deje de confiar en el
+     selector. */
+  function cambiarFormaFactura(nueva) {
+    setFormaFactura(nueva);
+    setDraftItems(prev => prev.map(d => {
+      if (d.formaTocada) return d;
+      const escrito = d.costoEscrito !== undefined && d.costoEscrito !== null
+        ? d.costoEscrito
+        : redondearBonito(comoEnLaFactura(d.netCost, d.formaCosto || FORMA_POR_OMISION));
+      return { ...d, formaCosto: nueva, costoEscrito: escrito, netCost: netoDesde(escrito, nueva) };
+    }));
   }
   function removeDraft(tempId) {
     setDraftItems(prev => prev.filter(d => d.tempId !== tempId));
@@ -7883,9 +8028,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         return copy;
       }
       if (found) {
-        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: unidadesPorKilo(found) || 1, netCost: found.cost || 0, unitType: found.unitType === "peso" ? "peso" : "unidad" }];
+        return [...prev, { tempId: uid("draft"), isNew: false, productId: found.id, barcode: found.barcode, name: found.name, category: found.category, qty: unidadesPorKilo(found) || 1, netCost: found.cost || 0, formaCosto: formaFactura, unitType: found.unitType === "peso" ? "peso" : "unidad" }];
       }
-      return [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: clean, name: "", category: "", qty: 1, netCost: 0, unitType: "unidad" }];
+      return [...prev, { tempId: uid("draft"), isNew: true, productId: null, barcode: clean, name: "", category: "", qty: 1, netCost: 0, formaCosto: formaFactura, unitType: "unidad" }];
     });
     toast(found ? `"${found.name}" agregado — revisa cantidad y costo` : `Código ${clean} no está en el catálogo — complétalo como producto nuevo`, "success");
     setPistolaBarcode("");
@@ -7922,8 +8067,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         const match = findProductMatch(products, it.name, it.code);
         const detectedUnitType = it.unitType === "peso" ? "peso" : "unidad";
         return match
-          ? { tempId: uid("draft"), isNew: false, productId: match.id, barcode: match.barcode, name: match.name, category: match.category, qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, unitType: match.unitType === "peso" ? "peso" : "unidad" }
-          : { tempId: uid("draft"), isNew: true, productId: null, barcode: it.code || "", name: it.name || "", category: "", qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, unitType: detectedUnitType };
+          /* La lectura del documento ya devuelve el precio NETO —se lo pide
+             explícitamente el instructivo, y si la factura venía con IVA lo
+             descuenta él—. Así que estas líneas nacen en "neto" y marcadas
+             como resueltas: aplicarles otra vez el selector de arriba sería
+             descontar el IVA dos veces. Si la lectura se equivocó, se corrige
+             en la línea. */
+          ? { tempId: uid("draft"), isNew: false, productId: match.id, barcode: match.barcode, name: match.name, category: match.category, qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, formaCosto: "neto", formaTocada: true, unitType: match.unitType === "peso" ? "peso" : "unidad" }
+          : { tempId: uid("draft"), isNew: true, productId: null, barcode: it.code || "", name: it.name || "", category: "", qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, formaCosto: "neto", formaTocada: true, unitType: detectedUnitType };
       });
       setDraftItems(prev => [...prev, ...mapped]);
       const matchedCount = mapped.filter(m => !m.isNew).length;
@@ -8239,9 +8390,27 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
       {draftItems.length > 0 && (
         <div className="rounded-xl overflow-hidden mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: C.paperDark }}>
+          <div className="px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.paperDark }}>
             <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Productos a recibir ({draftItems.length})</span>
-            <span className="text-xs font-mono" style={{ color: C.gray }}>{totals.qty} unid. · neto {formatCLP(totals.net)} · con IVA {formatCLP(totals.net * 1.19)}</span>
+            <span className="text-xs font-mono" style={{ color: C.gray }}>{totals.qty} unid. · neto {formatCLP(totals.net)} · con IVA {formatCLP(totals.net * (1 + IVA))}</span>
+          </div>
+          {/* Cómo viene esta factura. Va arriba de la lista porque es una
+              propiedad del papel que está sobre el mesón, no de cada producto:
+              se mira una vez el encabezado de la factura y se deja puesto. */}
+          <div className="px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap"
+               style={{ borderBottom: `1px solid ${C.paperLine}`, background: C.brassSoft }}>
+            <div className="min-w-0">
+              <span className="text-xs font-semibold" style={{ color: C.brassText }}>
+                Los precios de esta factura vienen…
+              </span>
+              <p className="text-[11px] mt-0.5 max-w-md" style={{ color: C.brassText, opacity: 0.9 }}>
+                {formaFactura === "conIva"
+                  ? "El proveedor ya cobra con el 19% adentro: al precio de venta se le suma sólo el 30%."
+                  : "El precio de la factura no trae IVA: al precio de venta se le suma el 19% y después el 30%."}
+                {" "}Se puede cambiar línea por línea si la factura mezcla los dos.
+              </p>
+            </div>
+            <SelectorFormaCosto forma={formaFactura} onCambiar={cambiarFormaFactura} />
           </div>
           <div>
             {draftItems.map(item => (
