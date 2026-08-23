@@ -42,6 +42,11 @@ import {
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
+import {
+  balanza, hayWebSerial, porQueNoSePuede, pedirPuerto, puertosAutorizados,
+  leerAjustesGuardados, guardarAjustes, olvidarAjustes,
+  leerTrama, pareceBasura, legible, PREGUNTAS, BAUDIOS, UNIDAD_POR_OMISION,
+} from "@/lib/balanza";
 import { normalizarRespaldo } from "@/lib/datos/respaldo";
 import { subirLogo, quitarLogo } from "@/lib/datos/logo";
 import {
@@ -5999,14 +6004,53 @@ const GRAMOS_POR_KILO = 1000;
 const enGramos = (kg) => Math.round((Number(kg) || 0) * GRAMOS_POR_KILO);
 const desdeGramos = (g) => Number(((Number(g) || 0) / GRAMOS_POR_KILO).toFixed(3));
 
+/* Estar al tanto de la balanza.
+
+   La conexión es una sola por computador —es un aparato físico— así que vive
+   en un objeto único fuera de React (lib/balanza.js) y las pantallas se
+   asoman a mirarlo. Si no hay balanza conectada esto devuelve el estado
+   apagado y no molesta a nadie: todo lo que existía antes sigue funcionando
+   igual, escribiendo los gramos a mano. */
+function usarBalanza() {
+  const [estado, setEstado] = useState(() => balanza.estado());
+  useEffect(() => balanza.escuchar(setEstado), []);
+  return estado;
+}
+
+/* ¿Sigue viva la lectura?
+
+   Una balanza que se desenchufa a media venta no avisa: simplemente deja de
+   mandar. Si se dejara el último peso en pantalla, alguien cobraría el peso
+   del cliente anterior. Por eso una lectura de más de tres segundos se toma
+   por vieja y se deja de mostrar. */
+const PESO_VIEJO_MS = 3000;
+
 function WeightPromptModal({ product, onClose, onConfirm }) {
   const [gramos, setGramos] = useState("");
-  const weightKg = desdeGramos(gramos);
+  const bal = usarBalanza();
+  const [ahora, setAhora] = useState(() => Date.now());
+
+  /* El reloj corre solo mientras el diálogo está abierto y solo si hay
+     balanza: es lo que hace que la lectura se marchite sola. */
+  useEffect(() => {
+    if (!bal.conectada) return;
+    const t = setInterval(() => setAhora(Date.now()), 500);
+    return () => clearInterval(t);
+  }, [bal.conectada]);
+
+  const fresca = bal.conectada && bal.visto > 0 && (ahora - bal.visto) < PESO_VIEJO_MS;
+  const pesoBalanza = fresca && bal.peso > 0 ? bal.peso : null;
+
+  /* Manda lo que se haya escrito a mano; si no se escribió nada, manda la
+     balanza. Escribir gana a propósito: si alguien tomó la molestia de teclear
+     un número, es porque quiere ese y no el del plato. */
+  const escrito = desdeGramos(gramos);
+  const weightKg = gramos.trim() !== "" ? escrito : (pesoBalanza || 0);
   const subtotal = weightKg * product.price;
 
   function submit() {
     if (weightKg <= 0) return;
-    onConfirm(weightKg);
+    onConfirm(Number(weightKg.toFixed(3)));
   }
 
   return (
@@ -6015,8 +6059,35 @@ function WeightPromptModal({ product, onClose, onConfirm }) {
         <span style={{ color: C.gray }}>Precio por kilo</span>
         <span className="font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(product.price)}</span>
       </div>
-      <Field label="Peso en gramos">
-        <input autoFocus type="number" inputMode="numeric" step="1" value={gramos}
+
+      {bal.conectada && (
+        <div className="rounded-xl p-4 mb-3 text-center"
+             style={{ background: pesoBalanza ? C.greenSoft : C.paperDark,
+                      border: `1.5px solid ${pesoBalanza ? C.greenDark : C.paperLine}` }}>
+          <div className="flex items-center justify-center gap-1.5 text-xs font-semibold mb-1"
+               style={{ color: pesoBalanza ? C.greenDark : C.gray }}>
+            <Scale size={13} /> Balanza
+            {pesoBalanza && !bal.estable && <span style={{ opacity: 0.8 }}>· todavía se mueve</span>}
+          </div>
+          {fresca ? (
+            <div className="font-mono font-bold leading-none" style={{ fontSize: 40, color: pesoBalanza ? C.greenDark : C.gray }}>
+              {enGramos(bal.peso)}<span className="text-lg font-semibold"> g</span>
+            </div>
+          ) : (
+            <div className="text-sm py-2" style={{ color: C.gray }}>
+              {bal.visto ? "La balanza dejó de mandar el peso — revisa el cable" : "Esperando el peso…"}
+            </div>
+          )}
+          {pesoBalanza && gramos.trim() === "" && (
+            <div className="text-xs mt-1.5" style={{ color: C.greenDark, opacity: 0.85 }}>
+              Pon el producto en el plato y aprieta Agregar
+            </div>
+          )}
+        </div>
+      )}
+
+      <Field label={bal.conectada ? "O escribe el peso a mano, en gramos" : "Peso en gramos"}>
+        <input autoFocus={!bal.conectada} type="number" inputMode="numeric" step="1" value={gramos}
           onChange={e => setGramos(e.target.value)}
           onKeyDown={e => e.key === "Enter" && submit()}
           className={`${inputCls} font-mono text-lg`} style={inputStyle()} placeholder="Ej. 250" />
@@ -6214,6 +6285,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
      al tocar "Cámara": así el trozo ya está en memoria cuando hay un cliente
      esperando. Ver precalentarEscaner. */
   useEffect(() => { precalentarEscaner(); }, []);
+
+  /* Y la balanza se reconecta sola, con lo que se configuró la primera vez.
+     No se le avisa a nadie si falla: puede estar desenchufada, o ser el
+     teléfono, y ninguna de las dos cosas es motivo para molestar a quien está
+     por atender. La caja funciona igual, escribiendo los gramos. */
+  useEffect(() => { balanza.conectarSolo().catch(() => {}); }, []);
 
   const nameHits = useMemo(
     () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(products, nameQuery),
@@ -14582,6 +14659,291 @@ function MyAccountModal({ session, users, setUsers, onClose, toast }) {
 /* ---------------------------------------------------------
    AJUSTES (solo admin)
 --------------------------------------------------------- */
+/* La balanza del mesón.
+
+   Todo lo que hay que hacer una vez está acá: autorizar el puerto, encontrar
+   a qué velocidad y en qué idioma habla la balanza, y confirmar si lo que
+   manda son kilos o gramos cuando no lo dice.
+
+   El día que llegue la balanza esto se enchufa y se aprieta un botón. Si la
+   búsqueda no la encuentra, "Ver lo que manda" muestra los bytes tal cual
+   salen del cable, que es lo único que permite entender qué pasa sin tener el
+   aparato al lado. */
+function BalanzaAjustes({ toast }) {
+  const bal = usarBalanza();
+  const [sePuede, setSePuede] = useState(null);      // null = todavía no se sabe
+  const [ajustes, setAjustes] = useState(null);
+  const [puerto, setPuerto] = useState(null);
+  const [probando, setProbando] = useState(null);    // qué combinación se está probando
+  const [hallazgo, setHallazgo] = useState(null);
+  const [espiado, setEspiado] = useState(null);
+  const [espiando, setEspiando] = useState(false);
+  const [ahora, setAhora] = useState(() => Date.now());
+
+  /* El navegador solo se puede preguntar en el navegador, no al armar la
+     página en el servidor. */
+  useEffect(() => {
+    setSePuede(hayWebSerial() ? true : porQueNoSePuede());
+    setAjustes(leerAjustesGuardados());
+    puertosAutorizados().then(ps => { if (ps.length) setPuerto(ps[0]); });
+  }, []);
+
+  useEffect(() => {
+    if (!bal.conectada) return;
+    const t = setInterval(() => setAhora(Date.now()), 500);
+    return () => clearInterval(t);
+  }, [bal.conectada]);
+
+  const fresca = bal.conectada && bal.visto > 0 && (ahora - bal.visto) < PESO_VIEJO_MS;
+
+  async function conPuerto(hacer) {
+    try {
+      const p = puerto || await pedirPuerto();
+      setPuerto(p);
+      await hacer(p);
+    } catch (e) {
+      /* Cancelar el cuadro de puertos del navegador no es un error: es alguien
+         que se arrepintió. No hay que gritarle por eso. */
+      if (e?.name === "NotFoundError") return;
+      toast(e?.message || "No se pudo abrir el puerto", "error");
+    }
+  }
+
+  function buscar() {
+    setHallazgo(null); setEspiado(null);
+    conPuerto(async (p) => {
+      const r = await balanza.buscar(p, { alProbar: setProbando });
+      setProbando(null);
+      setHallazgo(r);
+      if (r.encontrada) {
+        const a = { baudios: r.baudios, pregunta: r.pregunta, unidad: UNIDAD_POR_OMISION };
+        /* Si la trama trae la unidad, no hay nada que preguntar. Si no, se
+           deja el valor por omisión y abajo se pide confirmarlo: el número que
+           se ve en pantalla contra el que muestra el visor. */
+        setAjustes(a);
+        guardarAjustes(a);
+        await balanza.conectar(p, a);
+        toast("Balanza encontrada y conectada", "success");
+      }
+    });
+  }
+
+  function conectar() {
+    conPuerto(async (p) => {
+      const ok = await balanza.conectar(p, ajustes);
+      toast(ok ? "Balanza conectada" : "No se pudo conectar la balanza", ok ? "success" : "error");
+    });
+  }
+
+  /* Espiar el puerto obliga a soltar la conexión —el puerto es uno solo— así
+     que después se vuelve a conectar. Si no, mirar el diagnóstico dejaría la
+     balanza muerta, y en la caja el peso dejaría de aparecer sin que nadie
+     entienda por qué. */
+  function espiar(baudios) {
+    const estaba = bal.conectada;
+    setEspiando(true); setEspiado(null);
+    conPuerto(async (p) => {
+      try {
+        const r = await balanza.espiar(p, { baudios, pregunta: ajustes?.pregunta || "sola", ms: 2500 });
+        setEspiado({ ...r, baudios });
+      } finally {
+        setEspiando(false);
+        if (estaba && ajustes) await balanza.conectar(p, ajustes);
+      }
+    }).finally(() => setEspiando(false));
+  }
+
+  function fijarUnidad(unidad) {
+    const a = { ...(ajustes || { baudios: 9600, pregunta: "sola" }), unidad };
+    setAjustes(a); guardarAjustes(a);
+    if (bal.conectada && puerto) balanza.conectar(puerto, a);
+    toast(`Listo — la balanza manda ${unidad === "kg" ? "kilos" : "gramos"}`, "success");
+  }
+
+  function olvidar() {
+    olvidarAjustes(); setAjustes(null); setHallazgo(null); setEspiado(null);
+    balanza.desconectar();
+  }
+
+  const caja = { background: "#fff", border: `1.5px solid ${C.paperLine}` };
+
+  if (sePuede === null) return null;
+
+  return (
+    <div className="rounded-xl p-4" style={caja}>
+      <h3 className="text-base font-semibold mb-1 flex items-center gap-2"
+          style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+        <Scale size={17} /> Balanza por USB
+      </h3>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Con la balanza conectada, al pesar un producto que se vende por kilo el peso aparece solo
+        en la caja y no hay que escribirlo. Se configura una vez en cada computador.
+      </p>
+
+      {sePuede !== true ? (
+        <div className="rounded-lg p-3 text-xs" style={{ background: C.brassSoft, color: C.brassText }}>
+          {sePuede}
+        </div>
+      ) : (
+        <>
+          {bal.conectada && (
+            <div className="rounded-lg p-3 mb-3 flex items-center justify-between gap-3 flex-wrap"
+                 style={{ background: C.greenSoft }}>
+              <div>
+                <div className="text-sm font-semibold" style={{ color: C.greenDark }}>Conectada</div>
+                <div className="text-xs" style={{ color: C.greenDark, opacity: 0.85 }}>
+                  {ajustes?.baudios} baudios · {PREGUNTAS.find(p => p.id === ajustes?.pregunta)?.nombre}
+                  {" · manda "}{ajustes?.unidad === "g" ? "gramos" : "kilos"}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="font-mono font-bold leading-none" style={{ fontSize: 26, color: C.greenDark }}>
+                  {fresca ? `${enGramos(bal.peso)} g` : "—"}
+                </div>
+                {fresca && !bal.estable && (
+                  <div className="text-[11px]" style={{ color: C.greenDark, opacity: 0.8 }}>se está moviendo</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {bal.buscando && (
+            <div className="rounded-lg p-3 mb-3 text-xs flex items-center gap-2" style={{ background: C.paperDark, color: C.ink }}>
+              <Loader2 size={14} className="animate-spin" />
+              {probando
+                ? `Probando ${probando.baudios} baudios, ${probando.nombre}…`
+                : "Buscando la balanza…"}
+            </div>
+          )}
+
+          {hallazgo && !hallazgo.encontrada && !bal.buscando && (
+            <div className="rounded-lg p-3 mb-3 text-xs" style={{ background: C.rustSoft, color: C.rust }}>
+              Se probaron {hallazgo.intentos.length} combinaciones y la balanza no contestó ninguna. Puede ser
+              que esté apagada, que el cable sea de los que solo cargan, o que le falte el controlador del
+              adaptador USB-serie (CH340 o Prolific). Con "Ver lo que manda" se puede mirar si llega algo.
+            </div>
+          )}
+
+          {/* La unidad es lo único que no se puede adivinar solo. Si la balanza
+              no la dice en la trama, hay que mirar el visor y confirmarla — y
+              se pregunta acá, con el número a la vista, no en abstracto. */}
+          {bal.conectada && hallazgo?.encontrada && !hallazgo.diceUnidad && (
+            <div className="rounded-lg p-3 mb-3" style={{ background: C.brassSoft }}>
+              <div className="text-sm font-semibold mb-1" style={{ color: C.brassText }}>
+                ¿Kilos o gramos?
+              </div>
+              <p className="text-xs mb-2" style={{ color: C.brassText, opacity: 0.9 }}>
+                Esta balanza manda el número pelado, sin decir la unidad. Pon algo en el plato y compara:
+                acá se está leyendo <strong className="font-mono">{fresca ? enGramos(bal.peso) : "—"} g</strong>.
+                Si el visor de la balanza muestra otra cosa, es la otra opción.
+              </p>
+              <div className="flex gap-2">
+                <Btn size="sm" variant={ajustes?.unidad === "kg" ? "primary" : "ghost"} onClick={() => fijarUnidad("kg")}>Manda kilos</Btn>
+                <Btn size="sm" variant={ajustes?.unidad === "g" ? "primary" : "ghost"} onClick={() => fijarUnidad("g")}>Manda gramos</Btn>
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <Btn size="sm" icon={bal.buscando ? Loader2 : Search} disabled={bal.buscando} onClick={buscar}>
+              {bal.buscando ? "Buscando…" : ajustes ? "Buscarla de nuevo" : "Buscar la balanza"}
+            </Btn>
+            {ajustes && !bal.conectada && (
+              <Btn size="sm" variant="ghost" icon={Scale} onClick={conectar}>Conectar</Btn>
+            )}
+            {bal.conectada && (
+              <Btn size="sm" variant="ghost" onClick={() => balanza.desconectar()}>Desconectar</Btn>
+            )}
+            <Btn size="sm" variant="ghost" icon={espiando ? Loader2 : ScanLine} disabled={espiando || bal.buscando}
+                 onClick={() => espiar(ajustes?.baudios || 9600)}>
+              {espiando ? "Escuchando…" : "Ver lo que manda"}
+            </Btn>
+            {ajustes && <Btn size="sm" variant="ghost" onClick={olvidar}>Olvidar</Btn>}
+          </div>
+
+          {espiado && <DiagnosticoBalanza espiado={espiado} onProbarOtro={espiar} espiando={espiando} />}
+
+          {bal.error && (
+            <p className="text-xs mt-3" style={{ color: C.rust }}>{bal.error}</p>
+          )}
+
+          <p className="text-xs mt-3 pt-3" style={{ color: C.gray, borderTop: `1px dashed ${C.paperLine}` }}>
+            El navegador pide autorizar el puerto una sola vez por computador; después se conecta sola.
+            Esto no anda en el teléfono —ningún navegador de teléfono puede leer un puerto USB— así que
+            ahí se siguen escribiendo los gramos a mano. La balanza tampoco necesita internet: si se cae
+            la conexión, sigue pesando igual.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Lo que sale del cable, tal cual.
+
+   Esta es la pantalla que sirve el día que la balanza llegue y no funcione a
+   la primera. Sin ella, "no anda" es todo lo que se puede decir por teléfono;
+   con ella se ve si llega algo, si son letras o basura, y qué separa una
+   lectura de la siguiente. */
+function DiagnosticoBalanza({ espiado, onProbarOtro, espiando }) {
+  const hay = espiado.crudo.length > 0;
+  const lecturas = espiado.tramas.map(t => leerTrama(t)).filter(Boolean);
+  const basura = espiado.tramas.filter(t => pareceBasura(t)).length;
+
+  return (
+    <div className="rounded-lg p-3 mt-3 text-xs" style={{ background: C.paperDark }}>
+      <div className="font-semibold mb-2" style={{ color: C.ink }}>
+        A {espiado.baudios} baudios, en 2,5 segundos llegaron {espiado.crudo.length} bytes
+        {hay ? ` en ${espiado.tramas.length} trama(s)` : ""}
+      </div>
+
+      {!hay && (
+        <p style={{ color: C.gray }}>
+          No llegó ningún byte. La balanza está apagada, el cable no es de datos, falta el controlador del
+          adaptador USB-serie, o es de las que hay que preguntarles el peso — prueba la búsqueda completa,
+          que también prueba eso.
+        </p>
+      )}
+
+      {hay && (
+        <>
+          {basura > 0 && (
+            <p className="mb-2" style={{ color: C.rust }}>
+              {basura} de {espiado.tramas.length} tramas son ilegibles: casi seguro es otra velocidad.
+              Prueba las de abajo.
+            </p>
+          )}
+          <div className="font-mono mb-2 p-2 rounded overflow-x-auto whitespace-pre"
+               style={{ background: "#fff", border: `1px solid ${C.paperLine}`, color: C.ink, maxHeight: 120 }}>
+            {espiado.tramas.slice(0, 8).map((t, i) => <div key={i}>{legible(t)}</div>)}
+          </div>
+          <div className="font-mono mb-2 p-2 rounded overflow-x-auto"
+               style={{ background: "#fff", border: `1px solid ${C.paperLine}`, color: C.gray, maxHeight: 60 }}>
+            {espiado.hex.slice(0, 300)}{espiado.hex.length > 300 ? " …" : ""}
+          </div>
+          <p style={{ color: lecturas.length ? C.greenDark : C.rust }}>
+            {lecturas.length
+              ? `Se entienden ${lecturas.length} lectura(s). La última da ${lecturas[lecturas.length - 1].valor}${lecturas[lecturas.length - 1].unidad ? " " + lecturas[lecturas.length - 1].unidad : " (sin unidad)"}.`
+              : "Llegan bytes pero ninguno tiene forma de peso."}
+          </p>
+        </>
+      )}
+
+      <div className="flex flex-wrap gap-1.5 mt-2">
+        <span style={{ color: C.gray, alignSelf: "center" }}>Probar a:</span>
+        {BAUDIOS.map(b => (
+          <button key={b} disabled={espiando} onClick={() => onProbarOtro(b)}
+            className="px-2 py-1 rounded font-mono"
+            style={{ background: b === espiado.baudios ? C.brass : "#fff",
+                     border: `1px solid ${C.paperLine}`, color: C.ink, opacity: espiando ? 0.5 : 1 }}>
+            {b}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({ settings, setSettings, toast, products, sales, allData, onRestore }) {
   const [businessName, setBusinessName] = useState(settings.businessName);
   const [currentPin, setCurrentPin] = useState("");
@@ -14782,6 +15144,8 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio("")}>Volver a aplicarla</Btn>
         </div>
       </div>
+
+      <BalanzaAjustes toast={toast} />
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <h3 className="text-base font-semibold mb-3" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Cambiar PIN de administrador</h3>
