@@ -9822,8 +9822,17 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
     () => activos.filter(p => p.stock > 0 && String(p.barcode || "").startsWith("INT-")), [activos]);
   const sinPrecio = useMemo(
     () => activos.filter(p => p.stock > 0 && !(p.price > 0)), [activos]);
+  /* Los que tienen stock primero: son los que están en la repisa y los que
+     conviene clasificar hoy. Los que quedaron en cero —casi todos herencia
+     del Excel— van a la cola, alfabéticos, para cuando haya tiempo. */
   const sinSeccion = useMemo(
-    () => activos.filter(p => !p.category || normalize(p.category) === "sin clasificar"), [activos]);
+    () => activos
+      .filter(p => !p.category || normalize(p.category) === "sin clasificar")
+      .sort((a, b) =>
+        (b.stock > 0 ? 1 : 0) - (a.stock > 0 ? 1 : 0)
+        || (b.stock || 0) - (a.stock || 0)
+        || String(a.name || "").localeCompare(String(b.name || ""), "es")),
+    [activos]);
 
   /* Cuál conviene conservar, en este orden:
 
