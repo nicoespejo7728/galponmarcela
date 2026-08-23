@@ -31,10 +31,12 @@ import {
   registrarVenta,
   subirLoPendiente,
   cuantosPendientes,
+  codigosInternosUsados,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
 import { nuevoId } from "@/lib/datos/traduccion";
+import { repartirCodigos, esCodigoDelAlmacen, svgEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
 import { normalizarRespaldo } from "@/lib/datos/respaldo";
 import { subirLogo, quitarLogo } from "@/lib/datos/logo";
 import {
@@ -10602,6 +10604,218 @@ function ConsumosView({ toast }) {
   );
 }
 
+/* Etiquetas para los productos sin código de envase.
+
+   El problema en el mesón: la bolsa de regalo, lo que se compró a granel, lo
+   que llegó suelto. No traen código, la pistola no los encuentra y hay que
+   buscarlos escribiendo el nombre con el cliente esperando. La salida es
+   pegarles una etiqueta con un código nuestro.
+
+   Acá se les crea el código —EAN-13 del bloque interno, ver lib/codigos-barra.js—
+   y se arma la hoja para imprimir, diciendo cuántas etiquetas van de cada uno:
+   una si es un producto único, doce si son doce bolsas iguales en la repisa.
+
+   El código se guarda en el producto ANTES de imprimir, a propósito. Si se
+   imprimiera primero, bastaría un corte de luz para dejar etiquetas pegadas en
+   la repisa con un código que el sistema no conoce — y eso es peor que no
+   tener etiqueta, porque la pistola pita y no pasa nada. */
+function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, onCompletar }) {
+  const [cuantas, setCuantas] = useState({});     // id → cuántas etiquetas
+  const [trabajando, setTrabajando] = useState(false);
+
+  const conCodigo = useMemo(
+    () => productos.filter(p => esCodigoDelAlmacen(p.barcode)), [productos]);
+  const porAsignar = useMemo(
+    () => productos.filter(p => !esCodigoDelAlmacen(p.barcode)), [productos]);
+
+  const aImprimir = useMemo(
+    () => conCodigo
+      .map(p => ({ producto: p, copias: Math.max(0, Number(cuantas[p.id] ?? 1) || 0) }))
+      .filter(x => x.copias > 0),
+    [conCodigo, cuantas]);
+  const totalEtiquetas = aImprimir.reduce((s, x) => s + x.copias, 0);
+
+  /* Se reparten de una vez para todos los que falten: pedirlos de a uno haría
+     que dos personas en dos cajas se pisaran el correlativo. */
+  async function crearCodigos() {
+    if (trabajando || porAsignar.length === 0) return;
+    setTrabajando(true);
+    try {
+      /* Los códigos ya tomados se le preguntan a la BASE, no al catálogo que
+         tiene la pantalla: ese trae solo los productos activos, y un producto
+         retirado hace meses sigue ocupando su código —el índice único de la
+         base no distingue—. Mirando solo lo activo, el primer código repartido
+         chocaba contra el de un producto de baja y la etiqueta no se guardaba. */
+      const tomados = (await codigosInternosUsados(PREFIJO_ALMACEN)).map(c => ({ barcode: c }));
+      const nuevos = repartirCodigos([...todos, ...tomados], porAsignar.length);
+      const porId = new Map(porAsignar.map((p, i) => [p.id, nuevos[i]]));
+      const actualizados = todos.map(p =>
+        porId.has(p.id) ? { ...p, barcode: porId.get(p.id) } : p);
+      setProducts(actualizados);
+      await saveJSON("products-catalog", actualizados, { origen: "ajuste" });
+      toast(`Listo — ${nuevos.length} producto(s) ya tienen su código`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudieron crear los códigos"), "error");
+    } finally {
+      setTrabajando(false);
+    }
+  }
+
+  function imprimir() {
+    if (totalEtiquetas === 0) return toast("Pon cuántas etiquetas quieres de cada uno", "error");
+    const ventana = window.open("", "_blank", "width=420,height=640");
+    if (!ventana) return toast("El navegador bloqueó la ventana de impresión. Permítela y vuelve a intentar.", "error");
+    ventana.document.write(hojaDeEtiquetas(aImprimir, settings));
+    ventana.document.close();
+  }
+
+  const fijar = (id, v) => setCuantas(c => ({ ...c, [id]: v }));
+
+  if (productos.length === 0) {
+    return <EmptyState icon={Check} title="Todos tienen código"
+      hint="No queda ningún producto con stock esperando su etiqueta." />;
+  }
+
+  return (
+    <div>
+      {porAsignar.length > 0 && (
+        <div className="rounded-xl p-4 mb-3 flex items-center justify-between gap-3 flex-wrap"
+             style={{ background: C.brassSoft }}>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold" style={{ color: C.brassText }}>
+              {porAsignar.length} producto(s) todavía sin código
+            </div>
+            <p className="text-xs mt-0.5 max-w-lg" style={{ color: C.brassText, opacity: 0.85 }}>
+              Se les crea un código propio del almacén, del rango que ningún fabricante puede usar,
+              así que no choca con ningún envase. Queda guardado en el producto y recién ahí se imprime.
+            </p>
+          </div>
+          <Btn size="sm" icon={trabajando ? Loader2 : Tags} disabled={trabajando} onClick={crearCodigos}>
+            {trabajando ? "Creando…" : "Crear los códigos"}
+          </Btn>
+        </div>
+      )}
+
+      {conCodigo.length > 0 && (
+        <div className="rounded-xl p-4 mb-3 flex items-center justify-between gap-3 flex-wrap"
+             style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div>
+            <div className="text-sm font-semibold" style={{ color: C.ink }}>
+              {totalEtiquetas} etiqueta{totalEtiquetas === 1 ? "" : "s"} para imprimir
+            </div>
+            <p className="text-xs mt-0.5" style={{ color: C.gray }}>
+              Se abre una hoja aparte y se manda al rotulador. Pon 0 en los que no quieras imprimir ahora.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Btn size="sm" variant="ghost"
+              onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 0])))}>Ninguna</Btn>
+            <Btn size="sm" variant="ghost"
+              onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 1])))}>Una de cada uno</Btn>
+            <Btn size="sm" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Imprimir</Btn>
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <div className="divide-y" style={{ borderColor: C.paperLine }}>
+          {productos.slice(0, 200).map(p => {
+            const listo = esCodigoDelAlmacen(p.barcode);
+            return (
+              <div key={p.id} className="px-4 py-3 flex items-center gap-3 flex-wrap">
+                <span className="flex-1 min-w-[160px]">
+                  <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
+                  <span className="block text-xs font-mono" style={{ color: listo ? C.greenDark : C.gray }}>
+                    {listo ? p.barcode : "sin código todavía"} · stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"}
+                  </span>
+                </span>
+                {listo ? (
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-[11px]" style={{ color: C.gray }}>etiquetas</span>
+                    <input type="number" min="0" inputMode="numeric"
+                      value={cuantas[p.id] ?? 1}
+                      onChange={e => fijar(p.id, e.target.value)}
+                      className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
+                  </label>
+                ) : (
+                  <Btn size="sm" variant="ghost" icon={Pencil} onClick={() => onCompletar(p)}>Completar</Btn>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {productos.length > 200 && (
+          <p className="text-xs px-4 py-3" style={{ color: C.gray, borderTop: `1px solid ${C.paperLine}` }}>
+            Se muestran los primeros 200 de {productos.length}.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* La hoja que se manda al rotulador.
+
+   Cada etiqueta va en su propia página de 50×30 mm, que es el tamaño corriente
+   del rollo. El `@page` con ese tamaño y sin márgenes es lo que hace que el
+   rotulador corte donde corresponde en vez de repartir las etiquetas en una
+   hoja carta. Si el rollo es de otra medida, se cambia acá.
+
+   El nombre va arriba y el precio abajo, con el código al medio: así se puede
+   leer la etiqueta de un vistazo en la repisa sin tener que escanearla. */
+function hojaDeEtiquetas(aImprimir, settings) {
+  const etiquetas = [];
+  for (const { producto, copias } of aImprimir) {
+    const svg = svgEan13(producto.barcode, { ancho: 1.25, alto: 40 });
+    for (let i = 0; i < copias; i++) {
+      etiquetas.push(`
+        <div class="etiqueta">
+          <div class="nombre">${escaparHtml(producto.name)}</div>
+          <div class="codigo">${svg}</div>
+          <div class="precio">${producto.price > 0 ? formatCLP(producto.price) : ""}</div>
+        </div>`);
+    }
+  }
+
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Etiquetas — ${escaparHtml(settings?.businessName || "El Galpón")}</title>
+<style>
+  @page { size: 50mm 30mm; margin: 0; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+  .etiqueta {
+    width: 50mm; height: 30mm; padding: 1.5mm 2mm;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    page-break-after: always; break-after: page; overflow: hidden;
+  }
+  .etiqueta:last-child { page-break-after: auto; break-after: auto; }
+  .nombre {
+    font-size: 7pt; font-weight: 700; line-height: 1.1; text-align: center;
+    max-height: 7mm; overflow: hidden; width: 100%;
+  }
+  .codigo svg { display: block; height: 13mm; width: auto; max-width: 46mm; }
+  .precio { font-size: 10pt; font-weight: 700; font-family: ui-monospace, monospace; }
+  /* En pantalla se ven como fichas sueltas, para revisar antes de imprimir. */
+  @media screen {
+    body { background: #eee; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .etiqueta { background: #fff; border: 1px solid #ccc; }
+    .aviso { width: 100%; font-size: 13px; color: #444; margin-bottom: 4px; }
+  }
+  @media print { .aviso { display: none; } }
+</style></head>
+<body>
+  <p class="aviso">${etiquetas.length} etiqueta(s). Revisa que se vean bien y usa Imprimir (Ctrl+P / Cmd+P). El tamaño está puesto en 50×30 mm.</p>
+  ${etiquetas.join("")}
+  <script>window.addEventListener("load", () => setTimeout(() => window.print(), 400));<\/script>
+</body></html>`;
+}
+
+function escaparHtml(t) {
+  return String(t ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 /* Revisar el catálogo.
 
    Después del inventario general quedaron tres clases de cabos sueltos: el
@@ -10655,8 +10869,13 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
   const duplicadosOcultos = useMemo(
     () => duplicados.filter(g => clavesDescartadas.has(g.clave)), [duplicados, clavesDescartadas]);
 
+  /* Los que necesitan una etiqueta nuestra: los que todavía tienen código
+     interno, y también los que ya la tienen. Estos últimos se quedan en la
+     lista a propósito — si desaparecieran al asignarles el código, no habría
+     dónde volver a imprimir la etiqueta que se despegó de la bolsa. */
   const sinCodigo = useMemo(
-    () => activos.filter(p => p.stock > 0 && String(p.barcode || "").startsWith("INT-")), [activos]);
+    () => activos.filter(p => p.stock > 0 &&
+      (String(p.barcode || "").startsWith("INT-") || esCodigoDelAlmacen(p.barcode))), [activos]);
   const sinPrecio = useMemo(
     () => activos.filter(p => p.stock > 0 && !(p.price > 0)), [activos]);
   /* Los que tienen stock primero: son los que están en la repisa y los que
@@ -10748,7 +10967,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
 
   const SECCIONES = [
     { id: "duplicados", label: "Duplicados", cuenta: duplicadosVisibles.length },
-    { id: "sinCodigo", label: "Sin código", cuenta: sinCodigo.length },
+    { id: "sinCodigo", label: "Etiquetas", cuenta: sinCodigo.length },
     { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
     { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
   ];
@@ -10759,7 +10978,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
 
   const AYUDA = {
     duplicados: "El mismo producto quedó en dos fichas —la cámara del teléfono leyó mal el código— y el stock está en la que la pistola no encuentra. Elige cuál se conserva: el stock se junta ahí y las otras se desactivan, sin perder su historial.",
-    sinCodigo: "Tienen stock pero su código es interno, así que la pistola no los encuentra. Ábrelos y escanea el código real del envase.",
+    sinCodigo: "No traen código en el envase, así que la pistola no los encuentra y hay que buscarlos a mano con el cliente esperando. Acá se les crea uno propio y se imprime la etiqueta. Si el producto sí tiene código impreso, es mejor escanear ese: usa \"Completar\".",
     sinPrecio: "Tienen stock y no se pueden cobrar hasta que alguien les ponga precio.",
     sinSeccion: "Sin sección no aparecen agrupados en Inventario ni en el catálogo rápido.",
   };
@@ -10853,7 +11072,13 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
         </div>
       )}
 
-      {listaSimple && (
+      {seccion === "sinCodigo" && (
+        <EtiquetasSinCodigo
+          productos={sinCodigo} todos={products} setProducts={setProducts}
+          settings={settings} toast={toast} onCompletar={setEditando} />
+      )}
+
+      {listaSimple && seccion !== "sinCodigo" && (
         listaSimple.length === 0
           ? <EmptyState icon={Check} title="Nada pendiente aquí" hint="Todos los productos con stock están completos en este punto." />
           : (
