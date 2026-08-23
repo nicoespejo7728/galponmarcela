@@ -6085,7 +6085,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // cantidad que se termine llevando supera lo que en rigor correspondía
       // al precio viejo, ese excedente queda registrado en checkout() como
       // ganancia extra, no como error ni como pérdida.
-      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems);
+      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory);
       return [...prev, {
         productId: product.id, barcode: product.barcode, name: product.name,
         price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
@@ -8718,8 +8718,21 @@ function findLastPriceDrop(priceHistory) {
    nuevo — así la próxima compra no se aprovecha de una rebaja que en
    realidad era para el lote que llegó después. No se aplica a productos por
    peso: ahí no tiene sentido repartir un mismo pesaje entre dos precios. */
-function unitsStillAtOldPrice(product, purchaseItems) {
+/* ¿Es pan? La sección la define el negocio en Ajustes; por omisión, "PAN". */
+function esPan(product, breadCategory) {
+  const seccion = breadCategory || "PAN";
+  return normalize(product?.category || "") === normalize(seccion);
+}
+
+function unitsStillAtOldPrice(product, purchaseItems, breadCategory) {
   if (product.unitType === "peso") return null;
+  // Excepción del pan. La regla del precio anterior existe para el stock que
+  // se compró caro y sigue en la repisa: mientras quede de ese, se cobra al
+  // precio de antes. Con el pan eso no aplica — se hornea y se repone todos
+  // los días, así que el pan de hoy nunca es el que quedó de antes del cambio
+  // de precio. Sin esta excepción, bajar el pan de 220 a 200 no servía de
+  // nada: la caja seguía cobrando 220.
+  if (esPan(product, breadCategory)) return null;
   if (!(product.stock > 0)) return null;
   const drop = findLastPriceDrop(product.priceHistory);
   if (!drop) return null;
@@ -8732,7 +8745,7 @@ function unitsStillAtOldPrice(product, purchaseItems) {
   return { qty, oldPrice: drop.oldPrice, newPrice: drop.newPrice };
 }
 
-function buildPriceDropRisks(products, purchaseItems) {
+function buildPriceDropRisks(products, purchaseItems, breadCategory) {
   const now = Date.now();
   const msDay = 24 * 60 * 60 * 1000;
   const receivedByProduct = new Map();
@@ -8746,6 +8759,7 @@ function buildPriceDropRisks(products, purchaseItems) {
   const rows = [];
   products.forEach(p => {
     if (!(p.stock > 0)) return;
+    if (esPan(p, breadCategory)) return;   // misma excepción que en la caja
     const drop = findLastPriceDrop(p.priceHistory);
     if (!drop) return;
     const dropTime = new Date(drop.date).getTime();
@@ -8790,8 +8804,8 @@ function buildOldPriceSalesLog(sales) {
   return rows.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
-function PriceDropAlertPanel({ products, purchaseItems, sales }) {
-  const rows = useMemo(() => buildPriceDropRisks(products, purchaseItems), [products, purchaseItems]);
+function PriceDropAlertPanel({ products, purchaseItems, sales, breadCategory }) {
+  const rows = useMemo(() => buildPriceDropRisks(products, purchaseItems, breadCategory), [products, purchaseItems, breadCategory]);
   const [showAll, setShowAll] = useState(false);
   const shown = showAll ? rows : rows.slice(0, 12);
   const hasRealLoss = rows.some(r => r.belowOldCost);
@@ -9253,7 +9267,7 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
         )}
       </div>
 
-      <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} />
+      <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} breadCategory={settings.breadCategory} />
 
       <InvestmentPredictorPanel products={products} sales={sales} lastSaleMap={lastSaleMap} />
 
