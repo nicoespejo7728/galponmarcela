@@ -6115,7 +6115,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // cantidad que se termine llevando supera lo que en rigor correspondía
       // al precio viejo, ese excedente queda registrado en checkout() como
       // ganancia extra, no como error ni como pérdida.
-      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts);
+      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts, settings);
       return [...prev, {
         productId: product.id, barcode: product.barcode, name: product.name,
         price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
@@ -8913,14 +8913,34 @@ function esPan(product, breadCategory) {
    no se sostiene: la lechuga de hoy no es la que estaba cuando el precio era
    otro. Sin esta excepción, bajar el limón de 1.300 a 500 no servía de nada
    —la caja seguía cobrando 1.300— y el cliente pagaba de más. */
-const SECCIONES_PERECIBLES = ["verduras", "verdura", "frutas", "fruta"];
+const PALABRAS_PERECIBLES = ["verdura", "fruta"];
 
+/* Se busca la palabra dentro del nombre de la sección, no la sección exacta.
+   El catálogo trae secciones escritas de varias maneras —"VERDURAS",
+   "VERDURA", "FRUTAS Y VERDURAS"— y una lista cerrada dejaba fuera justo la
+   variante que alguien había escrito ese día. */
 function esPerecible(product, breadCategory) {
-  return esPan(product, breadCategory)
-    || SECCIONES_PERECIBLES.includes(normalize(product?.category || ""));
+  if (esPan(product, breadCategory)) return true;
+  const seccion = normalize(product?.category || "");
+  return PALABRAS_PERECIBLES.some(palabra => seccion.includes(palabra));
 }
 
-function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts) {
+/* La regla del precio anterior, en pausa.
+
+   Durante la puesta en marcha los precios y el stock se corrigen a mano todos
+   los días, y la regla no tiene cómo distinguir una corrección de una baja de
+   precio real: cada vez que alguien arregla un precio, la caja sigue cobrando
+   el viejo. Pasó con el pan, con las verduras y con las zanahorias. En vez de
+   ir agregando excepciones de a una —cada una descubierta cobrándole de más a
+   un cliente— se apaga entera mientras dure, y vuelve sola en la fecha. */
+function pausaDelPrecioAnterior(settings) {
+  const hasta = settings?.pausaPrecioAnteriorHasta;
+  if (!hasta) return false;
+  return new Date(`${String(hasta).slice(0, 10)}T23:59:59`) >= new Date();
+}
+
+function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts, settings) {
+  if (pausaDelPrecioAnterior(settings)) return null;
   if (product.unitType === "peso") return null;
   // Excepción del pan. La regla del precio anterior existe para el stock que
   // se compró caro y sigue en la repisa: mientras quede de ese, se cobra al
@@ -11358,7 +11378,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
         <div className="rounded-xl p-3 mb-3 flex items-start gap-2" style={{ background: C.brassSoft }}>
           <AlertTriangle size={16} style={{ color: C.brassText, marginTop: 2 }} />
           <p className="text-sm" style={{ color: C.brassText }}>
-            <strong>Marcha blanca hasta el {formatDate(settings.marchaBlancaHasta)}.</strong> Mientras
+            <strong>Marcha blanca hasta el {formatDateOnly(String(settings.marchaBlancaHasta).slice(0, 10))}.</strong> Mientras
             tanto puedes corregir cantidades y precios desde acá. Después de esa fecha esos ajustes
             vuelven a ser solo de un administrador.
           </p>
@@ -13424,7 +13444,18 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
     setSettings(ns);
     try {
       await saveJSON("business-settings", ns);
-      toast(fecha ? `Marcha blanca hasta el ${formatDate(fecha)}` : "Marcha blanca cerrada", "success");
+      toast(fecha ? `Marcha blanca hasta el ${formatDateOnly(fecha)}` : "Marcha blanca cerrada", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar"), "error");
+    }
+  }
+
+  async function setPausaPrecio(fecha) {
+    const ns = { ...settings, pausaPrecioAnteriorHasta: fecha || null };
+    setSettings(ns);
+    try {
+      await saveJSON("business-settings", ns);
+      toast(fecha ? `La regla queda apagada hasta el ${formatDateOnly(fecha)}` : "La regla del precio anterior vuelve a aplicarse", "success");
     } catch (e) {
       toast(friendlyError(e, "No se pudo guardar"), "error");
     }
@@ -13562,7 +13593,7 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           Mientras dure, todo el equipo puede corregir cantidades y precios desde Inventario.
           Después de esa fecha vuelve a ser solo de administradores, sin que nadie tenga que apagarlo.
           {enMarchaBlanca(settings)
-            ? ` Ahora está activa hasta el ${formatDate(settings.marchaBlancaHasta)}.`
+            ? ` Ahora está activa hasta el ${formatDateOnly(String(settings.marchaBlancaHasta).slice(0, 10))}.`
             : " Ahora está cerrada."}
         </p>
         <Field label="Hasta el día (inclusive)">
@@ -13572,6 +13603,26 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
         <div className="flex flex-wrap gap-2">
           <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca(sumarDias(7))}>Una semana más</Btn>
           <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca("")}>Cerrar ahora</Btn>
+        </div>
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Regla del precio anterior</h3>
+        <p className="text-sm mb-3" style={{ color: C.gray }}>
+          En régimen normal, cuando baja el precio de un producto la caja sigue cobrando el precio viejo
+          por el stock que se compró caro. Mientras se están corrigiendo precios a mano eso falla seguido
+          —se arregla un precio y la caja no lo toma— así que conviene tenerla apagada.
+          {pausaDelPrecioAnterior(settings)
+            ? ` Ahora está apagada hasta el ${formatDateOnly(String(settings.pausaPrecioAnteriorHasta).slice(0, 10))}: se cobra siempre el precio actual.`
+            : " Ahora está aplicándose."}
+        </p>
+        <Field label="Apagada hasta el día (inclusive)">
+          <input type="date" value={String(settings.pausaPrecioAnteriorHasta || "").slice(0, 10)}
+            onChange={e => setPausaPrecio(e.target.value)} className={inputCls} style={inputStyle()} />
+        </Field>
+        <div className="flex flex-wrap gap-2">
+          <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio(sumarDias(7))}>Una semana más</Btn>
+          <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio("")}>Volver a aplicarla</Btn>
         </div>
       </div>
 
