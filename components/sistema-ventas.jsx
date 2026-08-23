@@ -6006,7 +6006,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
   );
 }
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab }) {
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -6090,7 +6090,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // cantidad que se termine llevando supera lo que en rigor correspondía
       // al precio viejo, ese excedente queda registrado en checkout() como
       // ganancia extra, no como error ni como pérdida.
-      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory);
+      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts);
       return [...prev, {
         productId: product.id, barcode: product.barcode, name: product.name,
         price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
@@ -8788,7 +8788,7 @@ function esPan(product, breadCategory) {
   return normalize(product?.category || "") === normalize(seccion);
 }
 
-function unitsStillAtOldPrice(product, purchaseItems, breadCategory) {
+function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts) {
   if (product.unitType === "peso") return null;
   // Excepción del pan. La regla del precio anterior existe para el stock que
   // se compró caro y sigue en la repisa: mientras quede de ese, se cobra al
@@ -8800,7 +8800,27 @@ function unitsStillAtOldPrice(product, purchaseItems, breadCategory) {
   if (!(product.stock > 0)) return null;
   const drop = findLastPriceDrop(product.priceHistory);
   if (!drop) return null;
+
+  // Sin costo registrado en el precio anterior no hay nada que proteger: esa
+  // regla existe para no vender bajo el costo de lo que se compró caro, y si
+  // el precio viejo venía de la importación —costo 0, nunca se supo cuánto
+  // costó— lo único que hace es cobrarle de más al cliente.
+  if (!(Number(drop.oldCost) > 0)) return null;
+
   const dropTime = new Date(drop.date).getTime();
+
+  // Si el producto se contó después de la baja, el stock que hay es el que
+  // alguien contó en la repisa, no el que quedaba de antes. Es lo que pasó
+  // con el inventario general: el corte a cero borró el stock y todo volvió a
+  // entrar contado, así que cualquier baja de precio posterior habría cobrado
+  // el precio viejo sobre existencias que no vienen de ninguna compra cara.
+  const contadoDespues = (inventoryCounts || []).some(c => {
+    const cuando = new Date(c.completedAt || c.createdAt || c.dueDate || 0).getTime();
+    if (!(cuando > dropTime)) return false;
+    return (c.items || []).some(it => it.productId === product.id);
+  });
+  if (contadoDespues) return null;
+
   const receivedSince = purchaseItems
     .filter(pi => pi.productId === product.id && new Date(pi.date).getTime() > dropTime)
     .reduce((a, pi) => a + (Number(pi.qty) || 0), 0);
@@ -8825,6 +8845,7 @@ function buildPriceDropRisks(products, purchaseItems, breadCategory) {
     if (!(p.stock > 0)) return;
     if (esPan(p, breadCategory)) return;   // misma excepción que en la caja
     const drop = findLastPriceDrop(p.priceHistory);
+    if (drop && !(Number(drop.oldCost) > 0)) return;   // precio viejo sin costo: nada que avisar
     if (!drop) return;
     const dropTime = new Date(drop.date).getTime();
     const receivedSince = (receivedByProduct.get(p.id) || [])
@@ -14271,7 +14292,7 @@ export default function SistemaVentas() {
         {/* El espacio de abajo deja respirar el contenido por encima de la
             barra inferior del teléfono, que va fija. */}
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} />}
+        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} />}
         {tab === "actividades" && <ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} />}
         {tab === "inventario-general" && <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} />}
         {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} />}
