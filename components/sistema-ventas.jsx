@@ -6003,6 +6003,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [boletaEmitida, setBoletaEmitida] = useState(true);
   const [receipt, setReceipt] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
+  const [ventaNueva, setVentaNueva] = useState(null);
   const [consumptionOpen, setConsumptionOpen] = useState(false);
   const [consumptionTicket, setConsumptionTicket] = useState(null);
   const inputRef = useRef(null);
@@ -6218,6 +6219,78 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
+  /* Alta en el mesón: el producto no está en el catálogo y el cliente está
+     esperando. Se crea con el código escaneado, el nombre y el precio que
+     cobran, y con el stock justo de lo que se está vendiendo —así el kárdex
+     queda cuadrado: entra lo que se dio de alta y sale con la boleta—.
+
+     El precio queda pendiente de aprobación cuando no lo crea un
+     administrador, que es el mismo camino que ya usa el Inventario General:
+     el producto aparece marcado como "nuevo" hasta que alguien le ponga
+     costo, categoría y proveedor. */
+  async function crearYVender({ name, price, qty }) {
+    const nombre = String(name || "").trim();
+    if (!nombre) return toast("Escribe el nombre del producto", "error");
+    const precio = Number(price) || 0;
+    if (precio <= 0) return toast("Escribe el precio de venta", "error");
+    const cantidad = Math.max(1, Number(qty) || 1);
+    const codigo = String(ventaNueva?.barcode || "").trim();
+
+    try {
+      // Se relee el catálogo antes de escribir: otra caja pudo haber creado
+      // este mismo producto hace un segundo.
+      const ultimos = await loadJSON("products-catalog", products);
+      const yaExiste = codigo && ultimos.find((p) => p.barcode === codigo);
+      if (yaExiste) {
+        setProducts(ultimos);
+        setVentaNueva(null);
+        addToCart(yaExiste);
+        toast(`"${yaExiste.name}" ya estaba en el catálogo — se agregó al carrito`, "success");
+        return;
+      }
+
+      const fecha = new Date().toISOString();
+      const nuevo = {
+        id: uid("prod"),
+        barcode: codigo || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        name: upperField(nombre),
+        category: "",
+        price: precio,
+        cost: 0,
+        stock: cantidad,
+        minStock: 5,
+        supplierId: null,
+        unitType: "unidad",
+        unitsPerKg: null,
+        quickAccess: false,
+        priceApproval: role === "admin" ? null : {
+          suggestedPrice: precio, netCost: 0, requestedBy: session.name,
+          date: fecha, isNewProduct: true,
+        },
+        priceHistory: [],
+      };
+
+      await saveJSON("products-catalog", [...ultimos, nuevo], { origen: "carga_inicial" });
+
+      // El guardado salta en silencio un producto cuyo código ya tiene otro
+      // —aunque esté desactivado—, así que se confirma antes de venderlo.
+      const verificado = await loadJSON("products-catalog", [...ultimos, nuevo]);
+      const creado = verificado.find((p) => p.id === nuevo.id);
+      setProducts(verificado);
+      if (!creado) {
+        toast("Ese código ya lo tiene otro producto (puede estar desactivado). Búscalo por nombre.", "error");
+        return;
+      }
+
+      setVentaNueva(null);
+      for (let i = 0; i < cantidad; i++) addToCart(creado);
+      toast(`"${creado.name}" creado y agregado${role === "admin" ? "" : " — precio pendiente de aprobación"}`, "success");
+      setTimeout(() => inputRef.current?.focus(), 50);
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo crear el producto"), "error");
+    }
+  }
+
   async function registerConsumption({ responsible, reason }) {
     if (cart.length === 0) return;
     const costTotal = cart.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
@@ -6333,9 +6406,17 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         {notFound && (
           <div className="mt-3 rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ background: C.rustSoft }}>
             <span className="text-sm" style={{ color: C.rust }}>Código <span className="font-mono">{notFound}</span> no encontrado.</span>
-            {role === "admin" ? (
-              <Btn size="sm" variant="rust" onClick={() => { setQuickAdd({ barcode: notFound }); setNotFound(null); }}>Crear producto</Btn>
-            ) : <span className="text-xs" style={{ color: C.rust }}>Avisa al administrador</span>}
+            <div className="flex gap-2">
+              {/* El mesón no puede quedarse detenido porque un producto no está
+                  en el catálogo: se crea con lo mínimo —nombre y precio— y se
+                  vende. Un administrador completa costo, categoría y proveedor
+                  después, avisado por la aprobación de precio que queda
+                  pendiente. */}
+              <Btn size="sm" variant="rust" onClick={() => { setVentaNueva({ barcode: notFound }); setNotFound(null); }}>Vender ahora</Btn>
+              {role === "admin" && (
+                <Btn size="sm" variant="ghost" onClick={() => { setQuickAdd({ barcode: notFound }); setNotFound(null); }}>Ficha completa</Btn>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -6548,6 +6629,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           onConfirm={(seller) => { setIdentifyOpen(false); checkout(seller); }}
         />
       )}
+      {ventaNueva && (
+        <ProductoNuevoEnVentaModal
+          barcode={ventaNueva.barcode}
+          onClose={() => { setVentaNueva(null); setTimeout(() => inputRef.current?.focus(), 50); }}
+          onConfirm={crearYVender}
+        />
+      )}
       {quickAdd && <ProductModal initial={quickAdd} onClose={() => setQuickAdd(null)} onSave={async (p) => {
         const latest = await loadJSON("products-catalog", products);
         const np = [...latest, { ...p, stockZeroSince: p.stock > 0 ? null : new Date().toISOString() }];
@@ -6579,6 +6667,59 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         />
       )}
     </div>
+  );
+}
+
+/* Alta rápida desde el mesón. Solo lo indispensable para cobrar: qué es y a
+   cuánto. Todo lo demás —costo, categoría, proveedor— lo completa un
+   administrador después, avisado por la aprobación pendiente. */
+function ProductoNuevoEnVentaModal({ barcode, onClose, onConfirm }) {
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [qty, setQty] = useState("1");
+  const [guardando, setGuardando] = useState(false);
+
+  async function submit() {
+    if (guardando) return;
+    setGuardando(true);
+    try { await onConfirm({ name, price, qty }); }
+    finally { setGuardando(false); }
+  }
+
+  return (
+    <Modal title="Producto nuevo — vender ahora" onClose={onClose}>
+      <div className="rounded-lg p-3 mb-4" style={{ background: C.paperDark }}>
+        <div className="text-xs" style={{ color: C.gray }}>Código escaneado</div>
+        <div className="font-mono text-sm font-semibold" style={{ color: C.ink }}>{barcode || "sin código"}</div>
+      </div>
+      <Field label="¿Qué es?">
+        <input autoFocus value={name} onChange={e => setName(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={inputCls} style={inputStyle()} placeholder="Nombre del producto" />
+      </Field>
+      <Field label="Precio de venta">
+        <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" />
+      </Field>
+      <Field label="Cantidad">
+        <input type="number" inputMode="numeric" value={qty} onChange={e => setQty(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono`} style={inputStyle()} placeholder="1" />
+      </Field>
+      <div className="rounded-lg p-3 mb-4" style={{ background: C.brassSoft }}>
+        <p className="text-xs" style={{ color: C.brassText }}>
+          Queda en el catálogo con el stock que estás vendiendo y sin costo ni categoría.
+          Un administrador los completa después desde Inventario.
+        </p>
+      </div>
+      <div className="flex gap-2">
+        <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
+        <Btn full icon={guardando ? Loader2 : Check} disabled={guardando || !name.trim()} onClick={submit}>
+          {guardando ? "Creando…" : "Crear y agregar"}
+        </Btn>
+      </div>
+    </Modal>
   );
 }
 
