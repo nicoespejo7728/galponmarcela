@@ -8396,8 +8396,16 @@ function BreadHolidayRow({ h, onRemove }) {
 }
 
 function BreadDayCloseCard({ products, setProducts, movements, setMovements, breadCategory, session, toast }) {
-  const freshBread = products.find(p => p.category === breadCategory && p.name === "PAN");
-  const coldBread = products.find(p => p.category === breadCategory && p.name === "PAN FRÍO");
+  // El pan fresco se llamó "PAN" al principio y hoy es "PAN FRESCO"; el frío
+  // aparece con o sin tilde según quién lo haya creado. Se aceptan todas esas
+  // formas —y se prefiere la que tenga stock, si hubiera más de una— para que
+  // el cierre del día no dependa de haber escrito el nombre exacto.
+  const esPanFresco = (p) => ["pan", "pan fresco"].includes(normalize(p.name));
+  const esPanFrio = (p) => ["pan frio", "pan frío"].includes(normalize(p.name));
+  const delPan = products.filter(p => p.category === breadCategory);
+  const conMasStock = (a, b) => (Number(b?.stock) || 0) - (Number(a?.stock) || 0);
+  const freshBread = delPan.filter(esPanFresco).sort(conMasStock)[0];
+  const coldBread = delPan.filter(esPanFrio).sort(conMasStock)[0];
   const [toColdQty, setToColdQty] = useState("");
   const [mermaQty, setMermaQty] = useState("");
   const [mermaReason, setMermaReason] = useState(SHRINKAGE_REASONS[0]);
