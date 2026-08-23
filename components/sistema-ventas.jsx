@@ -36,7 +36,11 @@ import {
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
 import { nuevoId } from "@/lib/datos/traduccion";
-import { repartirCodigos, esCodigoDelAlmacen, svgEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
+import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
+import {
+  ROLLOS_D110, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
+  armarZip, nombreDeArchivo, PIXELES_POR_MM,
+} from "@/lib/etiquetas-png";
 import { normalizarRespaldo } from "@/lib/datos/respaldo";
 import { subirLogo, quitarLogo } from "@/lib/datos/logo";
 import {
@@ -10622,6 +10626,10 @@ function ConsumosView({ toast }) {
 function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, onCompletar }) {
   const [cuantas, setCuantas] = useState({});     // id → cuántas etiquetas
   const [trabajando, setTrabajando] = useState(false);
+  const [rolloId, setRolloId] = useState(ROLLO_POR_OMISION.id);
+  const rollo = ROLLOS_D110.find(r => r.id === rolloId) || ROLLO_POR_OMISION;
+  const medida = medirCodigo(rollo.largo - 2);   // menos un milímetro de margen a cada lado
+  const cabe = queCabe(rollo.ancho);
 
   const conCodigo = useMemo(
     () => productos.filter(p => esCodigoDelAlmacen(p.barcode)), [productos]);
@@ -10661,11 +10669,57 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
     }
   }
 
+  /* Un PNG por producto, del porte exacto de la etiqueta. La aplicación de la
+     Niimbot importa imágenes y ahí se elige cuántas copias, así que se manda
+     una sola por producto y no una por copia. */
+  async function descargarImagenes() {
+    if (aImprimir.length === 0) return toast("Elige al menos un producto", "error");
+    setTrabajando(true);
+    try {
+      const archivos = [];
+      for (const { producto } of aImprimir) {
+        const lienzo = document.createElement("canvas");
+        lienzo.width = Math.round(rollo.largo * PIXELES_POR_MM);
+        lienzo.height = Math.round(rollo.ancho * PIXELES_POR_MM);
+        dibujarEtiqueta(lienzo.getContext("2d"), {
+          modulos: modulosEan13(producto.barcode),
+          codigo: producto.barcode,
+          nombre: producto.name,
+          precio: producto.price > 0 ? formatCLP(producto.price) : "",
+        }, { anchoMm: rollo.ancho, largoMm: rollo.largo });
+
+        const blob = await new Promise(listo => lienzo.toBlob(listo, "image/png"));
+        archivos.push({
+          nombre: nombreDeArchivo(producto.barcode, producto.name),
+          datos: new Uint8Array(await blob.arrayBuffer()),
+        });
+      }
+
+      // Uno solo se baja tal cual; varios van en un zip, porque ciento veinte
+      // descargas seguidas no es algo que se le pueda pedir a nadie.
+      const unico = archivos.length === 1;
+      const salida = unico
+        ? new Blob([archivos[0].datos], { type: "image/png" })
+        : armarZip(archivos);
+      const url = URL.createObjectURL(salida);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = unico ? archivos[0].nombre : `etiquetas-${rollo.id}.zip`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast(unico ? "Etiqueta descargada" : `${archivos.length} etiquetas descargadas`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudieron generar las etiquetas"), "error");
+    } finally {
+      setTrabajando(false);
+    }
+  }
+
   function imprimir() {
     if (totalEtiquetas === 0) return toast("Pon cuántas etiquetas quieres de cada uno", "error");
     const ventana = window.open("", "_blank", "width=420,height=640");
     if (!ventana) return toast("El navegador bloqueó la ventana de impresión. Permítela y vuelve a intentar.", "error");
-    ventana.document.write(hojaDeEtiquetas(aImprimir, settings));
+    ventana.document.write(hojaDeEtiquetas(aImprimir, settings, rollo));
     ventana.document.close();
   }
 
@@ -10697,23 +10751,60 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
       )}
 
       {conCodigo.length > 0 && (
-        <div className="rounded-xl p-4 mb-3 flex items-center justify-between gap-3 flex-wrap"
-             style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div>
-            <div className="text-sm font-semibold" style={{ color: C.ink }}>
-              {totalEtiquetas} etiqueta{totalEtiquetas === 1 ? "" : "s"} para imprimir
+        <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          {/* El tamaño del rollo manda todo lo demás: qué cabe en la etiqueta y
+              si el código va a quedar lo bastante grande para que lo lea la
+              pistola. La medida está impresa en el papel del rollo o en la caja. */}
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            <span className="text-xs font-semibold" style={{ color: C.ink }}>Rollo</span>
+            <select value={rolloId} onChange={e => setRolloId(e.target.value)}
+              className={`${inputCls} text-sm`} style={{ ...inputStyle(), width: "auto" }}>
+              {ROLLOS_D110.map(r => <option key={r.id} value={r.id}>{r.etiqueta}</option>)}
+            </select>
+            <span className="text-xs" style={{ color: C.gray }}>
+              La medida va impresa en el rollo o en su caja.
+            </span>
+          </div>
+
+          {!medida.seLee && (
+            <div className="rounded-lg p-3 mb-3 text-xs" style={{ background: C.rustSoft, color: C.rust }}>
+              En una etiqueta de {rollo.largo} mm de largo el código queda con barras de{" "}
+              {medida.moduloMm.toFixed(2)} mm, más finas de lo que resuelve una impresora térmica: puede
+              que la pistola no lo lea. Para un EAN-13 conviene un rollo de {medida.largoMinimoMm} mm o más.
             </div>
-            <p className="text-xs mt-0.5" style={{ color: C.gray }}>
-              Se abre una hoja aparte y se manda al rotulador. Pon 0 en los que no quieras imprimir ahora.
-            </p>
+          )}
+
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-semibold" style={{ color: C.ink }}>
+                {totalEtiquetas} etiqueta{totalEtiquetas === 1 ? "" : "s"} para imprimir
+              </div>
+              <p className="text-xs mt-0.5 max-w-md" style={{ color: C.gray }}>
+                {cabe.nombre
+                  ? "En este rollo cabe el nombre y el precio junto al código."
+                  : "En este rollo solo cabe el código y su número: el nombre no entra en " + rollo.ancho + " mm."}
+                {" "}Pon 0 en los que no quieras ahora.
+              </p>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              <Btn size="sm" variant="ghost"
+                onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 0])))}>Ninguna</Btn>
+              <Btn size="sm" variant="ghost"
+                onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 1])))}>Una de cada uno</Btn>
+              <Btn size="sm" variant="ghost" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Hoja para imprimir</Btn>
+              <Btn size="sm" icon={trabajando ? Loader2 : Download} disabled={trabajando || aImprimir.length === 0}
+                onClick={descargarImagenes}>
+                {trabajando ? "Generando…" : "Etiquetas para la Niimbot"}
+              </Btn>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <Btn size="sm" variant="ghost"
-              onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 0])))}>Ninguna</Btn>
-            <Btn size="sm" variant="ghost"
-              onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 1])))}>Una de cada uno</Btn>
-            <Btn size="sm" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Imprimir</Btn>
-          </div>
+
+          <p className="text-xs mt-3 pt-3" style={{ color: C.gray, borderTop: `1px dashed ${C.paperLine}` }}>
+            La Niimbot no aparece en el menú de imprimir del navegador: imprime por Bluetooth desde su
+            propia aplicación. "Etiquetas para la Niimbot" baja las imágenes del porte exacto del rollo
+            ({rollo.ancho} × {rollo.largo} mm) para importarlas ahí — una por producto, y las copias se
+            eligen en la aplicación. "Hoja para imprimir" es para una impresora corriente.
+          </p>
         </div>
       )}
 
@@ -10763,16 +10854,22 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
 
    El nombre va arriba y el precio abajo, con el código al medio: así se puede
    leer la etiqueta de un vistazo en la repisa sin tener que escanearla. */
-function hojaDeEtiquetas(aImprimir, settings) {
+function hojaDeEtiquetas(aImprimir, settings, rollo) {
+  // La hoja usa la MISMA medida que se eligió arriba: dos tamaños distintos
+  // según por dónde se imprima sería una trampa esperando a alguien.
+  const anchoMm = rollo?.largo || 50;
+  const altoMm = rollo?.ancho || 30;
+  const cabeNombre = altoMm >= 18;
+  const cabePrecio = altoMm >= 24;
   const etiquetas = [];
   for (const { producto, copias } of aImprimir) {
-    const svg = svgEan13(producto.barcode, { ancho: 1.25, alto: 40 });
+    const svg = svgEan13(producto.barcode, { ancho: 1.25, alto: 40, conTexto: true });
     for (let i = 0; i < copias; i++) {
       etiquetas.push(`
         <div class="etiqueta">
-          <div class="nombre">${escaparHtml(producto.name)}</div>
+          ${cabeNombre ? `<div class="nombre">${escaparHtml(producto.name)}</div>` : ""}
           <div class="codigo">${svg}</div>
-          <div class="precio">${producto.price > 0 ? formatCLP(producto.price) : ""}</div>
+          ${cabePrecio && producto.price > 0 ? `<div class="precio">${formatCLP(producto.price)}</div>` : ""}
         </div>`);
     }
   }
@@ -10781,11 +10878,11 @@ function hojaDeEtiquetas(aImprimir, settings) {
 <html lang="es"><head><meta charset="utf-8">
 <title>Etiquetas — ${escaparHtml(settings?.businessName || "El Galpón")}</title>
 <style>
-  @page { size: 50mm 30mm; margin: 0; }
+  @page { size: ${anchoMm}mm ${altoMm}mm; margin: 0; }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
   .etiqueta {
-    width: 50mm; height: 30mm; padding: 1.5mm 2mm;
+    width: ${anchoMm}mm; height: ${altoMm}mm; padding: 0.8mm 1mm;
     display: flex; flex-direction: column; align-items: center; justify-content: space-between;
     page-break-after: always; break-after: page; overflow: hidden;
   }
@@ -10794,7 +10891,7 @@ function hojaDeEtiquetas(aImprimir, settings) {
     font-size: 7pt; font-weight: 700; line-height: 1.1; text-align: center;
     max-height: 7mm; overflow: hidden; width: 100%;
   }
-  .codigo svg { display: block; height: 13mm; width: auto; max-width: 46mm; }
+  .codigo svg { display: block; height: ${Math.max(6, altoMm - (cabeNombre ? 8 : 3) - (cabePrecio ? 5 : 0)).toFixed(1)}mm; width: auto; max-width: ${(anchoMm - 2).toFixed(1)}mm; }
   .precio { font-size: 10pt; font-weight: 700; font-family: ui-monospace, monospace; }
   /* En pantalla se ven como fichas sueltas, para revisar antes de imprimir. */
   @media screen {
@@ -10805,7 +10902,7 @@ function hojaDeEtiquetas(aImprimir, settings) {
   @media print { .aviso { display: none; } }
 </style></head>
 <body>
-  <p class="aviso">${etiquetas.length} etiqueta(s). Revisa que se vean bien y usa Imprimir (Ctrl+P / Cmd+P). El tamaño está puesto en 50×30 mm.</p>
+  <p class="aviso">${etiquetas.length} etiqueta(s). Revisa que se vean bien y usa Imprimir (Ctrl+P / Cmd+P). El tamaño está puesto en ${anchoMm}×${altoMm} mm.</p>
   ${etiquetas.join("")}
   <script>window.addEventListener("load", () => setTimeout(() => window.print(), 400));<\/script>
 </body></html>`;
