@@ -11436,6 +11436,15 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
     () => Array.from(new Set(products.map(p => p.category).filter(Boolean))).sort(),
     [products]
   );
+  // Crear una categoría nueva es solo para administradores (política de la
+  // base, a propósito, para que no aparezcan secciones sueltas). Si quien
+  // cuenta no es admin y escribe una que no existe, se detecta acá antes de
+  // guardar — no vale la pena que el intento de crearla reviente el guardado
+  // del producto entero.
+  const categoriasExistentesNorm = useMemo(
+    () => new Set(categoriasExistentes.map(c => normalize(c))),
+    [categoriasExistentes]
+  );
 
   const matches = useMemo(() => {
     if (query.trim().length < 1) return [];
@@ -11500,11 +11509,17 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
       const latestProducts = await loadJSON("products-catalog", products);
       const barcode = newForm.barcode.trim();
       const date = new Date().toISOString();
+      const categoriaEscrita = upperField(newForm.category || "");
+      const categoriaYaExiste = !categoriaEscrita || categoriasExistentesNorm.has(normalize(categoriaEscrita));
+      // Solo un admin puede crear una categoría nueva. Si no lo es y escribió
+      // una que no existe, el producto igual se guarda — sin categoría, no
+      // sin contar — y un admin se la asigna después.
+      const categoriaFinal = (session.role === "admin" || categoriaYaExiste) ? categoriaEscrita : "";
       const nuevo = {
         id: uid("prod"),
         barcode: barcode || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         name: upperField(name),
-        category: upperField(newForm.category || ""),
+        category: categoriaFinal,
         price: 0,
         cost: 0,
         stock: 0,
@@ -11518,7 +11533,8 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
       const actualizados = [...latestProducts, nuevo];
       setProducts(actualizados);
       await saveJSON("products-catalog", actualizados, { origen: "carga_inicial" });
-      toast(`"${nuevo.name}" agregado al catálogo — precio pendiente de aprobación`, "success");
+      const avisoCategoria = categoriaEscrita && !categoriaFinal ? " — sin categoría (un admin la asigna después)" : "";
+      toast(`"${nuevo.name}" agregado al catálogo — precio pendiente de aprobación${avisoCategoria}`, "success");
       setAddingNew(false);
       pick(nuevo);
     } catch (e) {
