@@ -5522,12 +5522,56 @@ function Pager({ page, setPage, total, pageSize }) {
    ESCÁNER DE CÁMARA
 
    Usa BarcodeDetector nativo cuando existe (Android/Chrome/Edge). Donde no
-   existe —todo iOS Safari, que nunca lo implementó— cae a ZXing, cargado
-   bajo demanda desde un CDN público (no es una dependencia del proyecto:
-   así no hay que tocar package.json ni el build para este arreglo). Si ni
-   eso funciona (sin internet para el CDN, cámara denegada), queda el
-   mensaje de siempre: lector USB o código a mano.
+   existe —todo iOS Safari, que nunca lo implementó— cae a ZXing.
+
+   Tres cosas hacían que tardara una eternidad en abrir la cámara, y las tres
+   se notaban justo cuando más molesta: con el cliente esperando en el mesón.
+
+   1. El `<video>` no existía hasta que el estado pasaba a "scanning", así que
+      cuando el código le asignaba la pista de la cámara, `videoRef.current`
+      todavía era null y la asignación se perdía en silencio. El detector se
+      quedaba mirando un video sin imagen, esperando un readyState que nunca
+      llegaba. Ahora el elemento está desde el primer render, oculto hasta que
+      hay algo que mostrar.
+
+   2. En iPhone se descargaba ZXing entero desde un CDN ANTES de pedir la
+      cámara, y encima desde `@latest`, que obliga a resolver la versión en
+      cada apertura y desperdicia la caché del navegador. Con los datos
+      móviles del local eso son varios segundos de pantalla negra. Ahora la
+      biblioteca viene del propio sitio, en un trozo aparte que Next sirve y
+      el navegador cachea, y se pide AL MISMO TIEMPO que la cámara en vez de
+      antes: mientras el sistema operativo negocia el permiso y enciende el
+      sensor —que es lo lento e inevitable— la biblioteca ya va llegando.
+
+   3. La primera vez igual hay que bajar ese trozo. Así que se precarga en
+      segundo plano apenas se abre la pantalla de vender, cuando nadie está
+      esperando: al tocar "Cámara" ya está en memoria.
 --------------------------------------------------------- */
+
+/* La carga de ZXing, una sola vez por sesión y compartida: si el escáner se
+   abre y se cierra tres veces, el trozo se pide una. */
+let cargaDeZXing = null;
+function cargarZXing() {
+  if (!cargaDeZXing) {
+    cargaDeZXing = import("@zxing/library").catch((e) => {
+      cargaDeZXing = null;   // que un fallo de red no lo deje roto para siempre
+      throw e;
+    });
+  }
+  return cargaDeZXing;
+}
+
+/* Se llama al abrir Vender y Recepción. No estorba: si el navegador trae
+   BarcodeDetector nativo no hace falta ZXing y no se pide nada. */
+function precalentarEscaner() {
+  if (typeof window === "undefined") return;
+  if ("BarcodeDetector" in window) return;
+  // En reposo, para no competir con la carga del catálogo.
+  const pedir = () => { cargarZXing().catch(() => { /* ya se reintenta al abrir */ }); };
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(pedir, { timeout: 4000 });
+  else setTimeout(pedir, 2000);
+}
+
 function CameraScanner({ onDetect, onClose }) {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("init"); // init | scanning | unsupported | denied
@@ -5557,21 +5601,20 @@ function CameraScanner({ onDetect, onClose }) {
   useEffect(() => {
     let cancelled = false;
 
-    function cargarZXing() {
-      if (window.ZXing) return Promise.resolve(window.ZXing);
-      return new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "https://unpkg.com/@zxing/library@latest/umd/index.min.js";
-        script.async = true;
-        script.onload = () => (window.ZXing ? resolve(window.ZXing) : reject(new Error("ZXing no se cargó")));
-        script.onerror = () => reject(new Error("No se pudo cargar el lector de códigos"));
-        document.head.appendChild(script);
-      });
-    }
+    /* Resolución modesta a propósito. Pedir la máxima hace que el sistema
+       tarde más en arrancar el sensor y que cada cuadro pese más de analizar,
+       y para leer un código de barras a un palmo no sirve de nada: 1280 de
+       ancho sobra y arranca bastante antes. */
+    const CAMARA = {
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    };
 
-    async function iniciarNativo() {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+    function prepararTrack(stream) {
       streamRef.current = stream;
       const track = stream.getVideoTracks()[0] || null;
       trackRef.current = track;
@@ -5581,17 +5624,31 @@ function CameraScanner({ onDetect, onClose }) {
           if (caps && caps.torch) setTorchSupported(true);
         } catch (e) { /* algunos navegadores no implementan getCapabilities */ }
       }
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+    }
+
+    async function mostrar(stream) {
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      // playsInline y muted van en el elemento: sin ellos iOS abre el video a
+      // pantalla completa y el escáner queda tapado.
+      try { await video.play(); } catch (e) { /* el usuario cerró antes */ }
+    }
+
+    async function iniciarNativo() {
+      const stream = await navigator.mediaDevices.getUserMedia(CAMARA);
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      prepararTrack(stream);
+      await mostrar(stream);
       setStatus("scanning");
+
       const detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"] });
       const loop = async () => {
         if (cancelled) return;
         try {
-          if (videoRef.current && videoRef.current.readyState >= 2) {
-            const codes = await detector.detect(videoRef.current);
+          const video = videoRef.current;
+          if (video && video.readyState >= 2) {
+            const codes = await detector.detect(video);
             if (codes && codes.length > 0) {
               onDetect(codes[0].rawValue);
               return;
@@ -5604,8 +5661,17 @@ function CameraScanner({ onDetect, onClose }) {
     }
 
     async function iniciarZXing() {
-      const ZXing = await cargarZXing();
-      if (cancelled) return;
+      /* Las dos cosas lentas al mismo tiempo: el permiso y el encendido del
+         sensor por un lado, la biblioteca por el otro. Antes iban en fila. */
+      const [ZXing, stream] = await Promise.all([
+        cargarZXing(),
+        navigator.mediaDevices.getUserMedia(CAMARA),
+      ]);
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      prepararTrack(stream);
+      await mostrar(stream);
+      setStatus("scanning");
+
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
         ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
@@ -5615,15 +5681,12 @@ function CameraScanner({ onDetect, onClose }) {
       ]);
       const reader = new ZXing.BrowserMultiFormatReader(hints);
       zxingReaderRef.current = reader;
-      setStatus("scanning");
-      await reader.decodeFromConstraints(
-        { audio: false, video: { facingMode: "environment" } },
-        videoRef.current,
-        (result) => {
-          if (cancelled || !result) return;
-          onDetect(result.getText());
-        }
-      );
+      // Se le pasa el video que ya está andando con la pista abierta arriba;
+      // decodeFromConstraints volvería a pedir la cámara y a esperarla de nuevo.
+      reader.decodeFromVideoElement(videoRef.current, (result) => {
+        if (cancelled || !result) return;
+        onDetect(result.getText());
+      });
     }
 
     async function start() {
@@ -5634,7 +5697,11 @@ function CameraScanner({ onDetect, onClose }) {
           try {
             await iniciarZXing();
           } catch (e) {
-            if (!cancelled) setStatus("unsupported");
+            // Si falló el permiso, eso es "denied"; si falló la biblioteca,
+            // "unsupported". Decir cuál de las dos ahorra buscar donde no es.
+            if (cancelled) return;
+            const sinPermiso = e && /permission|denied|notallowed/i.test(e.name || e.message || "");
+            setStatus(sinPermiso ? "denied" : "unsupported");
           }
         }
       } catch (e) {
@@ -5653,7 +5720,15 @@ function CameraScanner({ onDetect, onClose }) {
   return (
     <Modal title="Escanear con cámara" onClose={onClose}>
       <div className="rounded-lg overflow-hidden relative" style={{ background: C.ink, aspectRatio: "4/3" }}>
-        {status === "scanning" && <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />}
+        {/* El video existe desde el primer render, aunque todavía no se vea:
+            si se montara recién al pasar a "scanning", la referencia estaría
+            vacía justo cuando hay que entregarle la pista de la cámara. */}
+        <video
+          ref={videoRef}
+          className="w-full h-full object-cover"
+          style={{ display: status === "scanning" ? "block" : "none" }}
+          muted playsInline autoPlay
+        />
         {status === "scanning" && (
           <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-0.5" style={{ background: C.brass, boxShadow: `0 0 8px ${C.brass}` }} />
         )}
@@ -5670,18 +5745,18 @@ function CameraScanner({ onDetect, onClose }) {
           </button>
         )}
         {status === "init" && (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-2" style={{ color: C.paper }}>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2" style={{ color: C.paper }}>
             <Loader2 className="animate-spin" size={22} /> <span className="text-sm">Activando cámara…</span>
           </div>
         )}
         {status === "unsupported" && (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-center px-6" style={{ color: C.paper }}>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6" style={{ color: C.paper }}>
             <AlertTriangle size={22} />
-            <span className="text-sm">Tu navegador no soporta el escáner por cámara aquí. Usa el lector USB o escribe el código manualmente.</span>
+            <span className="text-sm">No se pudo cargar el lector de códigos. Usa el lector USB o escribe el código manualmente.</span>
           </div>
         )}
         {status === "denied" && (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-center px-6" style={{ color: C.paper }}>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6" style={{ color: C.paper }}>
             <AlertTriangle size={22} />
             <span className="text-sm">No se pudo acceder a la cámara (permiso denegado o no disponible en este entorno). Usa el lector USB o el código manual.</span>
           </div>
@@ -6065,6 +6140,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [quickCustomerOpen, setQuickCustomerOpen] = useState(false);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+
+  /* El lector de códigos se trae en segundo plano apenas se abre la caja, no
+     al tocar "Cámara": así el trozo ya está en memoria cuando hay un cliente
+     esperando. Ver precalentarEscaner. */
+  useEffect(() => { precalentarEscaner(); }, []);
 
   const nameHits = useMemo(
     () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(products, nameQuery),
