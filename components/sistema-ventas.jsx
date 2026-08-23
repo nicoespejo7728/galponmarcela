@@ -16,6 +16,7 @@ import {
   fijarUsuarioActual,
   olvidarInstantaneas,
   verificarPin,
+  autorizarConPin,
   cambiarPin,
   identificarPorPin,
   registrarConteoInventarioGeneral,
@@ -6784,9 +6785,17 @@ function ConsumptionAuthModal({ cart, adminPin, onClose, onConfirm, toast }) {
 
   async function submit() {
     if (!responsible.trim()) return toast("Indica quién retira los productos", "error");
-    // El PIN se guarda con bcrypt en la base y se comprueba allá: nunca llega
-    // al navegador, así que no se puede leer desde las herramientas del sitio.
-    if (!(await verificarPin(pin))) return toast("PIN incorrecto", "error");
+    // El PIN se comprueba en la base, donde está guardado con bcrypt: nunca
+    // llega al navegador. Sirve el PIN del negocio o el personal de cualquier
+    // administrador. Si la consulta falla, se dice qué falló — no "PIN
+    // incorrecto", que manda a buscar el problema donde no está.
+    try {
+      if (!(await autorizarConPin(pin))) {
+        return toast("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+      }
+    } catch (e) {
+      return toast(friendlyError(e, "No se pudo comprobar el PIN"), "error");
+    }
     onConfirm({ responsible: responsible.trim(), reason: reason.trim() });
   }
 
@@ -6801,7 +6810,7 @@ function ConsumptionAuthModal({ cart, adminPin, onClose, onConfirm, toast }) {
       </div>
       <Field label="Trabajador o dueño que retira"><input autoFocus value={responsible} onChange={e => setResponsible(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Nombre de quien consume" /></Field>
       <Field label="Motivo (opcional)"><input value={reason} onChange={e => setReason(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Colación, uso personal…" /></Field>
-      <Field label="PIN de administrador para autorizar"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
+      <Field label="PIN de administrador (el del negocio o el tuyo, si eres admin)"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
       <div className="flex gap-2">
         <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
         <Btn full variant="rust" icon={Lock} onClick={submit}>Autorizar y descontar stock</Btn>
@@ -10853,7 +10862,13 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
     if (qtyNum <= 0) return toast("Ingresa una cantidad válida", "error");
     if (qtyNum > product.stock) return toast("Esa cantidad supera el stock disponible", "error");
     if (needsAuthorizerName && !authorizerName.trim()) return toast("Indica qué administrador autoriza", "error");
-    if (!(await verificarPin(pin))) return toast("PIN incorrecto", "error");
+    try {
+      if (!(await autorizarConPin(pin))) {
+        return toast("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+      }
+    } catch (e) {
+      return toast(friendlyError(e, "No se pudo comprobar el PIN"), "error");
+    }
     onConfirm({ qty: qtyNum, reason, note: note.trim(), authorizedBy: needsAuthorizerName ? authorizerName.trim() : session.name });
   }
 
@@ -10891,7 +10906,7 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
           <span style={{ color: C.rust }}>Valor de la pérdida</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(valueLost)}</span>
         </div>
       )}
-      <Field label="PIN de administrador para autorizar"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
+      <Field label="PIN de administrador (el del negocio o el tuyo, si eres admin)"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
       {needsAuthorizerName && (
         <Field label="Nombre del administrador que autoriza"><input value={authorizerName} onChange={e => setAuthorizerName(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Nombre" /></Field>
       )}
