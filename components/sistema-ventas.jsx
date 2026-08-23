@@ -8788,6 +8788,18 @@ function esPan(product, breadCategory) {
   return normalize(product?.category || "") === normalize(seccion);
 }
 
+/* Secciones que se reponen todos los días. La regla del precio anterior existe
+   para el stock que se compró caro y sigue en la repisa; con lo perecible eso
+   no se sostiene: la lechuga de hoy no es la que estaba cuando el precio era
+   otro. Sin esta excepción, bajar el limón de 1.300 a 500 no servía de nada
+   —la caja seguía cobrando 1.300— y el cliente pagaba de más. */
+const SECCIONES_PERECIBLES = ["verduras", "verdura", "frutas", "fruta"];
+
+function esPerecible(product, breadCategory) {
+  return esPan(product, breadCategory)
+    || SECCIONES_PERECIBLES.includes(normalize(product?.category || ""));
+}
+
 function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts) {
   if (product.unitType === "peso") return null;
   // Excepción del pan. La regla del precio anterior existe para el stock que
@@ -8796,7 +8808,7 @@ function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCo
   // los días, así que el pan de hoy nunca es el que quedó de antes del cambio
   // de precio. Sin esta excepción, bajar el pan de 220 a 200 no servía de
   // nada: la caja seguía cobrando 220.
-  if (esPan(product, breadCategory)) return null;
+  if (esPerecible(product, breadCategory)) return null;
   if (!(product.stock > 0)) return null;
   const drop = findLastPriceDrop(product.priceHistory);
   if (!drop) return null;
@@ -8843,7 +8855,7 @@ function buildPriceDropRisks(products, purchaseItems, breadCategory) {
   const rows = [];
   products.forEach(p => {
     if (!(p.stock > 0)) return;
-    if (esPan(p, breadCategory)) return;   // misma excepción que en la caja
+    if (esPerecible(p, breadCategory)) return;   // misma excepción que en la caja
     const drop = findLastPriceDrop(p.priceHistory);
     if (drop && !(Number(drop.oldCost) > 0)) return;   // precio viejo sin costo: nada que avisar
     if (!drop) return;
