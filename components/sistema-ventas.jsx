@@ -11531,8 +11531,23 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
         priceHistory: [],
       };
       const actualizados = [...latestProducts, nuevo];
-      setProducts(actualizados);
       await saveJSON("products-catalog", actualizados, { origen: "carga_inicial" });
+
+      // guardarJSON no avisa si un producto se saltó en silencio (pasa cuando
+      // su código de barras ya lo tiene otro producto, aunque esté
+      // desactivado — el guardado evita duplicar el código, pero antes eso
+      // se veía recién al contar, con un error confuso de "producto no
+      // existe"). Se relee para confirmar que de verdad quedó creado antes
+      // de avisar éxito y dejar contarlo.
+      const verificacion = await loadJSON("products-catalog", actualizados);
+      const quedoCreado = verificacion.some(p => p.id === nuevo.id);
+      if (!quedoCreado) {
+        setProducts(verificacion);
+        toast(`Ya existe un producto con ese código de barras (probablemente desactivado) — no se pudo crear otro igual. Vuelve a intentarlo dejando el código de barras en blanco.`, "error");
+        return;
+      }
+
+      setProducts(verificacion);
       const avisoCategoria = categoriaEscrita && !categoriaFinal ? " — sin categoría (un admin la asigna después)" : "";
       toast(`"${nuevo.name}" agregado al catálogo — precio pendiente de aprobación${avisoCategoria}`, "success");
       setAddingNew(false);
