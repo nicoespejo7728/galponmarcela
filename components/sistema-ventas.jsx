@@ -19,6 +19,7 @@ import {
   cambiarPin,
   identificarPorPin,
   registrarConteoInventarioGeneral,
+  unificarCategorias,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -9649,10 +9650,11 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
    0007): cualquiera del equipo puede seguir escribiendo una sección nueva
    al recibir mercadería, esta pantalla solo agrega la administración.
 --------------------------------------------------------- */
-function CategoriesView({ categories, setCategories, products, toast }) {
+function CategoriesView({ categories, setCategories, products, setProducts, toast }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [merging, setMerging] = useState(false);
 
   const countOf = (name) => products.filter(p => p.category === name).length;
 
@@ -9675,6 +9677,34 @@ function CategoriesView({ categories, setCategories, products, toast }) {
     setEditing(null);
     toast(exists ? "Categoría actualizada" : "Categoría creada", "success");
   }
+  /* Unificar: el catálogo llegó del Excel con la misma sección escrita de
+     varias formas —"LACTEOS" y "LÁCTEOS", "UTILES ASEO" y "ASEO"—, y el
+     sistema las trataba como secciones distintas. Acá se mueven todos los
+     productos a la que se quiere conservar y las otras quedan desactivadas
+     (no se borran: su historial sigue en pie). */
+  async function aplicarUnificacion(destino, origenes) {
+    const nombresOrigen = new Set(origenes.map(c => c.name));
+    if (!destino || nombresOrigen.size === 0) return;
+    try {
+      // Se mueve por identificador, en la base, y recién después se relee: es
+      // una sola consulta en vez de comparar el catálogo entero, y no se
+      // confunde entre dos secciones que se escriben casi igual.
+      const { movidos } = await unificarCategorias(destino.id, origenes.map(c => c.id));
+
+      const [catalogoAlDia, categoriasAlDia] = await Promise.all([
+        loadJSON("products-catalog", products),
+        loadJSON("product-categories", categories),
+      ]);
+      setProducts(catalogoAlDia);
+      setCategories(categoriasAlDia);
+
+      setMerging(false);
+      toast(`${movidos} producto(s) movidos a "${destino.name}" · ${origenes.length} categoría(s) desactivada(s)`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudieron unificar las categorías"), "error");
+    }
+  }
+
   async function deleteCategory(id) {
     const latest = await loadJSON("product-categories", categories);
     await persist(latest.filter(c => c.id !== id));
@@ -9689,6 +9719,7 @@ function CategoriesView({ categories, setCategories, products, toast }) {
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar sección…" className={`${inputCls} pl-9`} style={inputStyle()} />
         </div>
+        <Btn variant="ghost" icon={Blend} onClick={() => setMerging(true)}>Unificar</Btn>
         <Btn icon={Plus} onClick={() => setEditing({})}>Nueva categoría</Btn>
       </div>
 
@@ -9713,6 +9744,14 @@ function CategoriesView({ categories, setCategories, products, toast }) {
         </div>
       )}
 
+      {merging && (
+        <UnificarCategoriasModal
+          categories={sorted}
+          countOf={countOf}
+          onClose={() => setMerging(false)}
+          onConfirm={aplicarUnificacion}
+        />
+      )}
       {editing !== null && <CategoryModal initial={editing.id ? editing : null} onClose={() => setEditing(null)} onSave={saveCategory} />}
       {deleting && (
         <Modal title="Desactivar categoría" onClose={() => setDeleting(null)}>
@@ -9726,6 +9765,148 @@ function CategoriesView({ categories, setCategories, products, toast }) {
         </Modal>
       )}
     </div>
+  );
+}
+
+/* Distancia de edición, acotada: sirve para detectar que "CONCERVAS" y
+   "CONSERVAS" son la misma sección escrita con la mano apurada. */
+function distanciaTexto(a, b) {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  const fila = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let anterior = fila[0];
+    fila[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const guardado = fila[j];
+      fila[j] = a[i - 1] === b[j - 1]
+        ? anterior
+        : 1 + Math.min(anterior, fila[j], fila[j - 1]);
+      anterior = guardado;
+    }
+  }
+  return fila[b.length];
+}
+
+/* ¿Son la misma sección escrita distinto? Se compara sin tildes ni mayúsculas
+   ni espacios: así "LÁCTEOS" y "LACTEOS" caen juntas. Después se acepta que
+   una contenga a la otra ("UTILES ASEO" / "ASEO") o que estén a un par de
+   letras de distancia ("CONCERVAS" / "CONSERVAS"). */
+function pareceLaMisma(a, b) {
+  const x = normalize(a).replace(/[^a-z0-9]/g, "");
+  const y = normalize(b).replace(/[^a-z0-9]/g, "");
+  if (!x || !y || x === y) return x === y;
+  // Que una contenga a la otra no basta: "ASEO" está dentro de "ASEO PERSONAL"
+  // y son secciones distintas. Solo cuenta si lo que sobra es poco —"UTILES
+  // ASEO" y "UTILES DE ASEO"—, no una palabra entera que cambia el sentido.
+  if (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))
+      && Math.abs(x.length - y.length) <= 3) return true;
+  return distanciaTexto(x, y) <= (Math.min(x.length, y.length) >= 6 ? 2 : 1);
+}
+
+/* Unificar secciones repetidas. El catálogo vino del Excel con la misma
+   sección escrita de varias maneras, así que la pantalla propone sola las
+   candidatas en vez de hacer buscarlas a mano entre sesenta. */
+function UnificarCategoriasModal({ categories, countOf, onClose, onConfirm }) {
+  const [destinoId, setDestinoId] = useState("");
+  const [elegidas, setElegidas] = useState(() => new Set());
+  const [trabajando, setTrabajando] = useState(false);
+
+  const destino = categories.find(c => c.id === destinoId) || null;
+
+  // Al elegir la sección que se conserva, se marcan solas las que se le
+  // parecen; igual se pueden desmarcar o agregar otras a mano.
+  function elegirDestino(id) {
+    setDestinoId(id);
+    const d = categories.find(c => c.id === id);
+    if (!d) return setElegidas(new Set());
+    setElegidas(new Set(
+      categories.filter(c => c.id !== id && pareceLaMisma(c.name, d.name)).map(c => c.id)
+    ));
+  }
+
+  const alternar = (id) => setElegidas(prev => {
+    const s = new Set(prev);
+    s.has(id) ? s.delete(id) : s.add(id);
+    return s;
+  });
+
+  const origenes = categories.filter(c => elegidas.has(c.id) && c.id !== destinoId);
+  const aMover = origenes.reduce((s, c) => s + countOf(c.name), 0);
+
+  const ordenadas = useMemo(() => {
+    if (!destino) return categories;
+    return [...categories].sort((a, b) => {
+      const pa = pareceLaMisma(a.name, destino.name) ? 0 : 1;
+      const pb = pareceLaMisma(b.name, destino.name) ? 0 : 1;
+      return pa - pb || a.name.localeCompare(b.name, "es");
+    });
+  }, [categories, destino]);
+
+  async function submit() {
+    if (trabajando || !destino || origenes.length === 0) return;
+    setTrabajando(true);
+    try { await onConfirm(destino, origenes); }
+    finally { setTrabajando(false); }
+  }
+
+  return (
+    <Modal title="Unificar categorías" onClose={onClose}>
+      <Field label="Se conserva esta categoría">
+        <select value={destinoId} onChange={e => elegirDestino(e.target.value)} className={inputCls} style={inputStyle()}>
+          <option value="">Elige la categoría correcta…</option>
+          {categories.map(c => (
+            <option key={c.id} value={c.id}>{c.name} ({countOf(c.name)})</option>
+          ))}
+        </select>
+      </Field>
+
+      {destino && (
+        <>
+          <p className="text-sm mb-2" style={{ color: C.gray }}>
+            Marca las que son lo mismo escrito distinto. Sus productos pasan a
+            <strong style={{ color: C.ink }}> {destino.name}</strong> y ellas quedan desactivadas.
+          </p>
+          <div className="rounded-lg overflow-hidden mb-4 max-h-72 overflow-y-auto" style={{ border: `1.5px solid ${C.paperLine}` }}>
+            {ordenadas.filter(c => c.id !== destinoId).map(c => {
+              const marcada = elegidas.has(c.id);
+              const sugerida = pareceLaMisma(c.name, destino.name);
+              return (
+                <button key={c.id} onClick={() => alternar(c.id)}
+                  className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left"
+                  style={{ borderBottom: `1px solid ${C.paperLine}`, background: marcada ? C.greenSoft : "#fff" }}>
+                  <span className="flex items-center gap-2 min-w-0">
+                    <span className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0"
+                      style={{ background: marcada ? C.green : "#fff", border: `1.5px solid ${marcada ? C.green : C.paperLine}` }}>
+                      {marcada && <Check size={13} style={{ color: "#fff" }} />}
+                    </span>
+                    <span className="text-sm truncate" style={{ color: C.ink }}>{c.name}</span>
+                    {sugerida && <Badge tone="brass">se parece</Badge>}
+                  </span>
+                  <span className="text-xs flex-shrink-0" style={{ color: C.gray }}>{countOf(c.name)} prod.</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {origenes.length > 0 && (
+        <div className="rounded-lg p-3 mb-4" style={{ background: C.brassSoft }}>
+          <p className="text-xs" style={{ color: C.brassText }}>
+            Se moverán <strong>{aMover} producto(s)</strong> a "{destino.name}" y se desactivarán {origenes.length} categoría(s).
+            Los productos no se tocan en nada más: mismo precio, mismo stock, mismo historial.
+          </p>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
+        <Btn full icon={trabajando ? Loader2 : Blend} disabled={trabajando || !destino || origenes.length === 0} onClick={submit}>
+          {trabajando ? "Unificando…" : "Unificar"}
+        </Btn>
+      </div>
+    </Modal>
   );
 }
 
@@ -13952,7 +14133,7 @@ export default function SistemaVentas() {
         {tab === "facturas" && <InvoicesView sales={sales} settings={settings} />}
         {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
         {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
-        {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} toast={toast} />}
+        {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} />}
         {tab === "proveedores" && rolEfectivo === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} />}
         {tab === "clientes" && rolEfectivo === "admin" && <ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} />}
         {tab === "egresos" && rolEfectivo === "admin" && <ExpensesView movements={movements} setMovements={setMovements} toast={toast} />}
