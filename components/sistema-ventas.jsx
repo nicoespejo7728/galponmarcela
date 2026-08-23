@@ -6881,7 +6881,6 @@ function ReceiptModal({ sale, settings, onClose }) {
           {sale.paymentMethod === "Fiado" && (
             <div className="text-xs" style={{ color: "#8a6a1f" }}>Fiado — pendiente de pago{sale.customer ? ` (${sale.customer})` : ""}</div>
           )}
-          {sale.boletaEmitida === false && <div className="text-xs" style={{ color: C.rust }}>Sin boleta emitida</div>}
         </div>
       </div>
       <div className="flex gap-2 mt-4">
