@@ -35,7 +35,7 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal, CreditCard, UserPlus, History, Bell
+  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -5487,50 +5487,133 @@ function Pager({ page, setPage, total, pageSize }) {
 }
 
 /* ---------------------------------------------------------
-   ESCÁNER DE CÁMARA (usa BarcodeDetector nativo si existe)
+   ESCÁNER DE CÁMARA
+
+   Usa BarcodeDetector nativo cuando existe (Android/Chrome/Edge). Donde no
+   existe —todo iOS Safari, que nunca lo implementó— cae a ZXing, cargado
+   bajo demanda desde un CDN público (no es una dependencia del proyecto:
+   así no hay que tocar package.json ni el build para este arreglo). Si ni
+   eso funciona (sin internet para el CDN, cámara denegada), queda el
+   mensaje de siempre: lector USB o código a mano.
 --------------------------------------------------------- */
 function CameraScanner({ onDetect, onClose }) {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("init"); // init | scanning | unsupported | denied
   const rafRef = useRef(null);
   const streamRef = useRef(null);
+  const zxingReaderRef = useRef(null);
+  const trackRef = useRef(null);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+
+  // Flash/linterna: solo existe cuando el navegador maneja la cámara directo
+  // (BarcodeDetector nativo, o sea Android/Chrome/Edge) — es la misma pista
+  // de video de la que ya tenemos el track a mano. iPhone no lo ofrece: Safari
+  // nunca expuso el control de flash a las páginas web, así sea con el
+  // detector nativo o con ZXing, así que ahí el botón simplemente no aparece.
+  async function alternarFlash() {
+    const track = trackRef.current;
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
+      setTorchOn((v) => !v);
+    } catch (e) {
+      console.warn("[escáner] no se pudo alternar el flash", e);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
-    async function start() {
-      if (!("BarcodeDetector" in window)) { setStatus("unsupported"); return; }
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-        setStatus("scanning");
-        const detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"] });
-        const loop = async () => {
-          if (cancelled) return;
-          try {
-            if (videoRef.current && videoRef.current.readyState >= 2) {
-              const codes = await detector.detect(videoRef.current);
-              if (codes && codes.length > 0) {
-                onDetect(codes[0].rawValue);
-                return;
-              }
+
+    function cargarZXing() {
+      if (window.ZXing) return Promise.resolve(window.ZXing);
+      return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://unpkg.com/@zxing/library@latest/umd/index.min.js";
+        script.async = true;
+        script.onload = () => (window.ZXing ? resolve(window.ZXing) : reject(new Error("ZXing no se cargó")));
+        script.onerror = () => reject(new Error("No se pudo cargar el lector de códigos"));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function iniciarNativo() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      streamRef.current = stream;
+      const track = stream.getVideoTracks()[0] || null;
+      trackRef.current = track;
+      if (track && typeof track.getCapabilities === "function") {
+        try {
+          const caps = track.getCapabilities();
+          if (caps && caps.torch) setTorchSupported(true);
+        } catch (e) { /* algunos navegadores no implementan getCapabilities */ }
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setStatus("scanning");
+      const detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"] });
+      const loop = async () => {
+        if (cancelled) return;
+        try {
+          if (videoRef.current && videoRef.current.readyState >= 2) {
+            const codes = await detector.detect(videoRef.current);
+            if (codes && codes.length > 0) {
+              onDetect(codes[0].rawValue);
+              return;
             }
-          } catch (e) { /* keep trying */ }
-          rafRef.current = requestAnimationFrame(loop);
-        };
+          }
+        } catch (e) { /* keep trying */ }
         rafRef.current = requestAnimationFrame(loop);
+      };
+      rafRef.current = requestAnimationFrame(loop);
+    }
+
+    async function iniciarZXing() {
+      const ZXing = await cargarZXing();
+      if (cancelled) return;
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
+        ZXing.BarcodeFormat.QR_CODE,
+      ]);
+      const reader = new ZXing.BrowserMultiFormatReader(hints);
+      zxingReaderRef.current = reader;
+      setStatus("scanning");
+      await reader.decodeFromConstraints(
+        { audio: false, video: { facingMode: "environment" } },
+        videoRef.current,
+        (result) => {
+          if (cancelled || !result) return;
+          onDetect(result.getText());
+        }
+      );
+    }
+
+    async function start() {
+      try {
+        if ("BarcodeDetector" in window) {
+          await iniciarNativo();
+        } else {
+          try {
+            await iniciarZXing();
+          } catch (e) {
+            if (!cancelled) setStatus("unsupported");
+          }
+        }
       } catch (e) {
-        setStatus("denied");
+        if (!cancelled) setStatus("denied");
       }
     }
     start();
     return () => {
       cancelled = true;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (zxingReaderRef.current) { try { zxingReaderRef.current.reset(); } catch (e) { /* ya se cerró */ } }
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     };
   }, [onDetect]);
@@ -5541,6 +5624,18 @@ function CameraScanner({ onDetect, onClose }) {
         {status === "scanning" && <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />}
         {status === "scanning" && (
           <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-0.5" style={{ background: C.brass, boxShadow: `0 0 8px ${C.brass}` }} />
+        )}
+        {status === "scanning" && torchSupported && (
+          <button
+            type="button"
+            onClick={alternarFlash}
+            className="absolute top-3 right-3 rounded-full p-2"
+            style={{ background: torchOn ? C.brass : "rgba(0,0,0,0.55)", color: torchOn ? C.ink : C.paper }}
+            aria-label={torchOn ? "Apagar flash" : "Activar flash"}
+            title={torchOn ? "Apagar flash" : "Activar flash (ayuda a enfocar)"}
+          >
+            <Flashlight size={18} />
+          </button>
         )}
         {status === "init" && (
           <div className="w-full h-full flex flex-col items-center justify-center gap-2" style={{ color: C.paper }}>
