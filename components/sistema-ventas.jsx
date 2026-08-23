@@ -7360,12 +7360,11 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
         <input type="number" value={item.netCost} onChange={e => onChange({ ...item, netCost: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()} />
       </div>
       <div className="flex flex-col items-center">
-        <span className="text-[10px]" style={{ color: C.gray }}>precio sugerido</span>
-        {role === "admin" ? (
-          <input type="number" value={item.finalPrice ?? suggested} onChange={e => onChange({ ...item, finalPrice: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
-        ) : (
-          <span className="font-mono text-sm py-2" style={{ color: "#8a6a1f" }}>{formatCLP(suggested)}</span>
-        )}
+        {/* Quien recibe la mercadería es quien ve la boleta del proveedor y
+            sabe a cuánto conviene venderlo. Puede escribir el precio; si no es
+            administrador, queda como propuesta hasta que alguien la apruebe. */}
+        <span className="text-[10px]" style={{ color: C.gray }}>{role === "admin" ? "precio de venta" : "precio propuesto"}</span>
+        <input type="number" value={item.finalPrice ?? suggested} onChange={e => onChange({ ...item, finalPrice: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
       </div>
       <button onClick={onRemove} style={{ color: C.rust }}><Trash2 size={15} /></button>
     </div>
@@ -7560,7 +7559,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           barcode: item.barcode.trim() || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           name: upperField(item.name),
           category: upperField(item.category),
-          price: role === "admin" ? Number(item.finalPrice ?? suggested) : suggested,
+          // Producto nuevo: entra con el precio que puso quien lo recibió, para
+          // que se pueda vender de inmediato. Si no es administrador, ese
+          // precio queda además marcado como pendiente de aprobación.
+          price: Number(item.finalPrice ?? suggested),
           cost: netCost,
           stock: qty,
           stockZeroSince: qty > 0 ? null : new Date().toISOString(),
@@ -7568,8 +7570,8 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           supplierId: supplierId || null,
           unitType: item.unitType || "unidad",
           quickAccess: !item.barcode.trim(),
-          priceApproval: role === "admin" ? null : { suggestedPrice: suggested, netCost, requestedBy: session.name, date, isNewProduct: true },
-          priceHistory: [{ date, cost: netCost, price: role === "admin" ? Number(item.finalPrice ?? suggested) : suggested }],
+          priceApproval: role === "admin" ? null : { suggestedPrice: Number(item.finalPrice ?? suggested), netCost, requestedBy: session.name, date, isNewProduct: true },
+          priceHistory: [{ date, cost: netCost, price: Number(item.finalPrice ?? suggested) }],
         });
       } else {
         newProducts = newProducts.map(p => {
@@ -7580,7 +7582,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             updated.price = Number(item.finalPrice ?? suggested);
             updated.priceApproval = null;
           } else {
-            updated.priceApproval = { suggestedPrice: suggested, netCost, requestedBy: session.name, date };
+            // Producto que ya se vendía: el precio en vitrina no cambia hasta
+            // que un administrador apruebe. Lo que se guarda es la propuesta.
+            updated.priceApproval = { suggestedPrice: Number(item.finalPrice ?? suggested), netCost, requestedBy: session.name, date };
           }
           updated.priceHistory = pushPriceHistory(p.priceHistory, netCost, updated.price);
           return updated;
@@ -10333,7 +10337,45 @@ function ClientesView({ customers, setCustomers, customerLedger, setCustomerLedg
 /* ---------------------------------------------------------
    INVENTARIO
 --------------------------------------------------------- */
-function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete }) {
+/* Corregir el nombre de un producto. Es lo único que toca: no cambia precio,
+   costo ni stock, así que no necesita aprobación de nadie — un nombre mal
+   escrito lo ve primero quien está frente a la repisa. */
+function CorregirNombreModal({ product, onClose, onSave }) {
+  const [nombre, setNombre] = useState(product?.name || "");
+  const [guardando, setGuardando] = useState(false);
+  const limpio = nombre.trim();
+
+  async function submit() {
+    if (!limpio || guardando) return;
+    setGuardando(true);
+    try { await onSave(limpio); } finally { setGuardando(false); }
+  }
+
+  return (
+    <Modal title="Corregir nombre" onClose={onClose}>
+      <div className="rounded-lg p-3 mb-4" style={{ background: C.paperDark }}>
+        <div className="text-xs" style={{ color: C.gray }}>Nombre actual</div>
+        <div className="text-sm font-semibold" style={{ color: C.ink }}>{product?.name}</div>
+        {product?.barcode && (
+          <div className="text-xs font-mono mt-1" style={{ color: C.gray }}>{product.barcode}</div>
+        )}
+      </div>
+      <Field label="Nombre corregido">
+        <input autoFocus value={nombre} onChange={e => setNombre(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={inputCls} style={inputStyle()} />
+      </Field>
+      <div className="flex gap-2">
+        <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
+        <Btn full icon={guardando ? Loader2 : Check} disabled={!limpio || guardando} onClick={submit}>
+          {guardando ? "Guardando…" : "Guardar"}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename }) {
   const [page, setPage] = useState(0);
   const pageSize = 40;
   useEffect(() => { setPage(0); }, [items]);
@@ -10392,7 +10434,11 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
                 )}
                 {role !== "admin" && (
                   <td className="px-4 py-2.5">
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1.5">
+                      {/* Corregir el nombre no cambia plata ni stock: quien está
+                          frente a la repisa es quien ve que dice "COCA COLA 15L"
+                          en vez de 1.5L, y puede arreglarlo sin pedir permiso. */}
+                      <button title="Corregir nombre" onClick={() => onRename(p)} className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><Pencil size={17} /></button>
                       <button title="Registrar merma" onClick={() => onShrink(p)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><PackageMinus size={17} /></button>
                     </div>
                   </td>
@@ -10512,6 +10558,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   const [importing, setImporting] = useState(false);
   const [deleting, setDeleting] = useState(null);
   const [shrinking, setShrinking] = useState(null);
+  const [renaming, setRenaming] = useState(null);
   const [shrinkageSummaryOpen, setShrinkageSummaryOpen] = useState(false);
 
   // Productos que ya estaban en 0 antes de que existiera este seguimiento no
@@ -10656,7 +10703,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   }
 
   const lowStock = products.filter(p => p.stock <= p.minStock).length;
-  const tableHandlers = { role, suppliers, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: setDeleting };
+  const tableHandlers = { role, suppliers, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: setDeleting, onRename: setRenaming };
 
   return (
     <div>
@@ -10756,6 +10803,24 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
       {editing !== null && <ProductModal initial={editing} products={products} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} role={role} session={session} toast={toast} onClose={() => setEditing(null)} onSave={saveProduct} />}
       {restocking && <RestockModal product={restocking} onClose={() => setRestocking(null)} onConfirm={confirmRestock} />}
       {importing && <ImportModal onClose={() => setImporting(false)} onImport={handleImport} />}
+      {renaming && (
+        <CorregirNombreModal
+          product={renaming}
+          onClose={() => setRenaming(null)}
+          onSave={async (nombre) => {
+            try {
+              const latest = await loadJSON("products-catalog", products);
+              const np = latest.map(p => p.id === renaming.id ? { ...p, name: upperField(nombre) } : p);
+              setProducts(np);
+              await saveJSON("products-catalog", np);
+              setRenaming(null);
+              toast("Nombre corregido", "success");
+            } catch (e) {
+              toast(friendlyError(e, "No se pudo cambiar el nombre"), "error");
+            }
+          }}
+        />
+      )}
       {shrinking && <ShrinkageModal product={shrinking} adminPin={settings.adminPin} role={role} session={session} onClose={() => setShrinking(null)} onConfirm={confirmShrinkage} toast={toast} />}
       {shrinkageSummaryOpen && <ShrinkageSummaryModal movements={movements} onClose={() => setShrinkageSummaryOpen(false)} />}
       {deleting && (
