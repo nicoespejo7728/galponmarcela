@@ -28,6 +28,9 @@ import {
   registrarConsumo,
   leerConsumosInternos,
   marcarConsumosDescontados,
+  registrarVenta,
+  subirLoPendiente,
+  cuantosPendientes,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -5425,6 +5428,65 @@ function Toast({ toast }) {
   );
 }
 
+/* El estado de la conexión, arriba de todo.
+
+   `navigator.onLine` dice si el equipo tiene red, no si la base contesta: un
+   módem encendido sin internet de verdad se ve "en línea". Por eso la franja
+   se apoya en dos señales — lo que dice el navegador y si quedaron ventas sin
+   subir— y no promete más de lo que sabe. */
+function BarraDeConexion({ enCola, onSubir }) {
+  const [enLinea, setEnLinea] = useState(true);
+  const [subiendo, setSubiendo] = useState(false);
+
+  useEffect(() => {
+    const marcar = () => setEnLinea(navigator.onLine !== false);
+    marcar();
+    window.addEventListener("online", marcar);
+    window.addEventListener("offline", marcar);
+    return () => {
+      window.removeEventListener("online", marcar);
+      window.removeEventListener("offline", marcar);
+    };
+  }, []);
+
+  if (enLinea && enCola === 0) return null;
+
+  async function subir() {
+    if (subiendo) return;
+    setSubiendo(true);
+    try { await onSubir(); } finally { setSubiendo(false); }
+  }
+
+  /* A propósito no se anuncia "conexión recuperada" cuando el navegador dice
+     que hay red: `navigator.onLine` solo sabe que el cable está puesto, no que
+     la base conteste. Un módem encendido sin internet de verdad se ve "en
+     línea", y prometer que volvió cuando no volvió es peor que no decir nada.
+     Lo que sí se sabe con certeza es cuántas ventas quedaron sin subir. */
+  const pendiente = enCola > 0;
+  const tono = enLinea ? { fondo: C.brassSoft, texto: C.brassText, punto: C.brass }
+                       : { fondo: C.rustSoft, texto: C.rust, punto: C.rust };
+
+  return (
+    <div className="px-4 sm:px-6 py-2 flex items-center gap-2 flex-wrap" style={{ background: tono.fondo }}>
+      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: tono.punto }} />
+      <span className="text-xs font-semibold" style={{ color: tono.texto }}>
+        {!enLinea ? "Sin internet" : "Ventas por subir"}
+      </span>
+      <span className="text-xs" style={{ color: tono.texto, opacity: 0.85 }}>
+        {pendiente
+          ? `${enCola} venta${enCola === 1 ? "" : "s"} guardada${enCola === 1 ? "" : "s"} en este computador, esperando subir.`
+          : "Puedes seguir cobrando: las ventas quedan guardadas acá y se suben solas cuando vuelva."}
+      </span>
+      {pendiente && (
+        <button onClick={subir} disabled={subiendo}
+          className="ml-auto text-xs font-semibold underline" style={{ color: tono.texto }}>
+          {subiendo ? "Subiendo…" : "Subir ahora"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Modal({ title, onClose, children, wide }) {
   return (
     <div className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-[1px] p-0 sm:p-4">
@@ -6106,7 +6168,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
   );
 }
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab }) {
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -6286,11 +6348,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     // confiar en el estado local, que puede tener hasta unos segundos de rezago
     // por la sincronización entre dispositivos). Esto reduce al mínimo la ventana
     // en la que dos cajas distintas podrían generar el mismo número de boleta.
-    const [latestSettings, latestSales, latestMovements, latestProducts] = await Promise.all([
-      loadJSON("business-settings", settings),
-      loadJSON("sales-log", sales),
-      loadJSON("movements-log", movements),
-      loadJSON("products-catalog", products),
+    /* Esta relectura sirve para partir del dato más fresco posible. Es una
+       mejora, no un requisito: si la base no contesta en algo más de un segundo
+       —porque se cayó el internet— se sigue con lo que hay en pantalla, que a
+       lo más está unos segundos atrasado. Esperar a que el navegador se rinda
+       solo eran catorce segundos de pantalla muerta con el cliente al frente. */
+    const [latestSettings, latestSales, latestMovements, latestProducts] = await Promise.race([
+      Promise.all([
+        loadJSON("business-settings", settings),
+        loadJSON("sales-log", sales),
+        loadJSON("movements-log", movements),
+        loadJSON("products-catalog", products),
+      ]),
+      new Promise(listo => setTimeout(() => listo([settings, sales, movements, products]), 1200)),
     ]);
 
     const invoiceNumber = latestSettings.invoiceCounter;
@@ -6340,41 +6410,63 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     });
     const newSales = [sale, ...latestSales];
 
+    /* La venta se escribe de una vez: boleta, detalle, movimiento de stock y
+       asiento de caja. Antes iban en cuatro guardados separados, cada uno
+       comparando contra la copia local, y si el internet se caía a mitad de
+       camino la venta quedaba a medias —o se perdía entera, sin avisar—.
+
+       Los identificadores del asiento y del cargo se ponen ACÁ, antes de
+       intentar nada, para que subirla mañana escriba exactamente las mismas
+       filas que habría escrito hoy: es lo que permite reintentar sin duplicar. */
+    sale.movementId = uid("mov");
+    if (payment === "Fiado") sale.ledgerId = uid("cliemov");
+
     setProducts(newProducts); setSales(newSales);
 
-    // El descuento de stock y la boleta se guardan primero. El número
-    // definitivo lo asigna una secuencia de Postgres —no un contador que cada
-    // caja lleva por su cuenta—, así que recién después se arma el asiento de
-    // caja, ya con el número real.
-    await saveJSON("products-catalog", newProducts, { origen: "venta" });
-    await saveJSON("sales-log", newSales);
+    let resultado;
+    try {
+      resultado = await registrarVenta(sale);
+    } catch (e) {
+      // Un error que no es de conexión (un producto que ya no existe, la
+      // sesión vencida) sí tiene que detener la venta: se devuelve todo a como
+      // estaba para no dejar la pantalla mintiendo.
+      setProducts(latestProducts); setSales(latestSales);
+      toast(friendlyError(e, "No se pudo registrar la venta"), "error");
+      return;
+    }
 
-    const numeroReal = sale.invoiceNumber;
+    const numeroReal = resultado.numeroBoleta;
+    sale.invoiceNumber = numeroReal;
     // Una venta fiada todavía no es plata en caja: no genera el ingreso de
     // "Venta" de inmediato. Queda como deuda en el libro de fiado (más abajo)
     // y el ingreso real se registra recién cuando el cliente la abone — ver
     // registerPayment en ClientesView. El resto de las formas de pago sigue
     // exactamente igual que siempre.
+    /* El asiento de caja y el cargo del fiado ya se escribieron junto con la
+       venta; acá solo se refleja en pantalla, sin volver a guardar. */
     if (payment !== "Fiado") {
-      const asiento = { id: uid("mov"), date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal, saleId: sale.id };
-      const movimientosFinales = [asiento, ...latestMovements];
-      setMovements(movimientosFinales);
-      await saveJSON("movements-log", movimientosFinales);
+      const asiento = { id: sale.movementId, date: sale.date, type: "ingreso", concept: `Venta #${numeroReal}`, amount: total, category: "Venta", auto: true, relatedInvoice: numeroReal, saleId: sale.id };
+      setMovements(prev => [asiento, ...prev]);
     } else {
-      const latestLedger = await loadJSON("customer-ledger", customerLedger);
       const cargo = {
-        id: uid("cliemov"), customerId: selectedCustomer.id, type: "cargo",
+        id: sale.ledgerId, customerId: selectedCustomer.id, type: "cargo",
         amount: total, date: sale.date, saleId: sale.id, paymentMethod: null, note: "",
       };
-      const newLedger = [cargo, ...latestLedger];
-      setCustomerLedger(newLedger);
-      await saveJSON("customer-ledger", newLedger);
+      setCustomerLedger(prev => [cargo, ...prev]);
     }
 
     setReceipt(sale);
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false);
     setSelectedCustomer(null); setCustomerQuery("");
-    toast(`Venta #${numeroReal} registrada`, "success");
+    onCambioEnCola?.();
+    if (resultado.subida) {
+      toast(`Venta #${numeroReal} registrada`, "success");
+    } else {
+      // Sin conexión la venta igual quedó: en el disco de este computador, en
+      // la cola. Se dice así de claro, con el número marcado como provisorio,
+      // para que nadie crea que la boleta ya tiene su número definitivo.
+      toast("Sin internet — la venta quedó guardada y se sube sola cuando vuelva", "success");
+    }
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
@@ -15237,6 +15329,14 @@ export default function SistemaVentas() {
   const marcaSincroRef = useRef(Date.now());
   const refrescarRef = useRef(null);
   const refrescarAhora = useCallback(() => refrescarRef.current?.(), []);
+
+  /* Cuántas ventas quedaron esperando internet. Esto sí va en el estado
+     —a diferencia del reloj del distintivo en vivo— porque cambia muy de vez
+     en cuando y tiene que verse en la barra de arriba de todas las pantallas. */
+  const [enCola, setEnCola] = useState(0);
+  const revisarCola = useCallback(async () => {
+    try { setEnCola(await cuantosPendientes()); } catch (e) { /* sin IndexedDB */ }
+  }, []);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [products, setProducts] = useState([]);
   const [sales, setSales] = useState([]);
@@ -15450,13 +15550,48 @@ export default function SistemaVentas() {
     // Se deja a mano para que una pantalla pueda pedir el ciclo ahora mismo
     // (el botón EN VIVO de Ventas) en vez de esperar los quince segundos.
     refrescarRef.current = refresh;
+
+    /* Antes de leer, subir: si quedaron ventas esperando internet, van primero.
+       Si se leyera antes, la pantalla mostraría el stock del servidor —que
+       todavía no sabe de esas ventas— y parecería que el stock "volvió". */
+    async function vaciarCola() {
+      try {
+        const antes = await cuantosPendientes();
+        if (antes === 0) { if (enCola !== 0) setEnCola(0); return; }
+        const r = await subirLoPendiente();
+        setEnCola(r.quedan);
+        if (r.subidas > 0) {
+          toast(r.subidas === 1
+            ? "Se subió la venta que había quedado esperando internet"
+            : `Se subieron ${r.subidas} ventas que estaban esperando internet`, "success");
+          await refresh();
+        }
+        if (r.trabadas.length) {
+          console.error("[pendientes] no se pudieron subir", r.trabadas);
+          toast(`${r.trabadas.length} venta(s) no se pudieron subir. Revisa la consola.`, "error");
+        }
+      } catch (e) {
+        console.error("[pendientes] fallo al vaciar la cola", e);
+      }
+    }
     // Cada 15 segundos en vez de 5: ahora cada ciclo son consultas a una base de
     // datos, no lecturas locales, y 15 segundos siguen siendo imperceptibles
     // para quien está en otra caja.
-    const interval = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 15000);
-    function onVisible() { if (document.visibilityState === "visible") refresh(); }
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      vaciarCola().then(refresh);
+    }, 15000);
+    function onVisible() { if (document.visibilityState === "visible") vaciarCola().then(refresh); }
+    // El navegador avisa apenas vuelve la red: no hay para qué esperar el ciclo.
+    function alVolver() { vaciarCola().then(refresh); }
     document.addEventListener("visibilitychange", onVisible);
-    return () => { cancelled = true; clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+    window.addEventListener("online", alVolver);
+    revisarCola();
+    return () => {
+      cancelled = true; clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", alVolver);
+    };
   }, [loading, session]);
 
   if (loading) {
@@ -15711,8 +15846,14 @@ export default function SistemaVentas() {
 
         {/* El espacio de abajo deja respirar el contenido por encima de la
             barra inferior del teléfono, que va fija. */}
+        {/* Franja de "sin internet". Aparece solo cuando hay algo que decir:
+            que se cayó la conexión, o que quedaron ventas esperando subir. En
+            un almacén donde la conexión se corta sola, no saberlo es lo que
+            hace perder plata. */}
+        <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
+
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} />}
+        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} />}
         {tab === "actividades" && <ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} />}
         {tab === "inventario-general" && <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} />}
         {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} />}
