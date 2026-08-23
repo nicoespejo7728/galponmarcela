@@ -8911,7 +8911,13 @@ function buildBreadHistory(products, sales, movements, purchaseItems, breadCateg
 function predictBreadConsumption(dateStr, byDate, holidays, shortageDates) {
   const info = classifyBreadDay(dateStr, holidays);
   const key = breadDayKey(info);
-  const isShort = shortageDates ? shortageDates.has : () => false;
+  /* Ojo con esta línea: `shortageDates.has` sacado suelto del Set pierde su
+     dueño, y al llamarlo revienta con "Method Set.prototype.has called on
+     incompatible receiver undefined". Eso tumbaba la pantalla de Análisis
+     entera —no el panel del pan, la pantalla— apenas había un solo día de
+     historial de pan, que es cuando este recorrido llega a ejecutarse. Se
+     llama sobre el Set; no se guarda la función suelta. */
+  const isShort = (d) => !!shortageDates && shortageDates.has(d);
   let matches = [];
   byDate.forEach((v, d) => {
     if (d === dateStr || isShort(d)) return; // un día con desabasto no refleja demanda real, se excluye
@@ -9759,6 +9765,48 @@ function InvestmentPredictorPanel({ products, sales, lastSaleMap }) {
   );
 }
 
+/* Un panel que se cae no puede llevarse la pantalla entera.
+
+   Esto es lo que faltaba cuando el predictor de pan reventó: un error dentro
+   de un panel dejaba a toda la pantalla de Análisis en "Application error", y
+   desde afuera era imposible saber cuál de los seis paneles había fallado ni
+   ver el resto de la información, que estaba perfecta. Con esto el panel roto
+   queda como un recuadro que dice qué pasó y los demás siguen andando.
+
+   React solo permite atajar errores de renderizado desde una clase, así que
+   esta es la única del archivo. */
+class SiFalla extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    // Queda en la consola completo, con el componente donde ocurrió: es lo que
+    // permite arreglarlo después sin tener que reproducir a ciegas.
+    console.error(`[panel "${this.props.nombre}"]`, error, info?.componentStack);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="rounded-xl p-4 mt-4" style={{ background: C.rustSoft, border: `1.5px solid ${C.rust}` }}>
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle size={15} style={{ color: C.rust }} />
+          <span className="text-sm font-semibold" style={{ color: C.rust }}>
+            No se pudo mostrar {this.props.nombre}
+          </span>
+        </div>
+        <p className="text-xs" style={{ color: C.rust }}>
+          El resto de la pantalla funciona igual. Avísale a Nico con esta línea:{" "}
+          <span className="font-mono">{String(this.state.error?.message || this.state.error).slice(0, 200)}</span>
+        </p>
+      </div>
+    );
+  }
+}
+
 function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex, purchaseItems, movements, setMovements, settings, setSettings, session, toast }) {
   const [range, setRange] = useState("30");
   const now = Date.now();
@@ -10047,11 +10095,19 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
         )}
       </div>
 
-      <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} breadCategory={settings.breadCategory} />
+      {/* Cada panel va envuelto por separado a propósito: si uno se cae, los
+          otros dos siguen en pie. */}
+      <SiFalla nombre="el aviso de stock con precio antiguo">
+        <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} breadCategory={settings.breadCategory} />
+      </SiFalla>
 
-      <InvestmentPredictorPanel products={products} sales={sales} lastSaleMap={lastSaleMap} />
+      <SiFalla nombre="el predictor de inversión">
+        <InvestmentPredictorPanel products={products} sales={sales} lastSaleMap={lastSaleMap} />
+      </SiFalla>
 
-      <BreadPredictionPanel products={products} setProducts={setProducts} sales={sales} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} settings={settings} setSettings={setSettings} session={session} toast={toast} />
+      <SiFalla nombre="la predicción de pedido de pan">
+        <BreadPredictionPanel products={products} setProducts={setProducts} sales={sales} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} settings={settings} setSettings={setSettings} session={session} toast={toast} />
+      </SiFalla>
     </div>
   );
 }
