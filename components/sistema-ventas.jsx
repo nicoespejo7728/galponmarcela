@@ -5349,7 +5349,7 @@ Ayudas con varias cosas:
 1. Dudas sobre cómo usar el sistema. Estas son sus secciones:
    - Vender: cobro con escáner de código de barras o cámara, catálogo rápido para productos sin código (por unidad o por peso/kg), cálculo de vuelto en efectivo, y consumo interno que cada persona registra con su propio PIN de vendedor (lo que hay que descontarle se revisa después en Administración → Consumos). Antes de confirmar cada venta se pide elegir quién la realiza e ingresar su PIN de vendedor (ese PIN se configura por persona en Usuarios y es distinto del PIN de administrador de Ajustes) —la caja es una sola compartida por todos, así que esto es lo que deja saber a quién adjudicar cada venta.
    - Caja: una sola caja compartida por todo el equipo (no una por persona) — cualquiera cobra en ella una vez abierta, retiros y refuerzos de efectivo, y al cerrar la cuadratura muestra un desglose de cuánto vendió cada vendedor.
-   - Boletas: historial de ventas con número correlativo único.
+   - Ventas: resumen de lo vendido por día, mes o año —con el desglose por forma de pago y por vendedor— y el historial de boletas, con número correlativo único, que se abren una por una para ver el detalle. El botón SII arma el resumen para la declaración.
    - Inventario: catálogo de productos, alertas de stock bajo, reposición de stock, registro de mermas (pérdidas/robos) con autorización de administrador, productos de "acceso rápido" sin código de barras.
    - Recepción: ingreso de mercadería nueva, con foto de factura/boleta obligatoria (o "entrada libre" como excepción autorizada), lectura automática por IA de facturas de proveedores, precios sugeridos que los administradores deben aprobar si los crea un vendedor.
    - Proveedores (solo administradores): directorio de proveedores, historial de facturas, comparación de precios entre proveedores, rentabilidad.
@@ -11791,33 +11791,240 @@ function FiscalSummaryModal({ sales, onClose }) {
   );
 }
 
+/* ---------------------------------------------------------
+   VENTAS — el resumen y el detalle
+--------------------------------------------------------- */
+/* Antes esta pantalla era una lista corrida de boletas, de la más nueva a la
+   más vieja, y para saber cuánto se vendió hoy había que sumar a ojo. La
+   pregunta que se hace de verdad es "¿cuánto vendimos?" —hoy, este mes, este
+   año— y recién después "¿qué fue esa venta de las once?".
+
+   Así que primero va el resumen del período elegido, con el desglose por
+   forma de pago y por quién vendió, y debajo la lista de las ventas de ese
+   mismo período, que se sigue abriendo una por una. */
+
+const PERIODOS = [
+  { id: "dia", label: "Día" },
+  { id: "mes", label: "Mes" },
+  { id: "ano", label: "Año" },
+];
+
+/* La clave del período al que pertenece una fecha: "2026-08-23", "2026-08" o
+   "2026". Agrupar por texto y no por objetos Date evita los enredos de huso
+   horario que aparecen al comparar instantes. */
+function clavePeriodo(iso, periodo) {
+  const d = dayKey(iso);
+  return periodo === "dia" ? d : periodo === "mes" ? d.slice(0, 7) : d.slice(0, 4);
+}
+
+/* Etiquetas cortas para el desglose, donde el encabezado ya dijo el mes o el
+   año: "vie 20" y "agosto". El día de la semana ayuda a leer el ritmo del
+   almacén —los lunes flojos, los viernes cargados— de una sola mirada. */
+function etiquetaDia(clave) {
+  const [a, m, d] = String(clave).split("-").map(Number);
+  return new Date(a, m - 1, d).toLocaleDateString("es-CL", { weekday: "short", day: "numeric" });
+}
+
+function etiquetaMes(clave) {
+  const [a, m] = String(clave).split("-").map(Number);
+  return new Date(a, m - 1, 1).toLocaleDateString("es-CL", { month: "long" });
+}
+
+function nombrePeriodo(clave, periodo) {
+  if (periodo === "ano") return clave;
+  if (periodo === "mes") {
+    const [a, m] = String(clave).split("-");
+    return new Date(Number(a), Number(m) - 1, 1)
+      .toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+  }
+  return formatDateOnly(clave);
+}
+
+/* Cómo se reparte el total del período. Se mira lo que ya está guardado en
+   cada venta —forma de pago y vendedor— y no se recalcula nada: son las
+   mismas cifras que salieron en la boleta. */
+function resumirVentas(lista) {
+  const porPago = new Map(), porVendedor = new Map();
+  let total = 0, sinBoleta = 0;
+  for (const v of lista) {
+    const monto = Number(v.total) || 0;
+    total += monto;
+    if (v.boletaEmitida === false) sinBoleta += monto;
+    porPago.set(v.paymentMethod, (porPago.get(v.paymentMethod) || 0) + monto);
+    const quien = v.seller || "Sin identificar";
+    porVendedor.set(quien, (porVendedor.get(quien) || 0) + monto);
+  }
+  const ordenado = (m) => Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  return {
+    total, sinBoleta, cuantas: lista.length,
+    promedio: lista.length ? total / lista.length : 0,
+    porPago: ordenado(porPago), porVendedor: ordenado(porVendedor),
+  };
+}
+
+function Cifra({ etiqueta, valor, tono }) {
+  return (
+    <div className="rounded-lg p-3" style={{ background: C.paperDark }}>
+      <div className="text-[11px]" style={{ color: C.gray }}>{etiqueta}</div>
+      <div className="text-lg font-mono font-bold leading-tight" style={{ color: tono || C.ink }}>{valor}</div>
+    </div>
+  );
+}
+
 function InvoicesView({ sales, settings }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [viewing, setViewing] = useState(null);
   const [fiscalOpen, setFiscalOpen] = useState(false);
+  const [periodo, setPeriodo] = useState("dia");
+  const [clave, setClave] = useState(null);   // null = el período más reciente con ventas
   const pageSize = 20;
+
+  /* Los períodos que de verdad tienen ventas, del más nuevo al más viejo. Se
+     recorren estos y no un calendario completo: saltarse los días cerrados es
+     más útil que ofrecer días vacíos entremedio. */
+  const periodosConVentas = useMemo(() => {
+    const vistos = new Set();
+    for (const v of sales) vistos.add(clavePeriodo(v.date, periodo));
+    return Array.from(vistos).sort((a, b) => b.localeCompare(a));
+  }, [sales, periodo]);
+
+  const claveActual = clave && periodosConVentas.includes(clave)
+    ? clave
+    : (periodosConVentas[0] ?? clavePeriodo(new Date().toISOString(), periodo));
+
+  const delPeriodo = useMemo(
+    () => sales.filter(v => clavePeriodo(v.date, periodo) === claveActual),
+    [sales, periodo, claveActual]
+  );
+  const resumen = useMemo(() => resumirVentas(delPeriodo), [delPeriodo]);
+
+  /* Dentro de un mes o un año, cómo se repartió por día o por mes. Es lo que
+     deja ver de una mirada si el martes fue flojo o si diciembre levantó. */
+  const desglose = useMemo(() => {
+    if (periodo === "dia") return [];
+    const sub = periodo === "mes" ? "dia" : "mes";
+    const mapa = new Map();
+    for (const v of delPeriodo) {
+      const k = clavePeriodo(v.date, sub);
+      const acum = mapa.get(k) || { total: 0, cuantas: 0 };
+      acum.total += Number(v.total) || 0;
+      acum.cuantas += 1;
+      mapa.set(k, acum);
+    }
+    const filas = Array.from(mapa.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const techo = Math.max(1, ...filas.map(([, x]) => x.total));
+    return filas.map(([k, x]) => ({ clave: k, sub, ...x, parte: x.total / techo }));
+  }, [delPeriodo, periodo]);
 
   const filtered = useMemo(() => {
     const q = normalize(query);
-    if (!q) return sales;
-    return sales.filter(s => normalize(String(s.invoiceNumber)).includes(q) || normalize(s.seller).includes(q) || normalize(s.customer || "").includes(q));
-  }, [sales, query]);
-  useEffect(() => { setPage(0); }, [query]);
+    if (!q) return delPeriodo;
+    return delPeriodo.filter(s => normalize(String(s.invoiceNumber)).includes(q) || normalize(s.seller).includes(q) || normalize(s.customer || "").includes(q));
+  }, [delPeriodo, query]);
+  useEffect(() => { setPage(0); }, [query, periodo, claveActual]);
   const pageItems = filtered.slice(page * pageSize, page * pageSize + pageSize);
+
+  const posicion = periodosConVentas.indexOf(claveActual);
+  const irA = (paso) => {
+    const siguiente = periodosConVentas[posicion + paso];
+    if (siguiente) setClave(siguiente);
+  };
 
   return (
     <div>
+      {/* Día, mes o año. El período manda sobre todo lo de abajo: el resumen,
+          el desglose y la lista de ventas hablan siempre del mismo tramo. */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="flex gap-1 p-1 rounded-lg" style={{ background: C.paperDark }}>
+          {PERIODOS.map(p => (
+            <button key={p.id} onClick={() => { setPeriodo(p.id); setClave(null); }}
+              className="px-4 py-2 rounded-md text-sm font-semibold"
+              style={periodo === p.id ? { background: C.green, color: "#fff" } : { color: C.inkSoft }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={() => irA(1)} disabled={posicion < 0 || posicion >= periodosConVentas.length - 1}
+            className="p-2.5 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}
+            title="Período anterior"><ChevronLeft size={16} /></button>
+          <span className="text-sm font-semibold px-2 min-w-[8rem] text-center" style={{ color: C.ink }}>
+            {nombrePeriodo(claveActual, periodo)}
+          </span>
+          <button onClick={() => irA(-1)} disabled={posicion <= 0}
+            className="p-2.5 rounded-md disabled:opacity-30" style={{ background: C.paperDark, color: C.ink }}
+            title="Período siguiente"><ChevronRight size={16} /></button>
+        </div>
+        <Btn variant="ghost" icon={FileText} onClick={() => setFiscalOpen(true)}>SII</Btn>
+      </div>
+
+      <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <div className="grid gap-2 grid-cols-2 lg:grid-cols-4 mb-3">
+          <Cifra etiqueta="Vendido" valor={formatCLP(resumen.total)} tono={C.greenDark} />
+          <Cifra etiqueta="Ventas" valor={resumen.cuantas} />
+          <Cifra etiqueta="Venta promedio" valor={formatCLP(resumen.promedio)} />
+          <Cifra etiqueta="Sin boleta" valor={formatCLP(resumen.sinBoleta)} tono={resumen.sinBoleta > 0 ? C.rust : C.gray} />
+        </div>
+        {resumen.cuantas > 0 && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <div className="text-[11px] mb-1" style={{ color: C.gray }}>Por forma de pago</div>
+              {resumen.porPago.map(([forma, monto]) => (
+                <div key={forma} className="flex justify-between text-sm py-0.5">
+                  <span style={{ color: C.inkSoft }}>{forma}</span>
+                  <span className="font-mono" style={{ color: C.ink }}>{formatCLP(monto)}</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div className="text-[11px] mb-1" style={{ color: C.gray }}>Por vendedor</div>
+              {resumen.porVendedor.map(([quien, monto]) => (
+                <div key={quien} className="flex justify-between text-sm py-0.5">
+                  <span className="truncate" style={{ color: C.inkSoft }}>{quien}</span>
+                  <span className="font-mono flex-shrink-0" style={{ color: C.ink }}>{formatCLP(monto)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {desglose.length > 0 && (
+        <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-[11px] mb-2" style={{ color: C.gray }}>
+            {periodo === "mes" ? "Día por día — toca uno para verlo" : "Mes por mes — toca uno para verlo"}
+          </div>
+          <div className="space-y-1">
+            {desglose.map(f => (
+              <button key={f.clave} onClick={() => { setPeriodo(f.sub); setClave(f.clave); }}
+                className="w-full flex items-center gap-2 text-left hover:bg-black/[.02] rounded px-1 py-1">
+                {/* La etiqueta no repite lo que ya dice el encabezado: dentro
+                    de agosto basta "vie 20", y dentro de 2026 basta "agosto". */}
+                <span className="text-xs w-20 sm:w-24 flex-shrink-0 truncate" style={{ color: C.gray }}>
+                  {periodo === "mes" ? etiquetaDia(f.clave) : etiquetaMes(f.clave)}
+                </span>
+                {/* La barra sirve para comparar de una mirada, no para leer
+                    cifras exactas: esas van al lado, en números. */}
+                <span className="flex-1 h-2.5 rounded-full overflow-hidden min-w-0" style={{ background: C.paperDark }}>
+                  <span className="block h-full rounded-full" style={{ width: `${Math.max(2, f.parte * 100)}%`, background: C.green }} />
+                </span>
+                <span className="text-xs font-mono flex-shrink-0 w-20 text-right" style={{ color: C.ink }}>{formatCLP(f.total)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <div className="relative max-w-sm flex-1">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por N° boleta, vendedor o cliente…" className={`${inputCls} pl-9`} style={inputStyle()} />
         </div>
-        <Btn variant="ghost" icon={FileText} onClick={() => setFiscalOpen(true)}>SII</Btn>
       </div>
       <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         {pageItems.length === 0 ? (
-          <EmptyState icon={FileText} title="Sin facturas" hint="Las ventas realizadas aparecerán aquí." />
+          <EmptyState icon={FileText} title="Sin ventas en este período" hint="Prueba con otro día, o cambia a Mes o Año." />
         ) : (
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
             {pageItems.map(s => (
@@ -12241,7 +12448,7 @@ function ExpensesView({ movements, setMovements, toast }) {
 
   // Solo egresos: pagos a proveedores (con crédito o sin él), gastos del
   // local, sueldos, mermas, etc. Las ventas y demás ingresos se ven en Caja
-  // y Boletas — acá solo importa la plata que sale.
+  // y Ventas — acá solo importa la plata que sale.
   const egresos = useMemo(() => movements.filter(m => m.type === "egreso"), [movements]);
   const filteredMovs = useMemo(() => {
     if (range === "todo") return egresos;
@@ -14394,7 +14601,7 @@ const GRUPOS = {
     { titulo: "Mesón", items: [
       { id: "pos", label: "Vender", icon: ShoppingCart },
       { id: "caja", label: "Caja", icon: Banknote },
-      { id: "facturas", label: "Boletas", icon: FileText },
+      { id: "facturas", label: "Ventas", icon: FileText },
       { id: "actividades", label: "Actividades", icon: Bell },
       { id: "inventario-general", label: "Inventario General", icon: ClipboardCheck },
     ]},
@@ -14409,7 +14616,7 @@ const GRUPOS = {
     { titulo: "Mesón", items: [
       { id: "pos", label: "Vender", icon: ShoppingCart },
       { id: "caja", label: "Caja", icon: Banknote },
-      { id: "facturas", label: "Boletas", icon: FileText },
+      { id: "facturas", label: "Ventas", icon: FileText },
       { id: "inventario-general", label: "Inventario General", icon: ClipboardCheck },
       { id: "actividades", label: "Actividades", icon: Bell },
     ]},
