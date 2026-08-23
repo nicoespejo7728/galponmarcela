@@ -11437,6 +11437,24 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
     [inventoryCounts, todayStr]
   );
 
+  // Para avisar (no bloquear: cualquiera puede recontar si hubo un error)
+  // cuando un producto ya se contó hoy — por este mismo teléfono o por
+  // cualquiera de los otros dos. Se queda con el conteo más reciente si
+  // alguien lo contó más de una vez.
+  const contadosHoyPorProducto = useMemo(() => {
+    const m = new Map();
+    for (const c of inventoryCounts) {
+      if (c.status !== "completado" || (c.completedAt || "").slice(0, 10) !== todayStr) continue;
+      for (const it of (c.items || [])) {
+        const previo = m.get(it.productId);
+        if (!previo || new Date(c.completedAt) > new Date(previo.at)) {
+          m.set(it.productId, { counted: it.counted, at: c.completedAt, by: c.completedBy });
+        }
+      }
+    }
+    return m;
+  }, [inventoryCounts, todayStr]);
+
   function pick(p) {
     setSelected(p);
     setQuery("");
@@ -11496,15 +11514,21 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
 
             {matches.length > 0 && (
               <div className="mt-3 rounded-xl overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
-                {matches.map(p => (
-                  <button key={p.id} onClick={() => pick(p)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-black/[.03]" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                    <div>
-                      <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
-                      <div className="text-xs" style={{ color: C.gray }}>{p.category || "Sin categoría"}</div>
-                    </div>
-                    <div className="text-xs font-mono flex-shrink-0 ml-2" style={{ color: C.gray }}>sistema: {p.stock}{p.unitType === "peso" ? " kg" : ""}</div>
-                  </button>
-                ))}
+                {matches.map(p => {
+                  const yaContado = contadosHoyPorProducto.get(p.id);
+                  return (
+                    <button key={p.id} onClick={() => pick(p)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-black/[.03]" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                      <div>
+                        <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+                        <div className="text-xs flex items-center gap-1" style={{ color: yaContado ? "#2f7a4d" : C.gray }}>
+                          {yaContado && <CheckCircle2 size={12} />}
+                          {yaContado ? `Ya contado hoy — ${yaContado.counted}${p.unitType === "peso" ? " kg" : ""}` : (p.category || "Sin categoría")}
+                        </div>
+                      </div>
+                      <div className="text-xs font-mono flex-shrink-0 ml-2" style={{ color: C.gray }}>sistema: {p.stock}{p.unitType === "peso" ? " kg" : ""}</div>
+                    </button>
+                  );
+                })}
               </div>
             )}
             {query.trim().length > 0 && matches.length === 0 && (
@@ -11515,6 +11539,18 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
           <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
             <div className="text-base font-semibold mb-0.5" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{selected.name}</div>
             <div className="text-xs mb-4" style={{ color: C.gray }}>{selected.category || "Sin categoría"} · sistema dice {selected.stock}{selected.unitType === "peso" ? " kg" : ""}</div>
+
+            {contadosHoyPorProducto.get(selected.id) && (
+              <div className="rounded-lg p-3 mb-4 flex items-start gap-2" style={{ background: "#fef3e6", color: "#8a5a1f" }}>
+                <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
+                <p className="text-xs">
+                  Este producto ya se contó hoy: <strong>{contadosHoyPorProducto.get(selected.id).counted}{selected.unitType === "peso" ? " kg" : ""}</strong>
+                  {contadosHoyPorProducto.get(selected.id).by ? ` (${contadosHoyPorProducto.get(selected.id).by}` : ""}
+                  {contadosHoyPorProducto.get(selected.id).at ? `, ${new Date(contadosHoyPorProducto.get(selected.id).at).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" })})` : (contadosHoyPorProducto.get(selected.id).by ? ")" : "")}.
+                  {" "}Si vuelves a confirmar, se toma como una corrección de ese conteo — solo hazlo si de verdad es distinto.
+                </p>
+              </div>
+            )}
 
             <label className="block mb-4">
               <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Cantidad real contada{selected.unitType === "peso" ? " (kg)" : ""}</span>
