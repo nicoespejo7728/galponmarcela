@@ -11425,6 +11425,18 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
   const [sessionCount, setSessionCount] = useState(0);
   const inputRef = useRef(null);
 
+  // Producto nuevo: para cuando lo que hay que contar no está en el
+  // catálogo. Precio y costo quedan pendientes de un administrador (mismo
+  // mecanismo de aprobación que ya existe para Recepción) — acá solo se
+  // pide lo mínimo para poder anotar la cantidad contada de inmediato.
+  const [addingNew, setAddingNew] = useState(false);
+  const [newForm, setNewForm] = useState({ name: "", category: "", barcode: "", unitType: "unidad" });
+  const [creatingNew, setCreatingNew] = useState(false);
+  const categoriasExistentes = useMemo(
+    () => Array.from(new Set(products.map(p => p.category).filter(Boolean))).sort(),
+    [products]
+  );
+
   const matches = useMemo(() => {
     if (query.trim().length < 1) return [];
     const q = normalize(query);
@@ -11466,8 +11478,54 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
     const clean = code.trim();
     const found = products.find(p => p.barcode === clean);
     setScannerOpen(false);
-    if (!found) { toast(`Código ${clean} no está en el catálogo — búscalo por nombre`, "error"); return; }
+    if (!found) {
+      setNewForm({ name: "", category: "", barcode: clean, unitType: "unidad" });
+      setAddingNew(true);
+      toast(`Código ${clean} no está en el catálogo — complétalo como producto nuevo`, "success");
+      return;
+    }
     pick(found);
+  }
+
+  async function crearProductoNuevo() {
+    const name = newForm.name.trim();
+    if (!name) return toast("Escribe el nombre del producto", "error");
+    if (creatingNew) return;
+    setCreatingNew(true);
+    try {
+      // Se relee lo más reciente antes de escribir: con 3 teléfonos contando
+      // a la vez, partir de una copia local vieja del catálogo completo
+      // podría hacer pasar por "eliminado" (y desactivar) un producto que
+      // otro dispositivo recién agregó.
+      const latestProducts = await loadJSON("products-catalog", products);
+      const barcode = newForm.barcode.trim();
+      const date = new Date().toISOString();
+      const nuevo = {
+        id: uid("prod"),
+        barcode: barcode || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        name: upperField(name),
+        category: upperField(newForm.category || ""),
+        price: 0,
+        cost: 0,
+        stock: 0,
+        minStock: 5,
+        supplierId: null,
+        unitType: newForm.unitType === "peso" ? "peso" : "unidad",
+        quickAccess: !barcode,
+        priceApproval: { suggestedPrice: 0, netCost: 0, requestedBy: session.name, date, isNewProduct: true },
+        priceHistory: [],
+      };
+      const actualizados = [...latestProducts, nuevo];
+      setProducts(actualizados);
+      await saveJSON("products-catalog", actualizados, { origen: "carga_inicial" });
+      toast(`"${nuevo.name}" agregado al catálogo — precio pendiente de aprobación`, "success");
+      setAddingNew(false);
+      pick(nuevo);
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo agregar el producto"), "error");
+    } finally {
+      setCreatingNew(false);
+    }
   }
 
   async function confirm() {
@@ -11504,7 +11562,44 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
           <p className="text-xs" style={{ color: "#8a6a1f" }}>Cuenta lo que tengas al frente: escanea el código o busca por nombre, anota la cantidad real y confirma. No hace falta repartirse nada — cualquiera cuenta cualquier producto.</p>
         </div>
 
-        {!selected ? (
+        {addingNew ? (
+          <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+            <div className="text-base font-semibold mb-3" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Producto nuevo</div>
+
+            <label className="block mb-3">
+              <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Nombre</span>
+              <input autoFocus value={newForm.name} onChange={e => setNewForm(f => ({ ...f, name: e.target.value }))} className={`${inputCls} text-base`} style={{ ...inputStyle(), textTransform: "uppercase" }} placeholder="Nombre del producto" />
+            </label>
+
+            <label className="block mb-3">
+              <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Categoría (opcional)</span>
+              <input list="categorias-inventario-general" value={newForm.category} onChange={e => setNewForm(f => ({ ...f, category: e.target.value }))} className={`${inputCls} text-base`} style={{ ...inputStyle(), textTransform: "uppercase" }} placeholder="Ej. Bebidas, Abarrotes…" />
+              <datalist id="categorias-inventario-general">
+                {categoriasExistentes.map(c => <option key={c} value={c} />)}
+              </datalist>
+            </label>
+
+            <label className="block mb-3">
+              <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Se vende por</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button type="button" onClick={() => setNewForm(f => ({ ...f, unitType: "unidad" }))} className="py-2 rounded-lg text-sm font-medium" style={newForm.unitType === "unidad" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Unidad</button>
+                <button type="button" onClick={() => setNewForm(f => ({ ...f, unitType: "peso" }))} className="py-2 rounded-lg text-sm font-medium" style={newForm.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (kg)</button>
+              </div>
+            </label>
+
+            <label className="block mb-4">
+              <span className="block text-sm font-semibold mb-1.5" style={{ color: C.ink }}>Código de barras (opcional)</span>
+              <input value={newForm.barcode} onChange={e => setNewForm(f => ({ ...f, barcode: e.target.value }))} className={`${inputCls} font-mono text-sm`} style={inputStyle()} placeholder="Déjalo vacío si no tiene" />
+            </label>
+
+            <p className="text-xs mb-4" style={{ color: C.gray }}>El precio y el costo quedan pendientes — un administrador los completa después desde Aprobaciones. Apenas lo crees, vas a poder anotar la cantidad contada.</p>
+
+            <div className="flex gap-2">
+              <Btn variant="ghost" full onClick={() => setAddingNew(false)}>Cancelar</Btn>
+              <Btn full size="lg" icon={creatingNew ? Loader2 : Check} disabled={creatingNew || !newForm.name.trim()} onClick={crearProductoNuevo}>Crear y contar</Btn>
+            </div>
+          </div>
+        ) : !selected ? (
           <>
             <div className="relative mb-3">
               <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
@@ -11532,7 +11627,12 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
               </div>
             )}
             {query.trim().length > 0 && matches.length === 0 && (
-              <EmptyState icon={Search} title="Sin resultados" hint="Prueba con otra palabra, o escanea el código de barras." />
+              <>
+                <EmptyState icon={Search} title="Sin resultados" hint="Prueba con otra palabra, escanea el código, o agrégalo como producto nuevo." />
+                <Btn full variant="ghost" icon={Plus} onClick={() => { setNewForm({ name: upperField(query), category: "", barcode: "", unitType: "unidad" }); setAddingNew(true); }}>
+                  Agregar "{query}" como producto nuevo
+                </Btn>
+              </>
             )}
           </>
         ) : (
