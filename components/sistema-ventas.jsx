@@ -22,6 +22,9 @@ import {
   registrarConteoInventarioGeneral,
   unificarCategorias,
   unificarProductos,
+  leerDuplicadosDescartados,
+  descartarDuplicadoDeProductos,
+  revertirDescarte,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos } from "@/lib/datos/catalogos";
@@ -9774,6 +9777,23 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
   const [elegido, setElegido] = useState({});     // clave del grupo → id que se conserva
   const [trabajando, setTrabajando] = useState(null);
   const [editando, setEditando] = useState(null);
+  // Grupos que alguien ya miró y decidió dejar separados. Se guardan en la
+  // base: si no, reaparecerían cada vez que se abre la pantalla.
+  const [descartados, setDescartados] = useState([]);
+  const [verDescartados, setVerDescartados] = useState(false);
+
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      try {
+        const filas = await leerDuplicadosDescartados();
+        if (vivo) setDescartados(filas);
+      } catch (e) {
+        console.error("[revisar] no se pudieron leer los descartes", e);
+      }
+    })();
+    return () => { vivo = false; };
+  }, []);
 
   const activos = products;
 
@@ -9791,6 +9811,12 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
       .map(([clave, lista]) => ({ clave, nombre: lista[0].name, lista }))
       .sort((a, b) => b.lista.length - a.lista.length || a.nombre.localeCompare(b.nombre, "es"));
   }, [activos]);
+
+  const clavesDescartadas = useMemo(() => new Set(descartados.map(d => d.clave)), [descartados]);
+  const duplicadosVisibles = useMemo(
+    () => duplicados.filter(g => !clavesDescartadas.has(g.clave)), [duplicados, clavesDescartadas]);
+  const duplicadosOcultos = useMemo(
+    () => duplicados.filter(g => clavesDescartadas.has(g.clave)), [duplicados, clavesDescartadas]);
 
   const sinCodigo = useMemo(
     () => activos.filter(p => p.stock > 0 && String(p.barcode || "").startsWith("INT-")), [activos]);
@@ -9838,6 +9864,28 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
     }
   }
 
+  async function noUnificar(grupo) {
+    setTrabajando(grupo.clave);
+    try {
+      await descartarDuplicadoDeProductos(grupo.clave, grupo.nombre);
+      setDescartados(prev => [...prev, { clave: grupo.clave, nombre: grupo.nombre, fecha: new Date().toISOString() }]);
+      toast(`"${grupo.nombre}" queda como productos distintos`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar la decisión"), "error");
+    } finally {
+      setTrabajando(null);
+    }
+  }
+
+  async function volverARevisar(clave) {
+    try {
+      await revertirDescarte(clave);
+      setDescartados(prev => prev.filter(d => d.clave !== clave));
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo deshacer"), "error");
+    }
+  }
+
   async function guardarProducto(p) {
     try {
       const latest = await loadJSON("products-catalog", products);
@@ -9852,7 +9900,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
   }
 
   const SECCIONES = [
-    { id: "duplicados", label: "Duplicados", cuenta: duplicados.length },
+    { id: "duplicados", label: "Duplicados", cuenta: duplicadosVisibles.length },
     { id: "sinCodigo", label: "Sin código", cuenta: sinCodigo.length },
     { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
     { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
@@ -9886,11 +9934,11 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
       <p className="text-sm mb-3" style={{ color: C.gray }}>{AYUDA[seccion]}</p>
 
       {seccion === "duplicados" && (
-        duplicados.length === 0
-          ? <EmptyState icon={Check} title="Sin duplicados" hint="No hay dos productos activos con el mismo nombre." />
+        duplicadosVisibles.length === 0
+          ? <EmptyState icon={Check} title="Sin duplicados pendientes" hint="No queda ningún grupo por decidir. Los que marcaste como productos distintos siguen abajo." />
           : (
             <div className="space-y-3">
-              {duplicados.map(g => {
+              {duplicadosVisibles.map(g => {
                 const destino = elegido[g.clave] || porOmision(g.lista);
                 return (
                   <div key={g.clave} className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -9916,18 +9964,46 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
                         </label>
                       ))}
                     </div>
-                    <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderTop: `1px solid ${C.paperLine}` }}>
+                    <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3" style={{ borderTop: `1px solid ${C.paperLine}` }}>
                       <span className="text-xs" style={{ color: C.gray }}>Se conserva el marcado; el resto se desactiva.</span>
-                      <Btn size="sm" icon={trabajando === g.clave ? Loader2 : Blend}
-                        disabled={trabajando === g.clave} onClick={() => unificar(g)}>
-                        {trabajando === g.clave ? "Unificando…" : "Unificar"}
-                      </Btn>
+                      <div className="flex gap-2">
+                        {/* Que se llamen igual no significa que sean lo mismo: el
+                            paquete y la unidad suelta comparten nombre. Marcarlo
+                            saca el grupo de la lista y no vuelve a preguntar. */}
+                        <Btn size="sm" variant="ghost" disabled={trabajando === g.clave} onClick={() => noUnificar(g)}>
+                          Son distintos
+                        </Btn>
+                        <Btn size="sm" icon={trabajando === g.clave ? Loader2 : Blend}
+                          disabled={trabajando === g.clave} onClick={() => unificar(g)}>
+                          {trabajando === g.clave ? "Unificando…" : "Unificar"}
+                        </Btn>
+                      </div>
                     </div>
                   </div>
                 );
               })}
             </div>
           )
+      )}
+
+      {seccion === "duplicados" && duplicadosOcultos.length > 0 && (
+        <div className="mt-4">
+          <button onClick={() => setVerDescartados(v => !v)} className="text-sm font-medium underline" style={{ color: C.gray }}>
+            {verDescartados ? "Ocultar" : `Ver los ${duplicadosOcultos.length} marcados como distintos`}
+          </button>
+          {verDescartados && (
+            <div className="mt-2 rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {duplicadosOcultos.map(g => (
+                  <div key={g.clave} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <span className="text-sm" style={{ color: C.ink }}>{g.nombre} <span className="text-xs" style={{ color: C.gray }}>({g.lista.length} fichas)</span></span>
+                    <Btn size="sm" variant="ghost" onClick={() => volverARevisar(g.clave)}>Volver a revisar</Btn>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {listaSimple && (
