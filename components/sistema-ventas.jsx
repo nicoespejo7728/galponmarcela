@@ -9974,8 +9974,12 @@ function CategoriesView({ categories, setCategories, products, setProducts, toas
 
   const countOf = (name) => products.filter(p => p.category === name).length;
 
+  // Alfabético y nada más: con sesenta secciones, el orden manual no ayudaba a
+  // encontrar ninguna. "localeCompare" en español para que las tildes y la Ñ
+  // caigan donde uno las busca.
   const sorted = useMemo(
-    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    () => [...categories].sort((a, b) =>
+      String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" })),
     [categories]
   );
   const filtered = useMemo(() => {
