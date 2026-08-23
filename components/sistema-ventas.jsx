@@ -11416,7 +11416,7 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
    registrarConteoInventarioGeneral en lib/datos — así que no hizo falta
    ninguna tabla nueva ni migración para esto.
 --------------------------------------------------------- */
-function GeneralInventoryView({ products, setProducts, inventoryCounts, session, toast, onLogout }) {
+function GeneralInventoryView({ products, setProducts, inventoryCounts, session, toast, onLogout, adminEscapeHatch, onAdminEscape }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [countedValue, setCountedValue] = useState("");
@@ -11554,7 +11554,14 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
           <div className="font-semibold text-sm" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Inventario general</div>
           <div className="text-[11px] opacity-70">{session.name} · {totalContadosHoy} contados entre todos · {sessionCount} tuyos</div>
         </div>
-        {onLogout && <button onClick={onLogout} className="p-2 rounded-lg" style={{ color: C.paper }}><LogOut size={18} /></button>}
+        <div className="flex items-center gap-1">
+          {adminEscapeHatch && (
+            <button onClick={onAdminEscape} className="px-2 py-1.5 rounded-lg text-[11px] font-medium" style={{ color: C.paper, background: "rgba(255,255,255,0.12)" }} title="Salir del Inventario General y usar el panel completo">
+              Panel completo
+            </button>
+          )}
+          {onLogout && <button onClick={onLogout} className="p-2 rounded-lg" style={{ color: C.paper }}><LogOut size={18} /></button>}
+        </div>
       </div>
 
       <div className="p-4 flex-1 max-w-md mx-auto w-full">
@@ -13285,6 +13292,13 @@ export default function SistemaVentas() {
   // entra normal (o al recuperar la sesión al recargar) ve todo, como hoy;
   // solo se activa si él mismo elige "Volver a vender".
   const [modoVenta, setModoVenta] = useState(false);
+  // Inventario General (agosto 2026): por pedido puntual de esta noche, los
+  // administradores también caen directo en Inventario General al entrar
+  // (antes quedaban siempre afuera del bloqueo). Arranca en false en cada
+  // sesión nueva; el propio administrador puede salir con el botón de
+  // escape que ve solo él dentro de esa pantalla, por si necesita entrar al
+  // panel completo durante la ventana.
+  const [saltarInventarioGeneral, setSaltarInventarioGeneral] = useState(false);
   const [session, setSession] = useState(null);
   // Mientras no se haya revisado si había una sesión abierta, no se decide
   // qué mostrar: sin esto, quien recarga la página ve parpadear el ingreso.
@@ -13310,6 +13324,7 @@ export default function SistemaVentas() {
     // La próxima persona que entre parte sin la máscara de "Volver a
     // vender" puesta — ve el panel completo o no, según su propio rol real.
     setModoVenta(false);
+    setSaltarInventarioGeneral(false);
   }, []);
 
   // Si ya había una sesión abierta (por ejemplo, al recargar la página), se
@@ -13481,7 +13496,7 @@ export default function SistemaVentas() {
     return (
       <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <style>{FONTS}</style>
-        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSession(s); }} toast={toast} />
+        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSaltarInventarioGeneral(false); setSession(s); }} toast={toast} />
         <Toast toast={toastData} />
       </div>
     );
@@ -13499,17 +13514,25 @@ export default function SistemaVentas() {
   // misma persona — es una caja compartida entre varios vendedores.
   const rolEfectivo = (session.role === "admin" && modoVenta) ? "vendedor" : session.role;
 
-  // Ventana del Inventario General: mientras dure, quien no sea
-  // administrador ve SOLO esta pantalla — nada de menú, nada de otras
-  // pestañas — para que nadie mueva stock mientras el local se cuenta
-  // entero. Un administrador nunca queda bloqueado.
+  // Ventana del Inventario General: mientras dure, todo el que entra ve SOLO
+  // esta pantalla — nada de menú, nada de otras pestañas — para que nadie
+  // mueva stock mientras el local se cuenta entero. Por pedido puntual de
+  // esta noche (23-ago-2026), esto incluye también a los administradores:
+  // antes quedaban siempre afuera del bloqueo, ahora entran igual que
+  // cualquiera, pero conservan un botón de escape (solo ellos lo ven) por si
+  // necesitan el panel completo durante la ventana.
   const ahora = new Date();
   const inventarioGeneralActivo = ahora >= INVENTARIO_GENERAL_INICIO && ahora < INVENTARIO_GENERAL_FIN;
-  if (inventarioGeneralActivo && rolEfectivo !== "admin") {
+  if (inventarioGeneralActivo && !saltarInventarioGeneral) {
     return (
       <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <style>{FONTS}</style>
-        <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} onLogout={cerrarSesion} />
+        <GeneralInventoryView
+          products={products} setProducts={setProducts} inventoryCounts={inventoryCounts}
+          session={session} toast={toast} onLogout={cerrarSesion}
+          adminEscapeHatch={rolEfectivo === "admin"}
+          onAdminEscape={() => setSaltarInventarioGeneral(true)}
+        />
         <Toast toast={toastData} />
       </div>
     );
