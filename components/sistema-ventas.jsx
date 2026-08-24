@@ -44,8 +44,8 @@ import {
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
 import { valorDelConsumo, explicarBase } from "@/lib/consumo";
 import {
-  boletaParaImprimir, leerAjustesBoleta, guardarAjustesBoleta,
-  AJUSTES_POR_OMISION, ventaDePrueba,
+  cuerpoBoleta, estilosBoleta, estilosSoloImpresion, reglaDePagina, ID_IMPRESION, ID_ESTILOS,
+  leerAjustesBoleta, guardarAjustesBoleta, AJUSTES_POR_OMISION, ventaDePrueba,
 } from "@/lib/boleta";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
@@ -7240,31 +7240,89 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
 
 /* Mandar la boleta a la impresora.
 
-   Va en un marco escondido dentro de la misma página y no en una ventana
-   aparte. La ventana aparte traía dos problemas de los que hay que enterarse
-   en el mesón, no acá: los bloqueadores de ventanas emergentes la tapan, y
-   como se llena con document.write() el momento en que está lista es difícil
-   de saber. El marco escondido no tiene ninguno de los dos.
+   Ni ventana aparte ni marco escondido: los dos fallaron en el mesón. La
+   ventana la tapan los bloqueadores de emergentes, y el marco terminó
+   sacando rollo en blanco sin parar — imprimir desde dentro de un marco es
+   territorio de rarezas de cada navegador, y no hay forma de comprobarlo
+   desde acá contra el controlador de ESA impresora.
 
-   El documento que va adentro tiene el ancho del rollo y nada más — ver
-   lib/boleta.js. */
+   Se vuelve entonces al único camino que en esa máquina ya se sabe que
+   funciona: imprimir la página del sistema. Lo que cambia respecto al código
+   original es lo que hacía que saliera un rollo entero: antes el resto de la
+   pantalla se escondía con `visibility: hidden`, y esconder no es lo mismo
+   que no ocupar lugar. El menú, el carro y toda la pantalla seguían
+   ocupándolo, y ese espacio salía como papel en blanco. Con `display: none`
+   no queda nada que imprimir fuera de la boleta.
+
+   La boleta se cuelga como hijo directo de <body> para que una sola regla
+   —`body > * { display: none }`— apague todo lo demás sin excepciones. */
 function imprimirBoleta(sale, settings, ajustes) {
   const config = ajustes || leerAjustesBoleta();
-  const marco = document.createElement("iframe");
-  marco.setAttribute("aria-hidden", "true");
-  /* Escondido, pero NO con display:none: un marco sin caja no maqueta nada
-     adentro, y entonces la boleta no se puede medir. Se saca de la pantalla. */
-  marco.style.cssText = "position:fixed;right:0;bottom:0;width:80mm;height:200mm;opacity:0;border:0;pointer-events:none;";
-  document.body.appendChild(marco);
+  limpiarImpresion();
 
-  const doc = marco.contentWindow.document;
-  doc.open();
-  doc.write(boletaParaImprimir(sale, settings, config));
-  doc.close();
+  const caja = document.createElement("div");
+  caja.id = ID_IMPRESION;
+  /* En pantalla se mantiene fuera de la vista pero MAQUETADO: hace falta que
+     tenga caja para poder medir cuánto papel va a ocupar. Con display:none
+     mediría cero. */
+  caja.style.cssText = `position:absolute;left:-10000px;top:0;width:${config.anchoMm}mm;`;
+  caja.innerHTML = cuerpoBoleta(sale, settings, config);
 
-  /* El marco se saca después de imprimir. Se espera bastante porque el
-     diálogo de impresión bloquea el hilo y quitarlo antes cancela el trabajo. */
-  setTimeout(() => { try { marco.remove(); } catch {} }, 20000);
+  /* El aspecto de la boleta vale también en pantalla —aunque esté escondida—
+     porque es ahí donde se la mide. Solo lo de apagar la pantalla y fijar el
+     papel va dentro de @media print. */
+  const armarEstilos = (altoMm) => `${estilosBoleta(config, true)}
+@media print {
+${reglaDePagina(config.anchoMm, altoMm)}
+${estilosSoloImpresion(config)}
+}`;
+
+  const estilos = document.createElement("style");
+  estilos.id = ID_ESTILOS;
+  estilos.textContent = armarEstilos(Number(config.altoMm) || 80);
+
+  document.body.appendChild(caja);
+  document.head.appendChild(estilos);
+
+  const lanzar = () => {
+    /* Si el largo quedó en automático, se mide la boleta ya maquetada y se le
+       dice a la página que mida exactamente eso. Si quedó fijo, se respeta el
+       número: hay controladores que no aceptan una página a medida. */
+    if (!Number(config.altoMm)) {
+      const mm = Math.ceil(caja.getBoundingClientRect().height * 25.4 / 96) + 1;
+      estilos.textContent = armarEstilos(mm);
+    }
+    /* Se limpia cuando el navegador AVISA que terminó, no a los tantos
+       segundos. Un plazo ciego es una trampa: mientras el cuadro de impresión
+       está abierto, el navegador sigue leyendo la página, y si la boleta se
+       borra ahí en medio lo que se imprime es una hoja en blanco. */
+    const alTerminar = () => {
+      window.removeEventListener("afterprint", alTerminar);
+      limpiarImpresion();
+    };
+    window.addEventListener("afterprint", alTerminar);
+    /* Y una red por si "afterprint" no llega —hay navegadores que no lo
+       mandan—: un minuto, de sobra para cualquier cuadro de impresión. */
+    setTimeout(alTerminar, 60000);
+
+    window.print();
+  };
+
+  const img = caja.querySelector("img");
+  if (img && !img.complete) {
+    img.addEventListener("load", lanzar, { once: true });
+    img.addEventListener("error", lanzar, { once: true });
+    setTimeout(lanzar, 1200);
+  } else {
+    setTimeout(lanzar, 30);
+  }
+}
+
+function limpiarImpresion() {
+  for (const id of [ID_IMPRESION, ID_ESTILOS]) {
+    const viejo = document.getElementById(id);
+    if (viejo) viejo.remove();
+  }
 }
 
 function ReceiptModal({ sale, settings, onClose }) {
