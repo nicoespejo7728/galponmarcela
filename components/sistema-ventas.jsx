@@ -35,13 +35,13 @@ import {
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos, perfilVaALaCasa } from "@/lib/datos/catalogos";
-import { nuevoId } from "@/lib/datos/traduccion";
+import { nuevoId, clave } from "@/lib/datos/traduccion";
 import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
 import {
   ROLLOS, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
-import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
+import { hojaCartaDeCodigos, SIN_SECCION } from "@/lib/hoja-carta";
 import { valorDelConsumo, explicarBase } from "@/lib/consumo";
 import {
   cuerpoBoleta, estilosBoleta, estilosSoloImpresion, reglaDePagina, ID_IMPRESION, ID_ESTILOS,
@@ -62,7 +62,7 @@ import {
   ShoppingCart, Package, FileText, Wallet, Settings as SettingsIcon,
   Camera, Search, Plus, Minus, Trash2, X, Check, AlertTriangle,
   LogOut, ScanLine, TrendingUp, TrendingDown, Upload, User, Lock,
-  Store, RefreshCw, Pencil, ChevronLeft, ChevronRight, PackagePlus,
+  Store, RefreshCw, Pencil, ChevronLeft, ChevronRight, ChevronDown, PackagePlus,
   Printer, ArrowUpCircle, ArrowDownCircle, Loader2, Truck, Sparkles,
   Receipt, ClipboardCheck, ImagePlus, Banknote, Unlock, Building2, Phone, Mail,
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
@@ -11098,13 +11098,22 @@ function ConsumosView({ toast }) {
    imprimiera primero, bastaría un corte de luz para dejar etiquetas pegadas en
    la repisa con un código que el sistema no conoce — y eso es peor que no
    tener etiqueta, porque la pistola pita y no pasa nada. */
-function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, onCompletar }) {
+function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettings, toast, onCompletar }) {
   const [cuantas, setCuantas] = useState({});     // id → cuántas etiquetas
   const [trabajando, setTrabajando] = useState(false);
   const [rolloId, setRolloId] = useState(ROLLO_POR_OMISION.id);
   const rollo = ROLLOS.find(r => r.id === rolloId) || ROLLO_POR_OMISION;
   const medida = medirCodigo(rollo.largo - 2);   // menos un milímetro de margen a cada lado
   const cabe = queCabe(rollo.ancho);
+
+  // Para encontrar rápido entre muchos: filtra por nombre o por sección,
+  // sin distinguir tildes ni mayúsculas.
+  const [busqueda, setBusqueda] = useState("");
+  const busquedaClave = clave(busqueda);
+  const buscando = busquedaClave.length > 0;
+  // Categorías que el usuario abrió o cerró a mano — lo que no está acá
+  // sigue la regla por omisión (ver colapsarPorOmision, abajo).
+  const [expandidasAMano, setExpandidasAMano] = useState(() => new Map());
 
   const conCodigo = useMemo(
     () => productos.filter(p => esCodigoDelAlmacen(p.barcode)), [productos]);
@@ -11115,12 +11124,102 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
   const paraLaCaja = useMemo(
     () => (todos || []).filter(p => esCodigoDelAlmacen(p.barcode)), [todos]);
 
+  // Con muchos productos, obligar a desplazarse por todos para encontrar dos
+  // o tres es justo lo que se quiere evitar: si no se está buscando algo
+  // puntual, las categorías parten cerradas y se abren con un clic o
+  // escribiendo en el buscador.
+  const colapsarPorOmision = !buscando && conCodigo.length > 40;
+
+  const conCodigoFiltrado = useMemo(() => {
+    if (!buscando) return conCodigo;
+    return conCodigo.filter(p =>
+      clave(p.name).includes(busquedaClave) || clave(p.category || SIN_SECCION).includes(busquedaClave));
+  }, [conCodigo, buscando, busquedaClave]);
+
+  const gruposPorCategoria = useMemo(() => {
+    const m = new Map();
+    for (const p of conCodigoFiltrado) {
+      const cat = p.category || SIN_SECCION;
+      if (!m.has(cat)) m.set(cat, []);
+      m.get(cat).push(p);
+    }
+    const ordenadas = [...m.keys()].sort((a, b) => a.localeCompare(b, "es"));
+    return ordenadas.map(categoria => ({ categoria, productos: m.get(categoria) }));
+  }, [conCodigoFiltrado]);
+
+  function categoriaExpandida(cat) {
+    if (buscando) return true;   // buscando, se muestra lo que calzó — sin clics de más
+    if (expandidasAMano.has(cat)) return expandidasAMano.get(cat);
+    return !colapsarPorOmision;
+  }
+  function alternarCategoria(cat) {
+    setExpandidasAMano(m => new Map(m).set(cat, !categoriaExpandida(cat)));
+  }
+  function ponerCategoria(productosCat, valor) {
+    setCuantas(c => {
+      const n = { ...c };
+      for (const p of productosCat) n[p.id] = valor;
+      return n;
+    });
+  }
+
   const aImprimir = useMemo(
     () => conCodigo
       .map(p => ({ producto: p, copias: Math.max(0, Number(cuantas[p.id] ?? 1) || 0) }))
       .filter(x => x.copias > 0),
     [conCodigo, cuantas]);
   const totalEtiquetas = aImprimir.reduce((s, x) => s + x.copias, 0);
+
+  /* Categoría de cada producto de la hoja carta, para comparar contra lo
+     último que se imprimió. */
+  const paraLaCajaPorCategoria = useMemo(() => {
+    const m = new Map();
+    for (const p of paraLaCaja) {
+      const cat = p.category || SIN_SECCION;
+      if (!m.has(cat)) m.set(cat, []);
+      m.get(cat).push(p);
+    }
+    return m;
+  }, [paraLaCaja]);
+
+  /* Qué categorías cambiaron desde la última vez que se imprimió su hoja:
+     se le agregó o se le quitó un código interno. Una categoría que nunca
+     se imprimió con este sistema también cuenta como desactualizada — es
+     justo lo que avisa que todavía no se imprimió su página nueva. */
+  const categoriasDesactualizadas = useMemo(() => {
+    const impresas = settings?.printedPages || {};
+    const salen = [];
+    for (const [cat, items] of paraLaCajaPorCategoria) {
+      const actual = new Set(items.map(p => p.barcode));
+      const guardado = impresas[cat]?.codigos;
+      if (!guardado) { salen.push(cat); continue; }
+      const antes = new Set(guardado);
+      const distinto = actual.size !== antes.size || [...actual].some(c => !antes.has(c));
+      if (distinto) salen.push(cat);
+    }
+    return salen.sort((a, b) => a.localeCompare(b, "es"));
+  }, [paraLaCajaPorCategoria, settings]);
+
+  /* Registra qué códigos tenía cada categoría en el momento de imprimir —
+     así la próxima vez se puede avisar si algo cambió. No bloquea la
+     impresión si no se pudo guardar: es solo el aviso en pantalla, no la
+     hoja en sí. */
+  async function marcarComoImpresas(categorias) {
+    if (!setSettings || categorias.length === 0) return;
+    const ahora = new Date().toISOString();
+    const manifiesto = { ...(settings?.printedPages || {}) };
+    for (const cat of categorias) {
+      const items = paraLaCajaPorCategoria.get(cat) || [];
+      manifiesto[cat] = { impresoAt: ahora, codigos: items.map(p => p.barcode).sort() };
+    }
+    const ns = { ...settings, printedPages: manifiesto };
+    setSettings(ns);
+    try {
+      await saveJSON("business-settings", ns);
+    } catch (e) {
+      console.error("[hoja carta] no se pudo guardar qué se imprimió", e);
+    }
+  }
 
   /* Se reparten de una vez para todos los que falten: pedirlos de a uno haría
      que dos personas en dos cajas se pisaran el correlativo. */
@@ -11205,13 +11304,33 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
   /* La hoja carta va con TODOS los que tengan código interno, no con los que
      estén marcados arriba: es un listado de consulta para la caja, no una
      tanda de impresión. Uno que quedó en cero de stock igual tiene que estar —
-     el día que llegue de nuevo, el código ya existe y la hoja lo tiene. */
+     el día que llegue de nuevo, el código ya existe y la hoja lo tiene.
+
+     Al abrir la ventana de impresión se guarda qué códigos tenía cada
+     categoría en ese momento — no hay forma de saber si la persona
+     realmente sacó la hoja de la impresora, así que se toma el clic como la
+     confirmación, igual que con las etiquetas sueltas. */
   function imprimirHojaCarta() {
     if (paraLaCaja.length === 0) return toast("Todavía no hay productos con código interno", "error");
     const ventana = window.open("", "_blank", "width=900,height=700");
     if (!ventana) return toast("El navegador bloqueó la ventana de impresión. Permítela y vuelve a intentar.", "error");
     ventana.document.write(hojaCartaDeCodigos(paraLaCaja, settings));
     ventana.document.close();
+    marcarComoImpresas([...paraLaCajaPorCategoria.keys()]);
+  }
+
+  /* Solo reimprime las categorías que cambiaron desde la última vez —para no
+     tener que sacar de nuevo la carpeta entera cuando se agregó un código en
+     una sola sección. */
+  function imprimirCategoriasDesactualizadas() {
+    if (categoriasDesactualizadas.length === 0) return;
+    const productosDeEsas = paraLaCaja.filter(p =>
+      categoriasDesactualizadas.includes(p.category || SIN_SECCION));
+    const ventana = window.open("", "_blank", "width=900,height=700");
+    if (!ventana) return toast("El navegador bloqueó la ventana de impresión. Permítela y vuelve a intentar.", "error");
+    ventana.document.write(hojaCartaDeCodigos(productosDeEsas, settings));
+    ventana.document.close();
+    marcarComoImpresas(categoriasDesactualizadas);
   }
 
   const fijar = (id, v) => setCuantas(c => ({ ...c, [id]: v }));
@@ -11301,57 +11420,129 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, toast, on
       )}
 
       {paraLaCaja.length > 0 && (
-        <div className="rounded-xl p-4 mb-3 flex items-center justify-between gap-3 flex-wrap"
-             style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div className="min-w-0">
-            <div className="text-sm font-semibold" style={{ color: C.ink }}>
-              Hoja carta para la caja · {paraLaCaja.length} producto{paraLaCaja.length === 1 ? "" : "s"}
+        <div className="rounded-xl p-4 mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold" style={{ color: C.ink }}>
+                Hoja carta para la caja · {paraLaCaja.length} producto{paraLaCaja.length === 1 ? "" : "s"}
+              </div>
+              <p className="text-xs mt-0.5 max-w-lg" style={{ color: C.gray }}>
+                Organizada por categoría — cada una parte hoja aparte cuando alcanza a llenarla, y las categorías
+                chicas comparten hoja. Se imprime en la impresora de siempre y se deja en una carpeta al lado de la
+                registradora: cuando algo no tiene la etiqueta pegada, se le pasa la pistola a la hoja. Imprímela al
+                100%, sin "ajustar a la página".
+              </p>
             </div>
-            <p className="text-xs mt-0.5 max-w-lg" style={{ color: C.gray }}>
-              Los {paraLaCaja.length} productos con código interno en {hojasQueSalen(paraLaCaja.length)} hoja(s) tamaño
-              carta, {CARTA_POR_HOJA} por hoja y en orden alfabético, con el código bien grande. Se imprime en la
-              impresora de siempre y se deja en una carpeta al lado de la registradora: cuando algo no tiene la etiqueta
-              pegada, se le pasa la pistola a la hoja. Imprímela al 100%, sin "ajustar a la página".
-            </p>
+            <Btn size="sm" variant="ghost" icon={Printer} onClick={imprimirHojaCarta}>Hoja carta completa</Btn>
           </div>
-          <Btn size="sm" variant="ghost" icon={Printer} onClick={imprimirHojaCarta}>Hoja carta</Btn>
+
+          {categoriasDesactualizadas.length > 0 && (
+            <div className="rounded-lg p-3 mt-3 flex items-center justify-between gap-3 flex-wrap"
+                 style={{ background: C.brassSoft }}>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold flex items-center gap-1.5" style={{ color: C.brassText }}>
+                  <Bell size={14} /> {categoriasDesactualizadas.length === 1 ? "Una página impresa quedó" : `${categoriasDesactualizadas.length} páginas impresas quedaron`} desactualizada{categoriasDesactualizadas.length === 1 ? "" : "s"}
+                </div>
+                <p className="text-xs mt-0.5" style={{ color: C.brassText, opacity: 0.85 }}>
+                  Se agregó o se sacó un código interno en: {categoriasDesactualizadas.join(", ")}.
+                </p>
+              </div>
+              <Btn size="sm" icon={Printer} onClick={imprimirCategoriasDesactualizadas}>Reimprimir esas</Btn>
+            </div>
+          )}
         </div>
       )}
 
-      <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-        <div className="divide-y" style={{ borderColor: C.paperLine }}>
-          {productos.slice(0, 200).map(p => {
-            const listo = esCodigoDelAlmacen(p.barcode);
-            return (
+      {porAsignar.length > 0 && (
+        <div className="rounded-xl overflow-hidden mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="px-4 py-2.5 text-xs font-semibold" style={{ color: C.ink, borderBottom: `1px solid ${C.paperLine}` }}>
+            Sin código todavía ({porAsignar.length})
+          </div>
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {porAsignar.map(p => (
               <div key={p.id} className="px-4 py-3 flex items-center gap-3 flex-wrap">
                 <span className="flex-1 min-w-[160px]">
                   <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
-                  <span className="block text-xs font-mono" style={{ color: listo ? C.greenDark : C.gray }}>
-                    {listo ? p.barcode : "sin código todavía"} · stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"}
-                    {" · "}{p.category || "sin sección"}
+                  <span className="block text-xs" style={{ color: C.gray }}>
+                    stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"} · {p.category || "sin sección"}
                   </span>
                 </span>
-                {listo ? (
-                  <label className="flex items-center gap-1.5">
-                    <span className="text-[11px]" style={{ color: C.gray }}>etiquetas</span>
-                    <input type="number" min="0" inputMode="numeric"
-                      value={cuantas[p.id] ?? 1}
-                      onChange={e => fijar(p.id, e.target.value)}
-                      className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
-                  </label>
-                ) : (
-                  <Btn size="sm" variant="ghost" icon={Pencil} onClick={() => onCompletar(p)}>Completar</Btn>
-                )}
+                <Btn size="sm" variant="ghost" icon={Pencil} onClick={() => onCompletar(p)}>Completar</Btn>
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
-        {productos.length > 200 && (
-          <p className="text-xs px-4 py-3" style={{ color: C.gray, borderTop: `1px solid ${C.paperLine}` }}>
-            Se muestran los primeros 200 de {productos.length}.
-          </p>
-        )}
-      </div>
+      )}
+
+      {conCodigo.length > 0 && (
+        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="px-4 py-3 flex items-center gap-2 flex-wrap" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+            <Search size={16} style={{ color: C.gray }} />
+            <input type="text" value={busqueda} onChange={e => setBusqueda(e.target.value)}
+              placeholder="Buscar por nombre o categoría…"
+              className={`${inputCls} text-sm flex-1 min-w-[160px]`} style={inputStyle()} />
+            {busqueda && (
+              <Btn size="sm" variant="ghost" icon={X} onClick={() => setBusqueda("")}>Limpiar</Btn>
+            )}
+            <span className="text-xs" style={{ color: C.gray }}>
+              {conCodigoFiltrado.length} de {conCodigo.length} con código
+            </span>
+          </div>
+
+          {gruposPorCategoria.length === 0 && (
+            <p className="text-sm px-4 py-6 text-center" style={{ color: C.gray }}>
+              Nada calzó con "{busqueda}".
+            </p>
+          )}
+
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {gruposPorCategoria.map(({ categoria, productos: productosCat }) => {
+              const expandida = categoriaExpandida(categoria);
+              return (
+                <div key={categoria}>
+                  <button type="button" onClick={() => alternarCategoria(categoria)}
+                    className="w-full px-4 py-2.5 flex items-center justify-between gap-2 text-left"
+                    style={{ background: C.paperDark }}>
+                    <span className="flex items-center gap-1.5 text-sm font-semibold min-w-0" style={{ color: C.ink }}>
+                      {expandida ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      <span className="truncate">{categoria}</span>
+                      <span className="text-xs font-normal shrink-0" style={{ color: C.gray }}>
+                        ({productosCat.length})
+                      </span>
+                    </span>
+                    <span className="flex gap-1.5 shrink-0" onClick={e => e.stopPropagation()}>
+                      <Btn size="sm" variant="ghost" onClick={() => ponerCategoria(productosCat, 0)}>Ninguna</Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => ponerCategoria(productosCat, 1)}>Una c/u</Btn>
+                    </span>
+                  </button>
+
+                  {expandida && (
+                    <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                      {productosCat.map(p => (
+                        <div key={p.id} className="px-4 py-2.5 pl-9 flex items-center gap-3 flex-wrap">
+                          <span className="flex-1 min-w-[160px]">
+                            <span className="block text-sm" style={{ color: C.ink }}>{p.name}</span>
+                            <span className="block text-xs font-mono" style={{ color: C.greenDark }}>
+                              {p.barcode} · stock {p.stock} · {p.price > 0 ? formatCLP(p.price) : "sin precio"}
+                            </span>
+                          </span>
+                          <label className="flex items-center gap-1.5">
+                            <span className="text-[11px]" style={{ color: C.gray }}>etiquetas</span>
+                            <input type="number" min="0" inputMode="numeric"
+                              value={cuantas[p.id] ?? 1}
+                              onChange={e => fijar(p.id, e.target.value)}
+                              className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -11431,7 +11622,7 @@ function escaparHtml(t) {
    productos con stock pero sin código de barras real, sin precio o sin
    sección. Esta pantalla los junta en un solo lugar, con la acción al lado
    del problema, en vez de hacer buscarlos entre cinco mil. */
-function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, role, session, toast }) {
+function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, setSettings, role, session, toast }) {
   const [seccion, setSeccion] = useState("duplicados");
   const [elegido, setElegido] = useState({});     // clave del grupo → id que se conserva
   const [trabajando, setTrabajando] = useState(null);
@@ -11683,7 +11874,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
       {seccion === "sinCodigo" && (
         <EtiquetasSinCodigo
           productos={sinCodigo} todos={products} setProducts={setProducts}
-          settings={settings} toast={toast} onCompletar={setEditando} />
+          settings={settings} setSettings={setSettings} toast={toast} onCompletar={setEditando} />
       )}
 
       {listaSimple && seccion !== "sinCodigo" && (
@@ -17106,7 +17297,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
