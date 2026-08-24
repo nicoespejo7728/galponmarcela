@@ -34,7 +34,7 @@ import {
   codigosInternosUsados,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
-import { cargarCatalogos } from "@/lib/datos/catalogos";
+import { cargarCatalogos, perfilVaALaCasa } from "@/lib/datos/catalogos";
 import { nuevoId } from "@/lib/datos/traduccion";
 import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
 import {
@@ -42,6 +42,7 @@ import {
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
+import { valorDelConsumo, explicarBase } from "@/lib/consumo";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
   precioSugerido, explicarPrecio, redondearBonito, IVA,
@@ -6678,7 +6679,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       productId: i.productId, name: i.name, barcode: i.barcode,
       qty: i.qty, cost: i.cost, price: i.price, unitType: i.unitType,
     }));
-    const costTotal = items.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
+    /* Lo que se le va a descontar. A un vendedor, el precio de venta: se
+       llevó lo mismo que se habría llevado un cliente. A la casa, el costo.
+       El comprobante muestra esa cifra y no el costo, porque es la que la
+       persona va a ver después en su cuenta — dos números distintos para lo
+       mismo es la forma más rápida de que alguien crea que le cobraron mal. */
+    const valor = valorDelConsumo(items, { esCasa: perfilVaALaCasa(persona.id) });
 
     const registro = await registrarConsumo({ perfilId: persona.id, motivo: reason, items });
 
@@ -6694,7 +6700,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
     setConsumptionTicket({
       id: uid("cons"), date: new Date().toISOString(),
-      responsible: persona.name, reason, items, costTotal,
+      responsible: persona.name, reason, items, ...valor,
     });
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false); setConsumptionOpen(false);
     onCambioEnCola?.();
@@ -7207,11 +7213,20 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
         <div className="text-xs" style={{ color: C.gray }}>Retira: <span style={{ color: C.ink }}>{ticket.responsible}</span>{ticket.reason ? ` · ${ticket.reason}` : ""}</div>
         <div className="pt-2 space-y-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
           {ticket.items.map((i, idx) => (
-            <div key={idx} className="flex justify-between text-xs"><span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span><span style={{ color: C.gray }}>costo {formatCLP(i.cost * i.qty)}</span></div>
+            <div key={idx} className="flex justify-between text-xs">
+              <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
+              <span style={{ color: C.gray }}>{formatCLP((ticket.base === "venta" ? i.price : i.cost) * i.qty)}</span>
+            </div>
           ))}
         </div>
         <div className="flex justify-between text-sm font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
-          <span>Costo total</span><span style={{ color: C.rust }}>{formatCLP(ticket.costTotal)}</span>
+          <span>{ticket.esCasa ? "Total al costo" : "Se le descuenta"}</span>
+          <span style={{ color: C.rust }}>{formatCLP(ticket.cargo)}</span>
+        </div>
+        <div className="text-[11px]" style={{ color: C.gray }}>
+          {ticket.esCasa
+            ? "Va a la cuenta de la casa, valorizado al costo."
+            : `A precio de venta, que es lo que habría pagado un cliente (al negocio le costó ${formatCLP(ticket.aCosto)}).`}
         </div>
       </div>
       <div className="mt-4"><Btn full onClick={onClose}>Cerrar</Btn></div>
@@ -10594,14 +10609,19 @@ function ConsumosView({ toast }) {
     [consumos, periodo, claveActual]
   );
 
-  const totalPeriodo = delPeriodo.reduce((s, c) => s + c.costTotal, 0);
+  /* `cargo` es lo que se le carga a la persona: el precio de venta si es un
+     vendedor, el costo si es de la casa (ver lib/consumo.js). `aCosto` sigue
+     disponible al lado, que es lo que deja ver cuánto margen se va en
+     consumo. */
+  const totalPeriodo = delPeriodo.reduce((s, c) => s + c.cargo, 0);
+  const totalPeriodoCosto = delPeriodo.reduce((s, c) => s + c.aCosto, 0);
 
   const personasDelPeriodo = useMemo(() => {
     const mapa = new Map();
     for (const c of delPeriodo) {
       const k = quienEs(c);
       const g = mapa.get(k) || { id: k, nombre: c.person, total: 0, cuantos: 0 };
-      g.total += c.costTotal;
+      g.total += c.cargo;
       g.cuantos += 1;
       mapa.set(k, g);
     }
@@ -10615,7 +10635,7 @@ function ConsumosView({ toast }) {
     const mapa = new Map();
     for (const c of delPeriodo) {
       const k = dayKey(c.date);
-      mapa.set(k, (mapa.get(k) || 0) + c.costTotal);
+      mapa.set(k, (mapa.get(k) || 0) + c.cargo);
     }
     const filas = Array.from(mapa.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     const techo = Math.max(1, ...filas.map(([, v]) => v));
@@ -10656,7 +10676,7 @@ function ConsumosView({ toast }) {
     return Array.from(mapa.values())
       .map(g => ({
         ...g,
-        pendiente: g.lista.filter(c => !c.settledAt).reduce((s, c) => s + c.costTotal, 0),
+        pendiente: g.lista.filter(c => !c.settledAt).reduce((s, c) => s + c.cargo, 0),
         pendientes: g.lista.filter(c => !c.settledAt).length,
       }))
       .filter(g => verSaldados || g.pendientes > 0)
@@ -10696,7 +10716,9 @@ function ConsumosView({ toast }) {
         <div>
           <h2 className="font-semibold text-lg" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Consumos del equipo</h2>
           <p className="text-xs mt-0.5" style={{ color: C.gray }}>
-            Lo que cada persona se llevó y registró con su PIN en el mesón. Los valores son a costo.
+            Lo que cada persona se llevó y registró con su PIN en el mesón. A los vendedores se les
+            descuenta el precio de venta —se llevaron lo mismo que se habría llevado un cliente—; lo
+            que se lleva la casa va valorizado al costo.
           </p>
         </div>
         <Btn size="sm" variant="ghost" icon={RefreshCw} onClick={releer}>Actualizar</Btn>
@@ -10740,6 +10762,14 @@ function ConsumosView({ toast }) {
               <Cifra etiqueta="Se llevaron" valor={formatCLP(totalPeriodo)} tono={C.rust} />
               <Cifra etiqueta="Veces" valor={delPeriodo.length} />
             </div>
+            {/* La cifra de arriba es lo que se le carga a cada uno: precio de
+                venta a los vendedores, costo a la casa. El costo al lado es lo
+                que la mercadería le salió al negocio — la diferencia es el
+                margen que se fue en consumo, y sin verlo no hay cómo notarlo. */}
+            <p className="text-[11px] -mt-2 mb-3" style={{ color: C.gray }}>
+              A los vendedores se les carga el precio de venta; lo de la casa va al costo.
+              {totalPeriodoCosto > 0 && ` La mercadería le costó al negocio ${formatCLP(totalPeriodoCosto)}.`}
+            </p>
             {personasDelPeriodo.length === 0 ? (
               <p className="text-sm text-center py-3" style={{ color: C.gray }}>Nadie se llevó nada en este período.</p>
             ) : (
@@ -10791,7 +10821,10 @@ function ConsumosView({ toast }) {
                           : c.settledAt
                             ? <Badge tone="gray">Ya se le descontó</Badge>
                             : <Badge tone="brass">Por descontar</Badge>}
-                        <span className="font-mono text-sm font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
+                        <span className="text-right">
+                          <span className="block font-mono text-sm font-semibold" style={{ color: C.ink }}>{formatCLP(c.cargo)}</span>
+                          <span className="block text-[10px]" style={{ color: C.gray }}>{explicarBase(c.base, c.esCasa)}</span>
+                        </span>
                       </div>
                     </div>
                     <div className="text-xs" style={{ color: C.gray }}>
@@ -10801,7 +10834,11 @@ function ConsumosView({ toast }) {
                       {c.items.map((i, idx) => (
                         <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
                           <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
-                          <span>{formatCLP(i.cost * i.qty)}</span>
+                          {/* Cada línea en la misma moneda que el total de
+                              arriba: mezclar el costo de un producto con un
+                              total a precio de venta no cuadra y hace dudar
+                              del número entero. */}
+                          <span>{formatCLP((c.base === "venta" ? i.price : i.cost) * i.qty)}</span>
                         </li>
                       ))}
                     </ul>
@@ -10888,14 +10925,21 @@ function ConsumosView({ toast }) {
                           {c.settledAt
                             ? <Badge tone="gray">Ya se le descontó {c.settledBy ? `· ${c.settledBy}` : ""}</Badge>
                             : <Badge tone="brass">Por descontar</Badge>}
-                          <span className="font-mono text-xs font-semibold" style={{ color: C.ink }}>{formatCLP(c.costTotal)}</span>
+                          <span className="text-right">
+                            <span className="block font-mono text-xs font-semibold" style={{ color: C.ink }}>{formatCLP(c.cargo)}</span>
+                            <span className="block text-[10px]" style={{ color: C.gray }}>{explicarBase(c.base, c.esCasa)}</span>
+                          </span>
                         </div>
                       </div>
                       <ul className="mt-1 text-xs space-y-0.5">
                         {c.items.map((i, idx) => (
                           <li key={idx} className="flex justify-between" style={{ color: C.gray }}>
                             <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
-                            <span>{formatCLP(i.cost * i.qty)}</span>
+                            {/* Cada línea en la misma moneda que el total de
+                              arriba: mezclar el costo de un producto con un
+                              total a precio de venta no cuadra y hace dudar
+                              del número entero. */}
+                          <span>{formatCLP((c.base === "venta" ? i.price : i.cost) * i.qty)}</span>
                           </li>
                         ))}
                       </ul>
