@@ -43,7 +43,10 @@ import {
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
 import { valorDelConsumo, explicarBase } from "@/lib/consumo";
-import { boletaParaImprimir, ANCHO_PAPEL_MM, ANCHO_UTIL_MM } from "@/lib/boleta";
+import {
+  boletaParaImprimir, leerAjustesBoleta, guardarAjustesBoleta,
+  AJUSTES_POR_OMISION, ventaDePrueba,
+} from "@/lib/boleta";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
   precioSugerido, explicarPrecio, redondearBonito, IVA,
@@ -7235,22 +7238,41 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
   );
 }
 
+/* Mandar la boleta a la impresora.
+
+   Va en un marco escondido dentro de la misma página y no en una ventana
+   aparte. La ventana aparte traía dos problemas de los que hay que enterarse
+   en el mesón, no acá: los bloqueadores de ventanas emergentes la tapan, y
+   como se llena con document.write() el momento en que está lista es difícil
+   de saber. El marco escondido no tiene ninguno de los dos.
+
+   El documento que va adentro tiene el ancho del rollo y nada más — ver
+   lib/boleta.js. */
+function imprimirBoleta(sale, settings, ajustes) {
+  const config = ajustes || leerAjustesBoleta();
+  const marco = document.createElement("iframe");
+  marco.setAttribute("aria-hidden", "true");
+  /* Escondido, pero NO con display:none: un marco sin caja no maqueta nada
+     adentro, y entonces la boleta no se puede medir. Se saca de la pantalla. */
+  marco.style.cssText = "position:fixed;right:0;bottom:0;width:80mm;height:200mm;opacity:0;border:0;pointer-events:none;";
+  document.body.appendChild(marco);
+
+  const doc = marco.contentWindow.document;
+  doc.open();
+  doc.write(boletaParaImprimir(sale, settings, config));
+  doc.close();
+
+  /* El marco se saca después de imprimir. Se espera bastante porque el
+     diálogo de impresión bloquea el hilo y quitarlo antes cancela el trabajo. */
+  setTimeout(() => { try { marco.remove(); } catch {} }, 20000);
+}
+
 function ReceiptModal({ sale, settings, onClose }) {
   const iva = settings.ivaIncluded ? sale.total - sale.total / 1.19 : 0;
   const neto = sale.total - iva;
 
-  /* Se imprime en su propia ventana y no escondiendo la pantalla con CSS.
-
-     Antes se hacía con `visibility: hidden` sobre todo lo demás, y esconder no
-     es lo mismo que no ocupar lugar: el menú, el carro y la pantalla entera
-     seguían ocupando su espacio y salían como metros de papel en blanco. Ahora
-     el documento que se manda a la impresora tiene el ancho del rollo y nada
-     más adentro. Ver lib/boleta.js. */
   function imprimir() {
-    const ventana = window.open("", "_blank", "width=420,height=640");
-    if (!ventana) return window.print();   // si bloquearon la ventana, al menos algo sale
-    ventana.document.write(boletaParaImprimir(sale, settings));
-    ventana.document.close();
+    imprimirBoleta(sale, settings);
   }
 
   return (
@@ -14943,6 +14965,83 @@ function MyAccountModal({ session, users, setUsers, onClose, toast }) {
 /* ---------------------------------------------------------
    AJUSTES (solo admin)
 --------------------------------------------------------- */
+/* La boleta: calibrar el papel.
+
+   Acá no hay nada que adivinar desde afuera. El controlador de la impresora
+   decide qué tamaños de página acepta, y esa lista cambia de una máquina a
+   otra: hay térmicas de 58 mm que aceptan una página a medida —y entonces la
+   boleta se mide sola y el papel corta justo después del total— y otras que
+   solo aceptan largos de una lista cerrada, y a las que una página a medida
+   les hace contestar "no se puede imprimir".
+
+   Por eso esto es un ajuste y no un número escondido en el código: se aprieta
+   "Imprimir una de prueba", se mira el papel, se corrige, y queda. Los ajustes
+   quedan guardados en ESTE computador, porque la impresora está enchufada acá. */
+function BoletaAjustes({ settings, toast }) {
+  const [a, setA] = useState(AJUSTES_POR_OMISION);
+  useEffect(() => { setA(leerAjustesBoleta()); }, []);
+
+  function fijar(campo, valor) {
+    const nuevo = { ...a, [campo]: Math.max(0, Number(valor) || 0) };
+    setA(nuevo); guardarAjustesBoleta(nuevo);
+  }
+
+  const Numero = ({ campo, etiqueta, ayuda, min = 0 }) => (
+    <label className="flex items-center justify-between gap-3 py-1.5">
+      <span className="min-w-0">
+        <span className="block text-sm" style={{ color: C.ink }}>{etiqueta}</span>
+        <span className="block text-[11px]" style={{ color: C.gray }}>{ayuda}</span>
+      </span>
+      <span className="flex items-center gap-1 flex-shrink-0">
+        <input type="number" min={min} step="1" value={a[campo]}
+          onChange={e => fijar(campo, e.target.value)}
+          className={`${inputCls} font-mono w-20 text-center`} style={inputStyle()} />
+        <span className="text-xs" style={{ color: C.gray }}>mm</span>
+      </span>
+    </label>
+  );
+
+  return (
+    <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <h3 className="text-base font-semibold mb-1 flex items-center gap-2"
+          style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+        <Receipt size={17} /> Boleta impresa
+      </h3>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Imprime una de prueba, mira cómo sale el papel y corrige acá. Queda guardado en este computador.
+      </p>
+
+      <div className="divide-y" style={{ borderColor: C.paperLine }}>
+        <Numero campo="anchoMm" etiqueta="Ancho del rollo" ayuda="El papel completo. La POS-5890F usa 58." />
+        <Numero campo="anchoUtilMm" etiqueta="Ancho que imprime" ayuda="Menos que el rollo: los costados no imprimen. En la POS-5890F son 48." />
+        <Numero campo="arribaMm" etiqueta="Espacio antes del logo" ayuda="Lo que avanza el papel antes de la primera línea." />
+        <Numero campo="avanceMm" etiqueta="Espacio después del total" ayuda="Para poder cortar sin partir el total por la mitad." />
+        <Numero campo="altoMm" etiqueta="Largo de la boleta"
+          ayuda={a.altoMm === 0
+            ? "En 0 la boleta se mide sola y el papel corta justo después del total. Es lo mejor cuando la impresora lo acepta."
+            : `Fijo en ${a.altoMm} mm. Úsalo si con 0 la impresora dice "no se puede imprimir": su controlador no acepta una página a medida.`} />
+      </div>
+
+      <div className="flex flex-wrap gap-2 mt-3">
+        <Btn size="sm" icon={Printer}
+          onClick={() => { imprimirBoleta(ventaDePrueba(), settings, a); toast("Mandada a imprimir", "success"); }}>
+          Imprimir una de prueba
+        </Btn>
+        <Btn size="sm" variant="ghost"
+          onClick={() => { setA(AJUSTES_POR_OMISION); guardarAjustesBoleta(AJUSTES_POR_OMISION); toast("Vuelto a los valores de fábrica", "success"); }}>
+          Volver a lo de fábrica
+        </Btn>
+      </div>
+
+      <p className="text-xs mt-3 pt-3" style={{ color: C.gray, borderTop: `1px dashed ${C.paperLine}` }}>
+        Si sale con la fecha arriba y una dirección web abajo, eso lo dibuja el navegador: en el cuadro de
+        impresión desmarca "Encabezados y pies de página" y pon los márgenes en "Ninguno". Y la escala
+        siempre en 100%, nunca "ajustar a la página" — si se achica, se achica todo.
+      </p>
+    </div>
+  );
+}
+
 /* La balanza del mesón.
 
    Todo lo que hay que hacer una vez está acá: autorizar el puerto, encontrar
@@ -15428,6 +15527,8 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio("")}>Volver a aplicarla</Btn>
         </div>
       </div>
+
+      <BoletaAjustes settings={settings} toast={toast} />
 
       <BalanzaAjustes toast={toast} />
 
