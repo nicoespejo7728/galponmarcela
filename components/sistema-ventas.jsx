@@ -5591,6 +5591,16 @@ function Btn({ children, onClick, variant = "primary", full, disabled, type = "b
   );
 }
 
+/* Una pestaña del menú principal, una vez abierta, se deja montada (solo
+   oculta con display:none) al cambiar a otra — así un formulario a medio
+   llenar en Recepción, Egresos, o cualquier otra sección no se borra por
+   cambiar de pestaña sin haber guardado. `visited` decide si se monta o no:
+   las pestañas que nunca se abrieron en esta sesión no cargan nada de más. */
+function TabPane({ active, visited, children }) {
+  if (!visited) return null;
+  return <div style={{ display: active ? "block" : "none" }}>{children}</div>;
+}
+
 function Badge({ children, tone = "green" }) {
   const map = {
     green: { background: C.greenSoft, color: C.greenDark },
@@ -16569,6 +16579,15 @@ export default function SistemaVentas() {
   // qué mostrar: sin esto, quien recarga la página ve parpadear el ingreso.
   const [sesionRevisada, setSesionRevisada] = useState(false);
   const [tab, setTab] = useState("pos");
+  // Qué pestañas se han abierto en esta sesión: una vez abierta, se deja
+  // montada (solo oculta) al cambiar a otra, para que un formulario a medio
+  // llenar no se borre por cambiar de pestaña sin guardar — el problema no
+  // era de ningún formulario en particular, era que cambiar de pestaña
+  // desmontaba la pantalla entera y con ella cualquier estado sin guardar.
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(["pos"]));
+  useEffect(() => {
+    setVisitedTabs(prev => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+  }, [tab]);
   const [toastData, setToastState] = useState(null);
 
   const toast = useCallback((msg, type = "success") => {
@@ -16590,6 +16609,11 @@ export default function SistemaVentas() {
     // vender" puesta — ve el panel completo o no, según su propio rol real.
     setModoVenta(false);
     setSaltarInventarioGeneral(false);
+    // Y sin ningún formulario a medio llenar de quien acaba de salir — las
+    // pestañas que se dejaron montadas por lo de arriba no deben sobrevivir
+    // al cambio de persona.
+    setTab("pos");
+    setVisitedTabs(new Set(["pos"]));
   }, []);
 
   // Si ya había una sesión abierta (por ejemplo, al recargar la página), se
@@ -16828,7 +16852,7 @@ export default function SistemaVentas() {
     return (
       <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <style>{FONTS}</style>
-        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSaltarInventarioGeneral(false); setSession(s); }} toast={toast} />
+        <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSaltarInventarioGeneral(false); setTab("pos"); setVisitedTabs(new Set(["pos"])); setSession(s); }} toast={toast} />
         <Toast toast={toastData} />
       </div>
     );
@@ -17074,26 +17098,26 @@ export default function SistemaVentas() {
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
 
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        {tab === "pos" && <POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} />}
-        {tab === "actividades" && <ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} />}
-        {tab === "inventario-general" && <GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} />}
-        {tab === "caja" && <CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} />}
-        {tab === "facturas" && <InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} />}
-        {tab === "inventario" && <InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
-        {tab === "recepcion" && <ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} />}
-        {tab === "consumos" && rolEfectivo === "admin" && <ConsumosView toast={toast} />}
-        {tab === "revisar" && rolEfectivo === "admin" && <ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} role={rolEfectivo} session={session} toast={toast} />}
-        {tab === "categorias" && rolEfectivo === "admin" && <CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} />}
-        {tab === "proveedores" && rolEfectivo === "admin" && <SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} />}
-        {tab === "clientes" && rolEfectivo === "admin" && <ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} />}
-        {tab === "egresos" && rolEfectivo === "admin" && <ExpensesView movements={movements} setMovements={setMovements} toast={toast} />}
-        {tab === "sueldos" && rolEfectivo === "admin" && <PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} />}
-        {tab === "finanzas" && rolEfectivo === "admin" && <FinanceView sales={sales} movements={movements} products={products} />}
-        {tab === "analisis" && rolEfectivo === "admin" && <AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} />}
-        {tab === "ajustes" && rolEfectivo === "admin" && <SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} />}
-        {tab === "usuarios" && rolEfectivo === "admin" && <UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} />}
-        {tab === "transformar" && <TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={rolEfectivo} toast={toast} />}
-        {tab === "conteos" && <InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={rolEfectivo} toast={toast} />}
+        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
+        <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
+        <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
+        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
+        <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
+        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} /></TabPane>
+        {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "sueldos"} visited={visitedTabs.has("sueldos")}><PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "finanzas"} visited={visitedTabs.has("finanzas")}><FinanceView sales={sales} movements={movements} products={products} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "analisis"} visited={visitedTabs.has("analisis")}><AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "ajustes"} visited={visitedTabs.has("ajustes")}><SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "usuarios"} visited={visitedTabs.has("usuarios")}><UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} /></TabPane>}
+        <TabPane active={tab === "transformar"} visited={visitedTabs.has("transformar")}><TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "conteos"} visited={visitedTabs.has("conteos")}><InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         </main>
       </div>
 
