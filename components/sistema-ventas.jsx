@@ -43,6 +43,7 @@ import {
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, hojasQueSalen, CARTA_POR_HOJA } from "@/lib/hoja-carta";
 import { valorDelConsumo, explicarBase } from "@/lib/consumo";
+import { boletaParaImprimir, ANCHO_PAPEL_MM, ANCHO_UTIL_MM } from "@/lib/boleta";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
   precioSugerido, explicarPrecio, redondearBonito, IVA,
@@ -7237,6 +7238,21 @@ function ConsumptionTicketModal({ ticket, settings, onClose }) {
 function ReceiptModal({ sale, settings, onClose }) {
   const iva = settings.ivaIncluded ? sale.total - sale.total / 1.19 : 0;
   const neto = sale.total - iva;
+
+  /* Se imprime en su propia ventana y no escondiendo la pantalla con CSS.
+
+     Antes se hacía con `visibility: hidden` sobre todo lo demás, y esconder no
+     es lo mismo que no ocupar lugar: el menú, el carro y la pantalla entera
+     seguían ocupando su espacio y salían como metros de papel en blanco. Ahora
+     el documento que se manda a la impresora tiene el ancho del rollo y nada
+     más adentro. Ver lib/boleta.js. */
+  function imprimir() {
+    const ventana = window.open("", "_blank", "width=420,height=640");
+    if (!ventana) return window.print();   // si bloquearon la ventana, al menos algo sale
+    ventana.document.write(boletaParaImprimir(sale, settings));
+    ventana.document.close();
+  }
+
   return (
     <Modal title={`Boleta #${sale.invoiceNumber}`} onClose={onClose}>
       <div id="receipt-print" className="font-mono text-sm space-y-3">
@@ -7276,9 +7292,8 @@ function ReceiptModal({ sale, settings, onClose }) {
       </div>
       <div className="flex gap-2 mt-4">
         <Btn variant="ghost" full onClick={onClose}>Cerrar</Btn>
-        <Btn full icon={Printer} onClick={() => window.print()}>Imprimir</Btn>
+        <Btn full icon={Printer} onClick={imprimir}>Imprimir</Btn>
       </div>
-      <style>{`@media print { body * { visibility: hidden; } #receipt-print, #receipt-print * { visibility: visible; } #receipt-print { position: fixed; top: 0; left: 0; width: 100%; } }`}</style>
     </Modal>
   );
 }
