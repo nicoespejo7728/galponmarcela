@@ -8035,7 +8035,6 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
 const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Crédito con el proveedor"];
 
 function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast }) {
-  const [subTab, setSubTab] = useState("manual");
   const [draftItems, setDraftItems] = useState([]);
   /* Cómo vienen los precios en ESTA factura. Casi siempre un proveedor es
      todo de una forma, así que se pone una vez arriba y baja a todas las
@@ -8045,24 +8044,22 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   const [supplierId, setSupplierId] = useState(null);
   const [supplierQuery, setSupplierQuery] = useState("");
   const [quickAddSupplier, setQuickAddSupplier] = useState(false);
+  // Fecha de la recepción: por omisión hoy, pero editable — a veces se
+  // registra un día después de haber recibido la mercadería físicamente.
+  const [receptionDate, setReceptionDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [documentType, setDocumentType] = useState(""); // "factura" | "boleta"
+  const [statedTotal, setStatedTotal] = useState(""); // lo que dice la factura, solo referencia
   const [paymentMethod, setPaymentMethod] = useState("Efectivo");
+  const [duePaymentDate, setDuePaymentDate] = useState("");
   const [refNumber, setRefNumber] = useState("");
   const [nameQuery, setNameQuery] = useState("");
-  const [scanning, setScanning] = useState(false);
+  const [showManualSearch, setShowManualSearch] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [invoiceFiles, setInvoiceFiles] = useState([]);
-  const [freeEntry, setFreeEntry] = useState(false);
-  const [freeEntryReason, setFreeEntryReason] = useState("");
   const [pistolaBarcode, setPistolaBarcode] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
   const fileInputRef = useRef(null);
   const pistolaInputRef = useRef(null);
-
-  function toggleFreeEntry(v) {
-    setFreeEntry(v);
-    if (v) { setSubTab("manual"); setInvoiceFiles([]); }
-    else { setFreeEntryReason(""); }
-  }
 
   const supplierMatches = useMemo(() => {
     if (supplierQuery.trim().length < 1) return [];
@@ -8167,35 +8164,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     setInvoiceFiles(prev => prev.filter((_, i) => i !== idx));
   }
 
-  async function analyzeAttached() {
-    if (invoiceFiles.length === 0 || scanning) return;
-    setScanning(true);
-    try {
-      const items = await analyzeInvoiceImage(invoiceFiles.map(f => ({ mediaType: f.mediaType, data: f.data })));
-      if (items.length === 0) { toast("No se detectaron productos en el documento", "error"); return; }
-      const mapped = items.map(it => {
-        const match = findProductMatch(products, it.name, it.code);
-        const detectedUnitType = it.unitType === "peso" ? "peso" : "unidad";
-        return match
-          /* La lectura del documento ya devuelve el precio NETO —se lo pide
-             explícitamente el instructivo, y si la factura venía con IVA lo
-             descuenta él—. Así que estas líneas nacen en "neto" y marcadas
-             como resueltas: aplicarles otra vez el selector de arriba sería
-             descontar el IVA dos veces. Si la lectura se equivocó, se corrige
-             en la línea. */
-          ? { tempId: uid("draft"), isNew: false, productId: match.id, barcode: match.barcode, name: match.name, category: match.category, qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, formaCosto: "neto", formaTocada: true, unitType: match.unitType === "peso" ? "peso" : "unidad" }
-          : { tempId: uid("draft"), isNew: true, productId: null, barcode: it.code || "", name: it.name || "", category: "", qty: Number(it.quantity) || 1, netCost: Number(it.netUnitPrice) || 0, formaCosto: "neto", formaTocada: true, unitType: detectedUnitType };
-      });
-      setDraftItems(prev => [...prev, ...mapped]);
-      const matchedCount = mapped.filter(m => !m.isNew).length;
-      toast(`${mapped.length} producto(s) detectados${matchedCount > 0 ? ` (${matchedCount} ya en tu inventario, cantidad sumada)` : ""} — revísalos antes de confirmar`, "success");
-    } catch (err) {
-      toast(friendlyError(err, "No se pudo analizar el documento"), "error");
-    } finally {
-      setScanning(false);
-    }
-  }
-
   const totals = draftItems.reduce((acc, i) => {
     const qty = Number(i.qty) || 0, cost = Number(i.netCost) || 0;
     return { qty: acc.qty + qty, net: acc.net + qty * cost };
@@ -8203,11 +8171,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
   async function confirmReception() {
     if (draftItems.length === 0) return;
-    if (freeEntry) {
-      if (!freeEntryReason.trim()) return toast("Indica el motivo de la entrada libre", "error");
-    } else if (invoiceFiles.length === 0) {
-      return toast("Adjunta al menos una foto o PDF de la boleta/factura antes de confirmar", "error");
-    }
+    if (!documentType) return toast("Indica si es factura o boleta", "error");
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
@@ -8218,6 +8182,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     if (isCredito && !supplierId) {
       return toast("Para recibir a crédito, el proveedor debe estar registrado — elígelo de la lista o regístralo primero", "error");
     }
+    if (isCredito && !duePaymentDate) {
+      return toast("Indica para cuándo queda la fecha de pago de este crédito", "error");
+    }
     // Se relee lo más reciente del almacenamiento justo antes de guardar, para
     // no partir de una copia local que otro dispositivo ya haya dejado atrás.
     const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems, latestSupplierLedger] = await Promise.all([
@@ -8227,7 +8194,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       loadJSON("purchase-items-log", purchaseItems),
       loadJSON("supplier-ledger", supplierLedger),
     ]);
-    const date = new Date().toISOString();
+    // La fecha la elige quien recibe (a veces se registra un día después),
+    // pero la hora se deja la de ahora — así dos recepciones del mismo día
+    // no quedan con el mismo instante exacto y el orden entre ellas sigue
+    // teniendo sentido.
+    const chosenDate = new Date(`${receptionDate}T00:00:00`);
+    const now = new Date();
+    chosenDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    const date = chosenDate.toISOString();
     let newProducts = [...latestProducts];
 
     draftItems.forEach(item => {
@@ -8283,23 +8257,24 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     // criterio que una venta fiada no genera un ingreso hasta que se abona.
     const newMovements = isCredito ? latestMovements : [{
       id: uid("mov"), date, type: "egreso",
-      concept: freeEntry
-        ? `Entrada libre (sin boleta/factura): ${freeEntryReason.trim()}${supplier.trim() ? ` — ${supplierName}` : ""}`
-        : `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
+      concept: `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
       amount: totalGross,
-      category: freeEntry ? "Entrada libre" : "Compra de mercadería",
+      category: "Compra de mercadería",
       auto: true,
       supplierId: supplierId || null, invoiceId,
     }, ...latestMovements];
 
     const invoiceRecord = {
       id: invoiceId, date, supplierId: supplierId || null, supplierName,
-      refNumber: freeEntry ? null : (refNumber.trim() || null),
+      refNumber: refNumber.trim() || null,
       itemCount: draftItems.length, totalNet: totals.net, totalGross,
       registeredBy: session.name,
-      noDocument: freeEntry,
-      reason: freeEntry ? freeEntryReason.trim() : null,
+      noDocument: false,
+      reason: null,
       paymentMethod,
+      documentType,
+      statedTotal: statedTotal !== "" ? Number(statedTotal) : null,
+      duePaymentDate: isCredito ? duePaymentDate : null,
     };
     const newInvoicesIndex = [invoiceRecord, ...latestInvoicesIndex];
 
@@ -8336,19 +8311,24 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     // lugar. Al contado/transferencia es al revés — no hay ledger que tocar.
     if (isCredito) await saveJSON("supplier-ledger", newSupplierLedger);
     else await saveJSON("movements-log", newMovements);
-    if (!freeEntry) {
+    // La foto ya no es obligatoria para confirmar: se puede agregar acá si
+    // ya se tiene a mano, o después desde el historial de recepciones.
+    if (invoiceFiles.length > 0) {
       await saveJSON(`invoice-image:${invoiceId}`, { pages: invoiceFiles.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })) });
     }
 
     toast(
-      freeEntry
-        ? "Entrada libre registrada — queda marcada como excepción sin documento"
-        : `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}`,
+      `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}${invoiceFiles.length === 0 ? " · falta la foto de la factura (se puede agregar después)" : ""}`,
       "success"
     );
-    setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber(""); setInvoiceFiles([]); setFreeEntry(false); setFreeEntryReason(""); setPaymentMethod("Efectivo");
+    setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber("");
+    setInvoiceFiles([]); setPaymentMethod("Efectivo"); setDocumentType("");
+    setStatedTotal(""); setDuePaymentDate(""); setReceptionDate(new Date().toISOString().slice(0, 10));
   }
 
+
+  const [viewingInvoice, setViewingInvoice] = useState(null);
+  const recentInvoices = useMemo(() => invoicesIndex.slice(0, 15), [invoicesIndex]);
 
   return (
     <div>
@@ -8375,86 +8355,87 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
               </div>
             )}
           </div>
-          <Field label="N° de factura o boleta (opcional)"><input value={refNumber} onChange={e => setRefNumber(e.target.value)} disabled={freeEntry} className={`${inputCls} font-mono`} style={{ ...inputStyle(), opacity: freeEntry ? 0.5 : 1 }} placeholder="Ej. 001234" /></Field>
+          <Field label="Monto total de la factura (referencia)"><input type="number" inputMode="decimal" value={statedTotal} onChange={e => setStatedTotal(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. 45000" /></Field>
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Fecha de recepción"><input type="date" value={receptionDate} onChange={e => setReceptionDate(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+          <Field label="N° de factura o boleta (opcional)"><input value={refNumber} onChange={e => setRefNumber(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. 001234" /></Field>
         </div>
 
         <div className="mb-3">
-          <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Cómo se pagó esta recepción?</div>
+          <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Es factura o boleta?</div>
           <div className="flex gap-1.5">
-            {SUPPLIER_PAYMENT_METHODS.map(m => (
-              <button
-                key={m}
-                onClick={() => setPaymentMethod(m)}
-                className="flex-1 py-2 rounded-lg text-xs font-medium"
-                style={paymentMethod === m
-                  ? { background: m === "Crédito con el proveedor" ? C.brass : C.ink, color: m === "Crédito con el proveedor" ? C.brassText : C.paper }
-                  : { background: C.paperDark, color: C.gray }}
-              >
-                {m === "Crédito con el proveedor" ? "Crédito con proveedor" : m}
-              </button>
+            {[["factura", "Factura"], ["boleta", "Boleta"]].map(([v, l]) => (
+              <button key={v} onClick={() => setDocumentType(v)} className="flex-1 py-2 rounded-lg text-xs font-medium" style={documentType === v ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}>{l}</button>
             ))}
           </div>
-          {paymentMethod === "Crédito con el proveedor" && (
-            <p className="text-[11px] mt-1.5" style={{ color: C.brassText }}>
-              La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"} hasta que se le pague — ver Proveedores.
-            </p>
-          )}
         </div>
 
-        <label className="flex items-start gap-2.5 rounded-lg px-3 py-2.5 mb-3 cursor-pointer" style={{ background: freeEntry ? C.rustSoft : C.paperDark, border: `1.5px solid ${freeEntry ? C.rust : C.paperLine}` }}>
-          <input type="checkbox" checked={freeEntry} onChange={e => toggleFreeEntry(e.target.checked)} className="mt-0.5" />
-          <div>
-            <span className="text-xs font-semibold flex items-center gap-1.5" style={{ color: freeEntry ? C.rust : C.ink }}><AlertTriangle size={13} />Entrada libre — recibir sin boleta ni factura</span>
-            <p className="text-[11px] mt-0.5" style={{ color: freeEntry ? C.rust : C.gray }}>Excepción solo para casos aislados donde de verdad no fue posible obtener el documento. Queda registrada igual, marcada como "sin documento".</p>
-          </div>
-        </label>
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Forma de pago">
+            <select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className={inputCls} style={inputStyle()}>
+              {SUPPLIER_PAYMENT_METHODS.map(m => <option key={m} value={m}>{m === "Crédito con el proveedor" ? "Crédito" : m}</option>)}
+            </select>
+          </Field>
+          {paymentMethod === "Crédito con el proveedor" && (
+            <Field label="Fecha de pago"><input type="date" value={duePaymentDate} onChange={e => setDuePaymentDate(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+          )}
+        </div>
+        {paymentMethod === "Crédito con el proveedor" && (
+          <p className="text-[11px] -mt-2 mb-3" style={{ color: C.brassText }}>
+            La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"} hasta esa fecha — ver Proveedores.
+          </p>
+        )}
 
-        {freeEntry ? (
-          <div className="rounded-lg p-3 mb-3" style={{ background: C.rustSoft, border: `1.5px solid ${C.rust}` }}>
-            <Field label="Motivo de la entrada libre (obligatorio)"><input autoFocus value={freeEntryReason} onChange={e => setFreeEntryReason(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Proveedor informal, compra urgente sin boleta…" /></Field>
+        <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold flex items-center gap-1.5" style={{ color: C.ink }}><Receipt size={13} />Foto de la boleta/factura (opcional)</span>
+            {invoiceFiles.length > 0 && <Badge tone="green">{invoiceFiles.length} página{invoiceFiles.length > 1 ? "s" : ""}</Badge>}
           </div>
-        ) : (
-          <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold flex items-center gap-1.5" style={{ color: C.ink }}><Receipt size={13} />Foto(s) de la boleta/factura <span style={{ color: C.rust }}>*obligatoria</span></span>
-              {invoiceFiles.length > 0 && <Badge tone="green">{invoiceFiles.length} página{invoiceFiles.length > 1 ? "s" : ""}</Badge>}
+          <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple onChange={handleAttach} className="hidden" />
+          {invoiceFiles.length > 0 && (
+            <div className="flex gap-2 overflow-x-auto mb-2 pb-1">
+              {invoiceFiles.map((f, idx) => (
+                <div key={idx} className="relative flex-shrink-0" style={{ width: 90 }}>
+                  {f.mediaType === "application/pdf" ? (
+                    <div className="rounded-lg flex flex-col items-center justify-center gap-1 p-2" style={{ width: 90, height: 90, background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                      <Receipt size={18} style={{ color: C.gray }} />
+                      <span className="text-[9px] text-center truncate w-full" style={{ color: C.gray }}>{f.name}</span>
+                    </div>
+                  ) : (
+                    <img src={f.dataUrl} alt={`Página ${idx + 1}`} className="rounded-lg object-cover" style={{ width: 90, height: 90, border: `1.5px solid ${C.paperLine}` }} />
+                  )}
+                  <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style={{ background: C.ink, color: C.paper }}>{idx + 1}</span>
+                  <button onClick={() => removeInvoicePage(idx)} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: C.rust, color: "#fff" }}><X size={12} /></button>
+                </div>
+              ))}
             </div>
-            <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple onChange={handleAttach} className="hidden" />
-            {invoiceFiles.length > 0 && (
-              <div className="flex gap-2 overflow-x-auto mb-2 pb-1">
-                {invoiceFiles.map((f, idx) => (
-                  <div key={idx} className="relative flex-shrink-0" style={{ width: 90 }}>
-                    {f.mediaType === "application/pdf" ? (
-                      <div className="rounded-lg flex flex-col items-center justify-center gap-1 p-2" style={{ width: 90, height: 90, background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-                        <Receipt size={18} style={{ color: C.gray }} />
-                        <span className="text-[9px] text-center truncate w-full" style={{ color: C.gray }}>{f.name}</span>
-                      </div>
-                    ) : (
-                      <img src={f.dataUrl} alt={`Página ${idx + 1}`} className="rounded-lg object-cover" style={{ width: 90, height: 90, border: `1.5px solid ${C.paperLine}` }} />
-                    )}
-                    <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style={{ background: C.ink, color: C.paper }}>{idx + 1}</span>
-                    <button onClick={() => removeInvoicePage(idx)} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: C.rust, color: "#fff" }}><X size={12} /></button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <Btn variant="dark" size="sm" icon={attaching ? Loader2 : ImagePlus} disabled={attaching} onClick={() => fileInputRef.current?.click()} full>
-              {attaching ? "Procesando…" : invoiceFiles.length > 0 ? "Agregar otra página" : "Tomar foto o subir la boleta/factura"}
-            </Btn>
-            <p className="text-[11px] mt-1.5" style={{ color: C.gray }}>Si la factura tiene más de una página, agrega cada una como una página aparte — se leen y catalogan juntas como un solo documento.</p>
-          </div>
-        )}
+          )}
+          <Btn variant="dark" size="sm" icon={attaching ? Loader2 : ImagePlus} disabled={attaching} onClick={() => fileInputRef.current?.click()} full>
+            {attaching ? "Procesando…" : invoiceFiles.length > 0 ? "Agregar otra página" : "Tomar foto o subir la boleta/factura"}
+          </Btn>
+          <p className="text-[11px] mt-1.5" style={{ color: C.gray }}>Si no la tienes a mano ahora, no importa — se puede agregar después desde el historial de recepciones, más abajo.</p>
+        </div>
 
-        {!freeEntry && (
-          <div className="flex gap-1.5 mb-3">
-            <button onClick={() => setSubTab("manual")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "manual" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><Package size={15} />Ingreso manual</button>
-            <button onClick={() => setSubTab("pistola")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "pistola" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><ScanLine size={15} />Pistola</button>
-            <button onClick={() => setSubTab("scan")} className="flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={subTab === "scan" ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}><Sparkles size={15} />Leer con IA</button>
-          </div>
-        )}
+        <div className="relative mb-2">
+          <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
+          <input
+            ref={pistolaInputRef} autoFocus value={pistolaBarcode} onChange={e => setPistolaBarcode(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handlePistolaScan(pistolaBarcode); }}
+            placeholder="Pistolea cada producto, o escribe el código y presiona Enter…"
+            aria-label="Código de barras"
+            className={`${inputCls} pl-9`} style={inputStyle()}
+          />
+        </div>
+        <Btn variant="dark" size="sm" icon={Camera} onClick={() => setScannerOpen(true)} full>Escanear con la cámara del dispositivo</Btn>
+        <p className="text-xs mt-2" style={{ color: C.gray }}>Cada código pistoleado agrega una fila abajo: si el producto ya existe, trae su nombre, su último costo y su formato (kg/gramos/unidad); si no existe, queda como producto nuevo con el código ya cargado.</p>
 
-        {subTab === "manual" || freeEntry ? (
-          <div>
+        <button type="button" onClick={() => setShowManualSearch(v => !v)} className="text-xs underline mt-2" style={{ color: C.gray }}>
+          {showManualSearch ? "Ocultar búsqueda manual" : "¿No tienes el código a mano? Busca el producto por nombre"}
+        </button>
+        {showManualSearch && (
+          <div className="mt-2">
             <div className="relative mb-2">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
               <input value={nameQuery} onChange={e => setNameQuery(e.target.value)} placeholder="Busca un producto existente por nombre o código…" className={`${inputCls} pl-9`} style={inputStyle()} />
@@ -8472,29 +8453,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             </div>
             <Btn variant="ghost" size="sm" icon={Plus} onClick={addNewDraft}>Producto nuevo (no está en el catálogo)</Btn>
           </div>
-        ) : subTab === "pistola" ? (
-          <div>
-            <div className="relative mb-2">
-              <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
-              <input
-                ref={pistolaInputRef} autoFocus value={pistolaBarcode} onChange={e => setPistolaBarcode(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") handlePistolaScan(pistolaBarcode); }}
-                placeholder="Escanea con la pistola, o escribe el código y presiona Enter…"
-                aria-label="Código de barras"
-                className={`${inputCls} pl-9`} style={inputStyle()}
-              />
-            </div>
-            <Btn variant="dark" size="sm" icon={Camera} onClick={() => setScannerOpen(true)} full>Escanear con la cámara del dispositivo</Btn>
-            <p className="text-xs mt-2" style={{ color: C.gray }}>Cada código escaneado se agrega solo a la lista de abajo: si el producto ya existe en el catálogo, se suma 1 a la cantidad recibida; si no existe, queda como producto nuevo con el código ya cargado — solo falta completar nombre, categoría, cantidad y costo.</p>
-          </div>
-        ) : (
-          <div>
-            <Btn variant="dark" icon={scanning ? Loader2 : Sparkles} disabled={scanning || invoiceFiles.length === 0} onClick={analyzeAttached} full>
-              {scanning ? `Analizando ${invoiceFiles.length > 1 ? `${invoiceFiles.length} páginas` : "con IA"}…` : `Analizar ${invoiceFiles.length > 1 ? `las ${invoiceFiles.length} páginas` : "la boleta/factura adjuntada"}`}
-            </Btn>
-            {invoiceFiles.length === 0 && <p className="text-xs mt-2 text-center" style={{ color: C.gray }}>Primero adjunta la foto o PDF arriba.</p>}
-            <p className="text-xs mt-2" style={{ color: C.gray }}>La IA lee el formato de factura electrónica del SII, incluyendo el código de barras cuando aparece antes del nombre del producto: detecta productos, cantidades y precios netos, y si un producto ya está en tu inventario, suma la cantidad recibida en vez de duplicarlo. Siempre revisa los datos antes de confirmar — la lectura automática puede tener errores.</p>
-          </div>
         )}
       </div>
 
@@ -8502,7 +8460,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         <div className="rounded-xl overflow-hidden mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           <div className="px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.paperDark }}>
             <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Productos a recibir ({draftItems.length})</span>
-            <span className="text-xs font-mono" style={{ color: C.gray }}>{totals.qty} unid. · neto {formatCLP(totals.net)} · con IVA {formatCLP(totals.net * (1 + IVA))}</span>
+            <span className="text-xs font-mono" style={{ color: C.gray }}>
+              {totals.qty} unid. · neto {formatCLP(totals.net)} · con IVA {formatCLP(totals.net * (1 + IVA))}
+              {statedTotal !== "" && Math.abs(Number(statedTotal) - totals.net * (1 + IVA)) > 1 && (
+                <span style={{ color: C.brassText }}> · factura dice {formatCLP(Number(statedTotal))}</span>
+              )}
+            </span>
           </div>
           {/* Cómo viene esta factura. Va arriba de la lista porque es una
               propiedad del papel que está sobre el mesón, no de cada producto:
@@ -8531,20 +8494,43 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       )}
 
       {draftItems.length > 0 && (
-        <Btn full variant={freeEntry ? "rust" : "primary"} icon={freeEntry ? AlertTriangle : Truck} onClick={confirmReception}>
-          {freeEntry ? `Confirmar entrada libre de ${draftItems.length} producto(s)` : `Confirmar recepción de ${draftItems.length} producto(s)`}
+        <Btn full variant="primary" icon={Truck} onClick={confirmReception}>
+          Confirmar recepción de {draftItems.length} producto(s)
         </Btn>
       )}
       {draftItems.length === 0 && (
-        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Adjunta la foto de la boleta/factura y luego busca productos existentes, agrega uno nuevo, escanéalos con la pistola, o analiza el documento con IA para cargarlos automáticamente. Para casos aislados sin documento, usa 'Entrada libre'." />
+        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Pistolea cada código para agregarlo a la lista, o búscalo por nombre si no tienes el código a mano." />
       )}
 
       {role !== "admin" && (
         <p className="text-xs mt-3 text-center" style={{ color: C.grayLight }}>El stock se actualiza al confirmar. Los precios sugeridos quedan a la espera de aprobación de un administrador.</p>
       )}
 
+      {recentInvoices.length > 0 && (
+        <div className="rounded-xl overflow-hidden mt-6" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="px-4 py-2.5" style={{ background: C.paperDark }}>
+            <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Recepciones recientes</span>
+          </div>
+          <div>
+            {recentInvoices.map(inv => (
+              <button key={inv.id} onClick={() => setViewingInvoice(inv)} className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left hover:bg-black/[.03]" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                <div className="min-w-0">
+                  <div className="text-sm truncate" style={{ color: C.ink }}>{inv.supplierName}</div>
+                  <div className="text-[11px]" style={{ color: C.gray }}>{formatDate(inv.date)}{inv.documentType ? ` · ${inv.documentType === "factura" ? "Factura" : "Boleta"}` : ""}</div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
+                  {inv.paymentMethod === "Crédito con el proveedor" && <Badge tone="brass">crédito</Badge>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {quickAddSupplier && <SupplierModal initial={{ name: supplier }} onClose={() => setQuickAddSupplier(false)} onSave={saveQuickSupplier} />}
       {scannerOpen && <CameraScanner onDetect={handlePistolaScan} onClose={() => setScannerOpen(false)} />}
+      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} toast={toast} onClose={() => setViewingInvoice(null)} />}
     </div>
   );
 }
@@ -10231,10 +10217,35 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
    pedidos). Cuando una recepción queda asociada a un proveedor
    registrado, aquí se ve el total comprado y la última compra.
 --------------------------------------------------------- */
-function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [] }) {
+function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [], toast }) {
   const [pages, setPages] = useState([]);
   const [pageIdx, setPageIdx] = useState(0);
   const [loading, setLoading] = useState(!invoiceMeta.noDocument);
+  const [uploading, setUploading] = useState(false);
+  const addPhotoInputRef = useRef(null);
+
+  // Se puede llegar a esta pantalla sin haber alcanzado a fotografiar la
+  // boleta/factura en el momento de la recepción — acá queda la segunda
+  // oportunidad, sin tener que volver a registrar nada.
+  async function handleAddPhoto(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setUploading(true);
+    try {
+      const attachments = await Promise.all(files.map(f => fileToAttachment(f)));
+      const nuevasPaginas = [...pages, ...attachments];
+      await saveJSON(`invoice-image:${invoiceMeta.id}`, {
+        pages: nuevasPaginas.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })),
+      });
+      setPages(nuevasPaginas);
+      toast?.("Foto agregada a la recepción", "success");
+    } catch (err) {
+      toast?.(friendlyError(err, "No se pudo agregar la foto"), "error");
+    } finally {
+      setUploading(false);
+      if (addPhotoInputRef.current) addPhotoInputRef.current.value = "";
+    }
+  }
 
   useEffect(() => {
     if (invoiceMeta.noDocument) return;
@@ -10284,14 +10295,26 @@ function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [] }) {
               )}
             </>
           ) : (
-            <div className="rounded-lg p-4 text-center text-sm" style={{ background: C.paperDark, color: C.gray }}>No se encontró la imagen adjunta.</div>
+            <div className="rounded-lg p-4 text-center text-sm" style={{ background: C.paperDark, color: C.gray }}>Todavía no tiene foto adjunta.</div>
+          )}
+          {!invoiceMeta.noDocument && !loading && (
+            <div className="mt-2">
+              <input ref={addPhotoInputRef} type="file" accept="image/*,application/pdf" multiple onChange={handleAddPhoto} className="hidden" />
+              <Btn variant="dark" size="sm" icon={uploading ? Loader2 : ImagePlus} disabled={uploading} onClick={() => addPhotoInputRef.current?.click()} full>
+                {uploading ? "Subiendo…" : pages.length > 0 ? "Agregar otra página" : "Agregar foto de la boleta/factura"}
+              </Btn>
+            </div>
           )}
         </div>
         <div className="text-sm space-y-1.5">
           <div className="flex justify-between"><span style={{ color: C.gray }}>Fecha</span><span>{formatDate(invoiceMeta.date)}</span></div>
+          {invoiceMeta.documentType && <div className="flex justify-between"><span style={{ color: C.gray }}>Documento</span><span>{invoiceMeta.documentType === "factura" ? "Factura" : "Boleta"}</span></div>}
           {invoiceMeta.refNumber && <div className="flex justify-between"><span style={{ color: C.gray }}>N° documento</span><span className="font-mono">{invoiceMeta.refNumber}</span></div>}
           <div className="flex justify-between"><span style={{ color: C.gray }}>Productos</span><span>{purchaseItems.filter(pi => pi.invoiceId === invoiceMeta.id).length || invoiceMeta.itemCount || 0}</span></div>
           <div className="flex justify-between"><span style={{ color: C.gray }}>Registrada por</span><span>{invoiceMeta.registeredBy}</span></div>
+          {invoiceMeta.paymentMethod && <div className="flex justify-between"><span style={{ color: C.gray }}>Forma de pago</span><span>{invoiceMeta.paymentMethod === "Crédito con el proveedor" ? "Crédito" : invoiceMeta.paymentMethod}</span></div>}
+          {invoiceMeta.duePaymentDate && <div className="flex justify-between"><span style={{ color: C.gray }}>Fecha de pago</span><span>{invoiceMeta.duePaymentDate}</span></div>}
+          {invoiceMeta.statedTotal != null && <div className="flex justify-between"><span style={{ color: C.gray }}>Monto informado</span><span className="font-mono">{formatCLP(invoiceMeta.statedTotal)}</span></div>}
           <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Monto neto</span><span className="font-mono">{formatCLP(invoiceMeta.totalNet)}</span></div>
           <div className="flex justify-between font-semibold"><span>Total con IVA</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
         </div>
@@ -10588,7 +10611,7 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteSupplier(deleting.id)}>Eliminar</Btn></div>
         </Modal>
       )}
-      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} onClose={() => setViewingInvoice(null)} />}
+      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} toast={toast} onClose={() => setViewingInvoice(null)} />}
       {viewingLedger && (
         <SupplierLedgerModal
           supplier={viewingLedger}
