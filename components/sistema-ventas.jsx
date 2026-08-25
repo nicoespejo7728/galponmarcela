@@ -8258,7 +8258,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   // Fecha de la recepción: por omisión hoy, pero editable — a veces se
   // registra un día después de haber recibido la mercadería físicamente.
   const [receptionDate, setReceptionDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [documentType, setDocumentType] = useState(""); // "factura" | "boleta"
+  const [documentType, setDocumentType] = useState(""); // "factura" | "boleta" | "sin_documento"
+  // Motivo de por qué no hay boleta ni factura — algunos proveedores (ej. el
+  // pan fresco de la panadería) nunca las dan. Se guarda como texto libre
+  // porque el motivo cambia de proveedor a proveedor y no vale la pena
+  // armar una lista cerrada de razones.
+  const [noDocumentReason, setNoDocumentReason] = useState("");
   const [statedTotal, setStatedTotal] = useState(""); // lo que dice la factura, solo referencia
   const [paymentMethod, setPaymentMethod] = useState("Efectivo");
   const [duePaymentDate, setDuePaymentDate] = useState("");
@@ -8382,7 +8387,13 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
   async function confirmReception() {
     if (draftItems.length === 0) return;
-    if (!documentType) return toast("Indica si es factura o boleta", "error");
+    if (!documentType) return toast("Indica si es factura, boleta, o sin documento", "error");
+    // Sin boleta ni factura (ej. pan fresco de un proveedor que no las da):
+    // no se puede dejar sin ningún rastro de por qué — el motivo es lo que
+    // queda si alguna vez hay que explicar esa recepción.
+    if (documentType === "sin_documento" && !noDocumentReason.trim()) {
+      return toast("Indica el motivo de por qué no hay boleta ni factura", "error");
+    }
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
@@ -8480,10 +8491,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       refNumber: refNumber.trim() || null,
       itemCount: draftItems.length, totalNet: totals.net, totalGross,
       registeredBy: session.name,
-      noDocument: false,
-      reason: null,
+      noDocument: documentType === "sin_documento",
+      reason: documentType === "sin_documento" ? noDocumentReason.trim() : null,
       paymentMethod,
-      documentType,
+      documentType: documentType === "sin_documento" ? null : documentType,
       statedTotal: statedTotal !== "" ? Number(statedTotal) : null,
       duePaymentDate: isCredito ? duePaymentDate : null,
     };
@@ -8529,11 +8540,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     }
 
     toast(
-      `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}${invoiceFiles.length === 0 ? " · falta la foto de la factura (se puede agregar después)" : ""}`,
+      `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}${documentType !== "sin_documento" && invoiceFiles.length === 0 ? " · falta la foto de la factura (se puede agregar después)" : ""}`,
       "success"
     );
     setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber("");
     setInvoiceFiles([]); setPaymentMethod("Efectivo"); setDocumentType("");
+    setNoDocumentReason("");
     setStatedTotal(""); setDuePaymentDate(""); setReceptionDate(new Date().toISOString().slice(0, 10));
   }
 
@@ -8575,12 +8587,27 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         </div>
 
         <div className="mb-3">
-          <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Es factura o boleta?</div>
+          <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Es factura, boleta, o no dan ninguna?</div>
           <div className="flex gap-1.5">
-            {[["factura", "Factura"], ["boleta", "Boleta"]].map(([v, l]) => (
-              <button key={v} onClick={() => setDocumentType(v)} className="flex-1 py-2 rounded-lg text-xs font-medium" style={documentType === v ? { background: C.ink, color: C.paper } : { background: C.paperDark, color: C.gray }}>{l}</button>
+            {[["factura", "Factura"], ["boleta", "Boleta"], ["sin_documento", "Sin documento"]].map(([v, l]) => (
+              <button key={v} onClick={() => setDocumentType(v)} className="flex-1 py-2 rounded-lg text-xs font-medium" style={documentType === v ? (v === "sin_documento" ? { background: C.rust, color: "#fff" } : { background: C.ink, color: C.paper }) : { background: C.paperDark, color: C.gray }}>{l}</button>
             ))}
           </div>
+          {/* Para proveedores que de plano no dan ni boleta ni factura —el
+              ejemplo de siempre es el pan fresco— para no dejar bloqueada la
+              recepción. Se guarda el motivo, para que quede a mano si alguna
+              vez hay que explicar esa recepción. */}
+          {documentType === "sin_documento" && (
+            <div className="mt-2">
+              <Field label="Motivo de por qué no hay boleta ni factura">
+                <input
+                  value={noDocumentReason} onChange={e => setNoDocumentReason(e.target.value)}
+                  className={inputCls} style={inputStyle()}
+                  placeholder='Ej. "Panadería Paula no da boleta ni factura"'
+                />
+              </Field>
+            </div>
+          )}
         </div>
 
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
@@ -8599,6 +8626,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </p>
         )}
 
+        {documentType === "sin_documento" ? (
+          <div className="rounded-lg p-3 mb-3 flex items-start gap-2" style={{ background: C.rustSoft }}>
+            <AlertTriangle size={15} className="flex-shrink-0 mt-0.5" style={{ color: C.rust }} />
+            <p className="text-xs" style={{ color: C.rust }}>Esta recepción queda marcada como "sin boleta ni factura", con el motivo que escribiste arriba — no hace falta foto.</p>
+          </div>
+        ) : (
         <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold flex items-center gap-1.5" style={{ color: C.ink }}><Receipt size={13} />Foto de la boleta/factura (opcional)</span>
@@ -8628,6 +8661,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </Btn>
           <p className="text-[11px] mt-1.5" style={{ color: C.gray }}>Si no la tienes a mano ahora, no importa — se puede agregar después desde el historial de recepciones, más abajo.</p>
         </div>
+        )}
 
         <div className="relative mb-2">
           <ScanLine size={18} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.green }} />
@@ -8731,6 +8765,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <span className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
+                  {inv.noDocument && <Badge tone="rust">sin boleta</Badge>}
                   {inv.paymentMethod === "Crédito con el proveedor" && <Badge tone="brass">crédito</Badge>}
                 </div>
               </button>
