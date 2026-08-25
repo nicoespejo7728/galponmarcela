@@ -68,7 +68,7 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent
+  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent, Layers
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -6359,6 +6359,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [nameQuery, setNameQuery] = useState("");
   const [payment, setPayment] = useState("Efectivo");
   const [cashReceived, setCashReceived] = useState("");
+  // Pago combinado: cuando el cliente paga parte con un medio y el resto con
+  // otro (ej. una parte en efectivo, la diferencia por transferencia). Cada
+  // fila es { method, amount }; solo se usa cuando payment === "Pago combinado".
+  const [paymentBreakdown, setPaymentBreakdown] = useState([
+    { method: "Efectivo", amount: "" },
+    { method: "Transferencia", amount: "" },
+  ]);
   // Por omisión, sin boleta: en el mesón la mayoría de las ventas en efectivo o
   // por transferencia no la llevan, y dejarlo marcado en "sí" hacía que se
   // registraran como emitidas por no cambiarlo. Con débito y crédito no se
@@ -6553,30 +6560,50 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   }
   function removeItem(productId) { setCart(prev => prev.filter(i => i.productId !== productId)); }
 
+  // Con pago combinado no hay UN medio de pago para calcular recargo de
+  // tarjeta, boleta automática y elegibilidad de ofertas — se deriva un
+  // "medio efectivo" para reutilizar toda esa lógica sin reescribirla: si
+  // alguna parte se pagó con Débito o Crédito, se trata como esa tarjeta
+  // (recargo y boleta automática incluidos); si no, se usa el primer medio
+  // declarado. Simplificación conocida: un tramo de oferta restringido a
+  // "solo Efectivo" calificaría igual con un combinado Efectivo+Transferencia
+  // — caso de borde aceptado, no vale la pena repartir precio por línea.
+  const formaDePagoEfectiva = payment !== "Pago combinado" ? payment : (
+    paymentBreakdown.find(d => d.method === "Débito" || d.method === "Crédito")?.method
+    || paymentBreakdown.find(d => d.method)?.method
+    || "Efectivo"
+  );
   /* Precio que se cobra de verdad: el del producto más el recargo si la venta
      va con tarjeta. Se recalcula solo al cambiar la forma de pago. No sirve
      para líneas con oferta por cantidad —ahí el precio por unidad no es
      parejo—, así que esas se muestran aparte (ver totalLinea, más abajo). */
-  const precioCobrado = (i) => i.price + recargoPorTarjeta(i, payment);
+  const precioCobrado = (i) => i.price + recargoPorTarjeta(i, formaDePagoEfectiva);
   // Se recalcula el carrito completo (agrupado por carpeta de oferta, ver
   // calcularPreciosOferta) cada vez que cambia el carrito o la forma de
   // pago — no por línea, porque una carpeta puede repartirse entre varias.
   const preciosOferta = useMemo(
-    () => calcularPreciosOferta(cart, offers, payment),
-    [cart, offers, payment]);
-  const total = cart.reduce((s, i) => s + totalLinea(i, payment, preciosOferta), 0);
-  const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, payment) * i.qty, 0);
+    () => calcularPreciosOferta(cart, offers, formaDePagoEfectiva),
+    [cart, offers, formaDePagoEfectiva]);
+  const total = cart.reduce((s, i) => s + totalLinea(i, formaDePagoEfectiva, preciosOferta), 0);
+  const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, formaDePagoEfectiva) * i.qty, 0);
   const descuentoOfertaTotal = cart.reduce((s, i) => s + descuentoPorOferta(i, preciosOferta), 0);
   // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
   // imprime la misma máquina—; en efectivo o transferencia queda a criterio
-  // de quien cobra, así que ahí sí se pregunta.
-  const boletaAutomatica = payment === "Débito" || payment === "Crédito";
+  // de quien cobra, así que ahí sí se pregunta. Un combinado con tarjeta
+  // adentro hereda la misma obligación (ver formaDePagoEfectiva).
+  const boletaAutomatica = formaDePagoEfectiva === "Débito" || formaDePagoEfectiva === "Crédito";
   const boletaEmitidaFinal = boletaAutomatica ? true : boletaEmitida;
+  // Suma declarada en el desglose de pago combinado, y si cuadra con el total.
+  const sumaDesglose = paymentBreakdown.reduce((s, d) => s + (Number(d.amount) || 0), 0);
+  const desglosePagoValido = payment !== "Pago combinado" ? true : (
+    paymentBreakdown.filter(d => d.method && Number(d.amount) > 0).length >= 2 && sumaDesglose === total
+  );
 
   async function checkout(seller) {
     if (cart.length === 0) return;
     if (!seller?.id) return;
     if (payment === "Fiado" && !selectedCustomer) return;
+    if (payment === "Pago combinado" && !desglosePagoValido) return;
     // Sin modal que lo pida al agregarlo, un producto temporal puede quedar
     // en el carrito con el precio en 0 si nadie lo tocó todavía — se corta
     // acá, antes de cobrar, en vez de dejar pasar una línea gratis.
@@ -6623,7 +6650,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       items: cart.map(i => {
         // Se guarda el precio que se cobró —con recargo si lo hubo— para que la
         // boleta, la caja y los informes cuadren con lo que pagó el cliente.
-        const recargo = recargoPorTarjeta(i, payment);
+        const recargo = recargoPorTarjeta(i, formaDePagoEfectiva);
         // Lo que de verdad se cobró por la línea es precio_unitario * qty -
         // discount (ver descuento_cantidad, migración 0029): el precio de
         // lista se conserva tal cual para no distorsionar el margen ni el
@@ -6652,6 +6679,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       }),
       total,
       paymentMethod: payment,
+      ...(payment === "Pago combinado" ? {
+        paymentBreakdown: paymentBreakdown
+          .filter(d => d.method && Number(d.amount) > 0)
+          .map(d => ({ method: d.method, amount: Number(d.amount) })),
+      } : {}),
       boletaEmitida: boletaEmitidaFinal,
     };
     const newProducts = latestProducts.map(p => {
@@ -6709,6 +6741,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
     setReceipt(sale);
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false);
+    setPaymentBreakdown([{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
     setSelectedCustomer(null); setCustomerQuery("");
     onCambioEnCola?.();
     if (resultado.subida) {
@@ -6851,6 +6884,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       responsible: persona.name, reason, items, ...valor,
     });
     setCart([]); setPayment("Efectivo"); setCashReceived(""); setBoletaEmitida(false); setConsumptionOpen(false);
+    setPaymentBreakdown([{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
     onCambioEnCola?.();
     toast(registro.subida
       ? `Consumo registrado a nombre de ${persona.name}`
@@ -7085,7 +7119,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       <button onClick={() => changeQty(i.productId, 1)} aria-label="Agregar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Plus size={17} /></button>
                     </div>
                   )}
-                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(totalLinea(i, payment, preciosOferta))}</span>
+                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(totalLinea(i, formaDePagoEfectiva, preciosOferta))}</span>
                 </div>
               </div>
             ))}
@@ -7123,6 +7157,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                   >{m}</button>
                 ))}
                 <button
+                  onClick={() => { setPayment("Pago combinado"); setCashReceived(""); }}
+                  aria-pressed={payment === "Pago combinado"}
+                  className="col-span-2 px-2 py-2 rounded-lg text-sm font-semibold transition flex items-center justify-center gap-1.5"
+                  style={payment === "Pago combinado" ? { background: C.brass, color: C.ink } : { background: C.inkSoft, color: "#e8e0d0" }}
+                ><Layers size={15} />Pago combinado</button>
+                <button
                   onClick={() => { setPayment("Fiado"); setCashReceived(""); }}
                   aria-pressed={payment === "Fiado"}
                   className="col-span-2 px-2 py-2 rounded-lg text-sm font-semibold transition flex items-center justify-center gap-1.5"
@@ -7130,6 +7170,44 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 ><CreditCard size={15} />Fiado (queda debiendo)</button>
               </div>
             </div>
+
+            {payment === "Pago combinado" && (
+              <div className="rounded-lg p-3 space-y-2" style={{ background: C.inkSoft }}>
+                <p className="text-xs" style={{ color: C.grayLight }}>Con qué medios pagó y cuánto con cada uno</p>
+                {paymentBreakdown.map((d, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <select
+                      value={d.method}
+                      onChange={e => setPaymentBreakdown(prev => prev.map((row, i) => i === idx ? { ...row, method: e.target.value } : row))}
+                      className={inputCls} style={{ ...inputStyle(), flex: "0 0 40%" }}
+                    >
+                      {["Efectivo", "Débito", "Crédito", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <input
+                      type="number" value={d.amount} placeholder="0"
+                      onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, total))}
+                      className={`${inputCls} font-mono`} style={inputStyle()}
+                    />
+                    {paymentBreakdown.length > 2 && (
+                      <button onClick={() => setPaymentBreakdown(prev => prev.filter((_, i) => i !== idx))} className="flex-shrink-0" style={{ color: "#fca5a5" }}><X size={16} /></button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  onClick={() => setPaymentBreakdown(prev => [...prev, { method: "Efectivo", amount: "" }])}
+                  className="text-xs font-semibold flex items-center gap-1" style={{ color: C.brass }}
+                ><Plus size={13} />Agregar otro medio</button>
+                <div className="flex items-center justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+                  <span className="text-sm font-semibold" style={{ color: C.grayLight }}>Suma declarada</span>
+                  <span className="font-mono font-bold" style={{ color: sumaDesglose === total ? C.brass : "#fca5a5" }}>{formatCLP(sumaDesglose)}</span>
+                </div>
+                {sumaDesglose !== total && (
+                  <p className="text-[11px]" style={{ color: "#fca5a5" }}>
+                    {sumaDesglose > total ? "La suma supera el total a pagar." : `Falta declarar ${formatCLP(total - sumaDesglose)} para completar el total.`}
+                  </p>
+                )}
+              </div>
+            )}
 
             {payment === "Fiado" && (
               <div className="rounded-lg p-3 space-y-2" style={{ background: C.inkSoft }}>
@@ -7212,7 +7290,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               </div>
             )}
 
-            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0) || (payment === "Fiado" && !selectedCustomer)} icon={Check}>Cobrar y emitir</Btn>
+            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0) || (payment === "Fiado" && !selectedCustomer) || (payment === "Pago combinado" && !desglosePagoValido)} icon={Check}>Cobrar y emitir</Btn>
 
             {/* Ya no es solo para administradores: cualquiera del equipo lo
                 registra con su PIN y queda a su nombre. El control pasó de
@@ -7575,6 +7653,13 @@ function ReceiptModal({ sale, settings, onClose }) {
           )}
           <div className="flex justify-between text-base font-semibold pt-1"><span>Total</span><span>{formatCLP(sale.total)}</span></div>
           <div className="text-xs pt-1" style={{ color: C.gray }}>Pago: {sale.paymentMethod}</div>
+          {sale.paymentMethod === "Pago combinado" && Array.isArray(sale.paymentBreakdown) && (
+            <div className="text-xs pl-2" style={{ color: C.gray }}>
+              {sale.paymentBreakdown.map((d, idx) => (
+                <div key={idx} className="flex justify-between"><span>&nbsp;&nbsp;{d.method}</span><span>{formatCLP(d.amount)}</span></div>
+              ))}
+            </div>
+          )}
           {sale.paymentMethod === "Fiado" && (
             <div className="text-xs" style={{ color: "#8a6a1f" }}>Fiado — pendiente de pago{sale.customer ? ` (${sale.customer})` : ""}</div>
           )}
@@ -8243,7 +8328,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
 // cargo en el libro de crédito de ese proveedor (migración 0014), igual que
 // "Fiado" en el POS pero en sentido contrario — acá quien queda debiendo es
 // el negocio, no el cliente.
-const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Crédito con el proveedor"];
+const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado", "Crédito con el proveedor"];
 
 function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast }) {
   const [draftItems, setDraftItems] = useState([]);
@@ -8266,6 +8351,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   const [noDocumentReason, setNoDocumentReason] = useState("");
   const [statedTotal, setStatedTotal] = useState(""); // lo que dice la factura, solo referencia
   const [paymentMethod, setPaymentMethod] = useState("Efectivo");
+  // Pago combinado a un proveedor: parte con un medio, el resto con otro
+  // (ej. una parte en efectivo, la diferencia por transferencia).
+  const [paymentBreakdown, setPaymentBreakdown] = useState([
+    { method: "Efectivo", amount: "" },
+    { method: "Transferencia", amount: "" },
+  ]);
   const [duePaymentDate, setDuePaymentDate] = useState("");
   const [refNumber, setRefNumber] = useState("");
   const [nameQuery, setNameQuery] = useState("");
@@ -8407,6 +8498,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     if (isCredito && !duePaymentDate) {
       return toast("Indica para cuándo queda la fecha de pago de este crédito", "error");
     }
+    const esCombinado = paymentMethod === "Pago combinado";
+    const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
+    const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
+    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
+      return toast("El desglose del pago combinado debe sumar exactamente el total de la recepción", "error");
+    }
     // Se relee lo más reciente del almacenamiento justo antes de guardar, para
     // no partir de una copia local que otro dispositivo ya haya dejado atrás.
     const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems, latestSupplierLedger] = await Promise.all([
@@ -8484,6 +8581,8 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       category: "Compra de mercadería",
       auto: true,
       supplierId: supplierId || null, invoiceId,
+      paymentMethod: esCombinado ? "Pago combinado" : paymentMethod,
+      ...(esCombinado ? { paymentBreakdown: filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) })) } : {}),
     }, ...latestMovements];
 
     const invoiceRecord = {
@@ -8494,6 +8593,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       noDocument: documentType === "sin_documento",
       reason: documentType === "sin_documento" ? noDocumentReason.trim() : null,
       paymentMethod,
+      ...(esCombinado ? { paymentBreakdown: filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) })) } : {}),
       documentType: documentType === "sin_documento" ? null : documentType,
       statedTotal: statedTotal !== "" ? Number(statedTotal) : null,
       duePaymentDate: isCredito ? duePaymentDate : null,
@@ -8545,6 +8645,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     );
     setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber("");
     setInvoiceFiles([]); setPaymentMethod("Efectivo"); setDocumentType("");
+    setPaymentBreakdown([{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
     setNoDocumentReason("");
     setStatedTotal(""); setDuePaymentDate(""); setReceptionDate(new Date().toISOString().slice(0, 10));
   }
@@ -8624,6 +8725,39 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           <p className="text-[11px] -mt-2 mb-3" style={{ color: C.brassText }}>
             La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"} hasta esa fecha — ver Proveedores.
           </p>
+        )}
+        {paymentMethod === "Pago combinado" && (
+          <div className="rounded-lg p-3 mb-3 space-y-2" style={{ background: C.paperDark }}>
+            <p className="text-xs" style={{ color: C.gray }}>Con qué medios se pagó y cuánto con cada uno</p>
+            {paymentBreakdown.map((d, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <select
+                  value={d.method}
+                  onChange={e => setPaymentBreakdown(prev => prev.map((row, i) => i === idx ? { ...row, method: e.target.value } : row))}
+                  className={inputCls} style={{ ...inputStyle(), flex: "0 0 40%" }}
+                >
+                  {["Efectivo", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <input
+                  type="number" value={d.amount} placeholder="0"
+                  onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totals.net * 1.19))}
+                  className={`${inputCls} font-mono`} style={inputStyle()}
+                />
+                {paymentBreakdown.length > 2 && (
+                  <button onClick={() => setPaymentBreakdown(prev => prev.filter((_, i) => i !== idx))} className="flex-shrink-0" style={{ color: C.rust }}><X size={16} /></button>
+                )}
+              </div>
+            ))}
+            <button
+              onClick={() => setPaymentBreakdown(prev => [...prev, { method: "Efectivo", amount: "" }])}
+              className="text-xs font-semibold flex items-center gap-1" style={{ color: C.brassText }}
+            ><Plus size={13} />Agregar otro medio</button>
+            <div className="flex items-center justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+              <span className="text-sm font-semibold" style={{ color: C.gray }}>Suma declarada</span>
+              <span className="font-mono font-bold" style={{ color: C.ink }}>{formatCLP(paymentBreakdown.reduce((s, d) => s + (Number(d.amount) || 0), 0))}</span>
+            </div>
+            <p className="text-[11px]" style={{ color: C.gray }}>Debe sumar exactamente el total de la recepción ({formatCLP(totals.net * 1.19)}).</p>
+          </div>
         )}
 
         {documentType === "sin_documento" ? (
@@ -8767,6 +8901,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
                   <span className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
                   {inv.noDocument && <Badge tone="rust">sin boleta</Badge>}
                   {inv.paymentMethod === "Crédito con el proveedor" && <Badge tone="brass">crédito</Badge>}
+                  {inv.paymentMethod === "Pago combinado" && <Badge tone="gray">combinado</Badge>}
                 </div>
               </button>
             ))}
@@ -8958,7 +9093,16 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
     // agregó esa columna para no arriesgar romper el cierre de caja (una
     // función crítica) si la migración 0012 aún no está aplicada.
     const byMethod = { Efectivo: 0, "Débito": 0, "Crédito": 0, Transferencia: 0, Fiado: 0 };
-    shiftSalesList.forEach(s => { byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + s.total; });
+    // Una venta con "Pago combinado" no tiene un solo medio: se reparte por
+    // su desglose (paymentBreakdown) para que el efectivo esperado en caja y
+    // el resto de los conteos por método salgan correctos de verdad.
+    shiftSalesList.forEach(s => {
+      if (s.paymentMethod === "Pago combinado" && Array.isArray(s.paymentBreakdown)) {
+        s.paymentBreakdown.forEach(d => { byMethod[d.method] = (byMethod[d.method] || 0) + (Number(d.amount) || 0); });
+      } else {
+        byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] || 0) + s.total;
+      }
+    });
     const total = shiftSalesList.reduce((a, s) => a + s.total, 0);
     return { byMethod, total, count: shiftSalesList.length };
   }, [shiftSalesList]);
@@ -9863,6 +10007,23 @@ function calcularOfertaDeCarpeta(oferta, lineas, formaDePago) {
     resultado.set(l.productId, { total: valorNormal - discount, discount });
   });
   return resultado;
+}
+
+/* Pago combinado con exactamente 2 medios: al escribir un monto, el otro se
+   completa solo con la diferencia hasta el total — para no tener que sacar
+   la cuenta a mano cada vez. Con 3 medios o más no hay una única diferencia
+   que repartir, así que ahí cada monto se escribe a mano. Se usa desde el
+   editor de desglose en Vender, Recepción y Egresos. */
+function autocompletarDesglose(filas, idx, valor, total) {
+  if (filas.length !== 2) return filas.map((f, i) => i === idx ? { ...f, amount: valor } : f);
+  const otro = idx === 0 ? 1 : 0;
+  const numero = Number(valor);
+  const completa = valor !== "" && !Number.isNaN(numero);
+  return filas.map((f, i) => {
+    if (i === idx) return { ...f, amount: valor };
+    if (i === otro) return { ...f, amount: completa ? String(Math.max(0, Math.round(total - numero))) : f.amount };
+    return f;
+  });
 }
 
 /* Punto de entrada: recorre el carrito completo, agrupa por carpeta y
@@ -10895,6 +11056,7 @@ function SupplierCard({ s, role, invoicesIndex, purchaseItems, balance, onEdit, 
                     {formatDate(inv.date)}{inv.refNumber ? ` · Doc ${inv.refNumber}` : ""}
                     {inv.noDocument && <Badge tone="rust">sin boleta</Badge>}
                     {inv.paymentMethod === "Crédito con el proveedor" && <Badge tone="brass">crédito</Badge>}
+                    {inv.paymentMethod === "Pago combinado" && <Badge tone="gray">combinado</Badge>}
                   </span>
                   <span className="font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
                 </button>
@@ -14319,7 +14481,16 @@ function resumirVentas(lista) {
     const monto = Number(v.total) || 0;
     total += monto;
     if (v.boletaEmitida === false) sinBoleta += monto;
-    porPago.set(v.paymentMethod, (porPago.get(v.paymentMethod) || 0) + monto);
+    // Igual que en CajaView: un pago combinado se reparte por su desglose
+    // para que el informe "por medio de pago" refleje la plata real.
+    if (v.paymentMethod === "Pago combinado" && Array.isArray(v.paymentBreakdown) && v.paymentBreakdown.length) {
+      v.paymentBreakdown.forEach(d => {
+        const m = Number(d.amount) || 0;
+        porPago.set(d.method, (porPago.get(d.method) || 0) + m);
+      });
+    } else {
+      porPago.set(v.paymentMethod, (porPago.get(v.paymentMethod) || 0) + monto);
+    }
     const quien = v.seller || "Sin identificar";
     porVendedor.set(quien, (porVendedor.get(quien) || 0) + monto);
   }
@@ -14759,16 +14930,36 @@ const CATEGORIAS_MOVIMIENTO = GRUPOS_CATEGORIA_MOVIMIENTO.flatMap(g => g.options
 // gasto — nunca un ingreso, así que no tiene caso preguntarlo). Tampoco se
 // adjunta boleta/factura acá: eso ya se hace en Recepción, que es donde
 // realmente llega el documento de la compra.
+// Egresos no llevaba ningún registro de con qué se pagaba (migración 0032).
+// Solo se ofrecen Efectivo, Transferencia y Pago combinado — "Crédito" no
+// aplica acá, ese vocabulario es para deudas con proveedores (Recepción).
+const EXPENSE_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado"];
+
 function MovementModal({ onClose, onSave }) {
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("General");
+  const [paymentMethod, setPaymentMethod] = useState("Efectivo");
+  const [paymentBreakdown, setPaymentBreakdown] = useState([
+    { method: "Efectivo", amount: "" },
+    { method: "Transferencia", amount: "" },
+  ]);
   const [saving, setSaving] = useState(false);
+
+  const esCombinado = paymentMethod === "Pago combinado";
+  const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
+  const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
+  const desglosePagoValido = !esCombinado || (filasDesglose.length >= 2 && sumaDesglose === Number(amount));
 
   async function submit() {
     setSaving(true);
     try {
-      await onSave({ id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept, category: category || "General", amount: Number(amount), auto: false });
+      await onSave({
+        id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept,
+        category: category || "General", amount: Number(amount), auto: false,
+        paymentMethod,
+        ...(esCombinado ? { paymentBreakdown: filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) })) } : {}),
+      });
     } finally {
       setSaving(false);
     }
@@ -14792,8 +14983,46 @@ function MovementModal({ onClose, onSave }) {
           <input type="number" value={amount} onChange={e => setAmount(e.target.value)} className={`${inputCls} font-mono pl-7`} style={inputStyle()} placeholder="0" />
         </div>
       </Field>
+      <Field label="Forma de pago">
+        <select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className={inputCls} style={inputStyle()}>
+          {EXPENSE_PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </Field>
 
-      <Btn full icon={saving ? Loader2 : Check} disabled={!concept || !amount || saving} onClick={submit}>{saving ? "Guardando…" : "Guardar"}</Btn>
+      {esCombinado && (
+        <div className="rounded-lg p-3 mb-3 space-y-2" style={{ background: C.paperDark }}>
+          <p className="text-xs" style={{ color: C.gray }}>Con qué medios se pagó y cuánto con cada uno</p>
+          {paymentBreakdown.map((d, idx) => (
+            <div key={idx} className="flex items-center gap-2">
+              <select
+                value={d.method}
+                onChange={e => setPaymentBreakdown(prev => prev.map((row, i) => i === idx ? { ...row, method: e.target.value } : row))}
+                className={inputCls} style={{ ...inputStyle(), flex: "0 0 40%" }}
+              >
+                {["Efectivo", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <input
+                type="number" value={d.amount} placeholder="0"
+                onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, Number(amount)))}
+                className={`${inputCls} font-mono`} style={inputStyle()}
+              />
+              {paymentBreakdown.length > 2 && (
+                <button onClick={() => setPaymentBreakdown(prev => prev.filter((_, i) => i !== idx))} className="flex-shrink-0" style={{ color: C.rust }}><X size={16} /></button>
+              )}
+            </div>
+          ))}
+          <button
+            onClick={() => setPaymentBreakdown(prev => [...prev, { method: "Efectivo", amount: "" }])}
+            className="text-xs font-semibold flex items-center gap-1" style={{ color: C.brassText }}
+          ><Plus size={13} />Agregar otro medio</button>
+          <div className="flex items-center justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
+            <span className="text-sm font-semibold" style={{ color: C.gray }}>Suma declarada</span>
+            <span className="font-mono font-bold" style={{ color: sumaDesglose === Number(amount) ? C.greenDark : C.rust }}>{formatCLP(sumaDesglose)}</span>
+          </div>
+        </div>
+      )}
+
+      <Btn full icon={saving ? Loader2 : Check} disabled={!concept || !amount || saving || !desglosePagoValido} onClick={submit}>{saving ? "Guardando…" : "Guardar"}</Btn>
     </Modal>
   );
 }
@@ -15007,7 +15236,7 @@ function ExpensesView({ movements, setMovements, toast }) {
                   <ArrowDownCircle size={16} style={{ color: C.rust }} />
                   <div>
                     <div className="text-sm" style={{ color: C.ink }}>{m.concept}</div>
-                    <div className="text-xs" style={{ color: C.gray }}>{formatDate(m.date)} · {m.category}{!m.auto ? " · manual" : ""}</div>
+                    <div className="text-xs" style={{ color: C.gray }}>{formatDate(m.date)} · {m.category}{!m.auto ? " · manual" : ""}{m.paymentMethod ? ` · ${m.paymentMethod}` : ""}</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5">
