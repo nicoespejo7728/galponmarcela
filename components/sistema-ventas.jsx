@@ -6295,6 +6295,18 @@ function IdentifySellerModal({ onClose, onConfirm }) {
   );
 }
 
+/* Venta manual: pedida como parche de corto plazo (agosto 2026) para cobrar
+   algo que no tiene código ni ficha —y no vale la pena crearle una— poniendo
+   el precio a mano en el momento. A propósito NO crea un producto en el
+   catálogo (a diferencia de "Vender ahora" cuando un código no calza): la
+   línea queda en la boleta con productId nulo, igual que ya soportan
+   venta_detalle y todos los reportes que la leen después.
+
+   Se pidió que dure solo hasta fin de mes, así que el botón se apaga solo
+   pasada esa fecha — no hace falta acordarse de sacarlo a mano. Si en algún
+   momento se necesita de nuevo, basta con mover esta fecha hacia adelante. */
+const VENTA_MANUAL_DISPONIBLE_HASTA = "2026-08-31T23:59:59";
+
 function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
@@ -6311,6 +6323,8 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [receipt, setReceipt] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
   const [ventaNueva, setVentaNueva] = useState(null);
+  const [ventaManualOpen, setVentaManualOpen] = useState(false);
+  const ventaManualDisponible = new Date() <= new Date(VENTA_MANUAL_DISPONIBLE_HASTA);
   const [consumptionOpen, setConsumptionOpen] = useState(false);
   const [consumptionTicket, setConsumptionTicket] = useState(null);
   const inputRef = useRef(null);
@@ -6520,7 +6534,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         // boleta, la caja y los informes cuadren con lo que pagó el cliente.
         const recargo = recargoPorTarjeta(i, payment);
         const base = {
-          productId: i.productId, name: i.name, barcode: i.barcode, qty: i.qty,
+          // Una línea de venta manual no tiene producto real detrás: se manda
+          // sin id (nulo) para no violar la llave foránea de venta_detalle
+          // con un id que no existe en la tabla producto. El nombre escrito a
+          // mano sí queda guardado (nombre_producto), así que en la boleta y
+          // en los informes se ve igual, solo que sin vínculo al catálogo.
+          productId: i.isManual ? null : i.productId, name: i.name, barcode: i.barcode, qty: i.qty,
           price: i.price + recargo, cost: i.cost, unitType: i.unitType,
           ...(recargo ? { cardSurcharge: recargo } : {}),
         };
@@ -6678,6 +6697,25 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     }
   }
 
+  /* Agrega la línea de la venta manual al carrito. No toca el catálogo ni el
+     kárdex —no hay producto real detrás—, así que el id que se le pone es
+     solo para que el carrito la distinga de otras líneas manuales; se
+     descarta al armar la venta (ver checkout: productId se manda null). */
+  function addManualItem({ name, price, qty }) {
+    const nombre = String(name || "").trim() || "Producto temporal";
+    const precio = Number(price) || 0;
+    if (precio <= 0) return toast("Escribe el precio de venta", "error");
+    const cantidad = Math.max(1, Math.floor(Number(qty) || 1));
+    setCart(prev => [...prev, {
+      productId: nuevoId(), barcode: null, name: nombre, price: precio,
+      cost: 0, qty: cantidad, stock: Infinity, unitType: "unidad",
+      category: "", isManual: true,
+    }]);
+    setVentaManualOpen(false);
+    toast(`"${nombre}" agregado — precio puesto a mano`, "success");
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }
+
   /* El consumo queda a nombre de quien puso el PIN, y ahí termina el trámite
      en el mesón. Ya no se pide el nombre escrito a mano ni el PIN de un
      administrador: eso obligaba a ir a buscar a alguien para llevarse una
@@ -6816,6 +6854,14 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             </div>
           </div>
         )}
+        {ventaManualDisponible && (
+          <div className="mt-2 text-right">
+            <button type="button" onClick={() => setVentaManualOpen(true)}
+              className="text-xs underline underline-offset-2" style={{ color: C.gray }}>
+              ¿Vendes algo sin código ni ficha? Pon el precio a mano
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Dos zonas de trabajo y nada más: a la izquierda de dónde saco los
@@ -6860,7 +6906,14 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               <div key={i.productId} className="px-3 py-3">
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold leading-snug" style={{ color: C.ink }}>{i.name}</div>
+                    <div className="text-sm font-semibold leading-snug flex items-center gap-1.5 flex-wrap" style={{ color: C.ink }}>
+                      {i.name}
+                      {i.isManual && (
+                        <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.brassSoft, color: C.brassText }}>
+                          temporal
+                        </span>
+                      )}
+                    </div>
                     {i.isOldPriceLine ? (
                       <div className="text-xs font-mono mt-0.5" style={{ color: "#8a6a1f" }}>
                         {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
@@ -7033,7 +7086,14 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 registra con su PIN y queda a su nombre. El control pasó de
                 pedir permiso antes a revisarlo después. */}
             <div className="pt-3" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
-              <Btn size="sm" full variant="ghostClaro" icon={Lock} disabled={cart.length === 0} onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+              <Btn size="sm" full variant="ghostClaro" icon={Lock}
+                disabled={cart.length === 0 || cart.some(i => i.isManual)}
+                onClick={() => setConsumptionOpen(true)}>Consumo interno</Btn>
+              {cart.some(i => i.isManual) && (
+                <p className="text-[11px] mt-1.5 text-center" style={{ color: "#e8e0d0", opacity: 0.85 }}>
+                  Consumo interno no acepta líneas de venta manual — sácala del carrito primero.
+                </p>
+              )}
               <p className="text-xs mt-2 text-center" style={{ color: C.grayLight }}>Lo que se lleva alguien del equipo: descuenta stock, no genera boleta.</p>
             </div>
           </div>
@@ -7053,6 +7113,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           barcode={ventaNueva.barcode}
           onClose={() => { setVentaNueva(null); setTimeout(() => inputRef.current?.focus(), 50); }}
           onConfirm={crearYVender}
+        />
+      )}
+      {ventaManualOpen && (
+        <VentaManualModal
+          onClose={() => { setVentaManualOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }}
+          onConfirm={addManualItem}
+          disponibleHasta={VENTA_MANUAL_DISPONIBLE_HASTA}
         />
       )}
       {quickAdd && <ProductModal initial={quickAdd} onClose={() => setQuickAdd(null)} onSave={async (p) => {
@@ -7136,6 +7203,50 @@ function ProductoNuevoEnVentaModal({ barcode, onClose, onConfirm }) {
         <Btn full icon={guardando ? Loader2 : Check} disabled={guardando || !name.trim()} onClick={submit}>
           {guardando ? "Creando…" : "Crear y agregar"}
         </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+/* Venta manual — parche temporal (ver VENTA_MANUAL_DISPONIBLE_HASTA). A
+   diferencia de ProductoNuevoEnVentaModal, acá no se crea nada en el
+   catálogo: es solo una línea con el nombre y el precio que se escriban,
+   para cobrar algo puntual sin dejarlo dando vueltas como producto. */
+function VentaManualModal({ onClose, onConfirm, disponibleHasta }) {
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [qty, setQty] = useState("1");
+
+  function submit() {
+    onConfirm({ name, price, qty });
+  }
+
+  return (
+    <Modal title="Venta manual — precio a mano" onClose={onClose}>
+      <div className="rounded-lg p-3 mb-4" style={{ background: C.brassSoft }}>
+        <p className="text-xs" style={{ color: C.brassText }}>
+          Esta línea NO queda en el catálogo de productos: es solo para esta boleta. Función temporal,
+          disponible hasta el {formatDateOnly(disponibleHasta.slice(0, 10))}.
+        </p>
+      </div>
+      <Field label="¿Qué es? (opcional)">
+        <input autoFocus value={name} onChange={e => setName(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={inputCls} style={inputStyle()} placeholder="Producto temporal" />
+      </Field>
+      <Field label="Precio">
+        <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" />
+      </Field>
+      <Field label="Cantidad">
+        <input type="number" inputMode="numeric" min="1" value={qty} onChange={e => setQty(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+          className={`${inputCls} font-mono`} style={inputStyle()} placeholder="1" />
+      </Field>
+      <div className="flex gap-2">
+        <Btn variant="ghost" full onClick={onClose}>Cancelar</Btn>
+        <Btn full icon={Check} disabled={!(Number(price) > 0)} onClick={submit}>Agregar al carrito</Btn>
       </div>
     </Modal>
   );
