@@ -68,7 +68,7 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee
+  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -6342,7 +6342,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
    momento se necesita de nuevo, basta con mover esta fecha hacia adelante. */
 const PRODUCTO_TEMPORAL_DISPONIBLE_HASTA = "2026-08-31T23:59:59";
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -6532,10 +6532,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   function removeItem(productId) { setCart(prev => prev.filter(i => i.productId !== productId)); }
 
   /* Precio que se cobra de verdad: el del producto más el recargo si la venta
-     va con tarjeta. Se recalcula solo al cambiar la forma de pago. */
+     va con tarjeta. Se recalcula solo al cambiar la forma de pago. No sirve
+     para líneas con oferta por cantidad —ahí el precio por unidad no es
+     parejo—, así que esas se muestran aparte (ver totalLinea, más abajo). */
   const precioCobrado = (i) => i.price + recargoPorTarjeta(i, payment);
-  const total = cart.reduce((s, i) => s + precioCobrado(i) * i.qty, 0);
+  // Se recalcula el carrito completo (agrupado por carpeta de oferta, ver
+  // calcularPreciosOferta) cada vez que cambia el carrito o la forma de
+  // pago — no por línea, porque una carpeta puede repartirse entre varias.
+  const preciosOferta = useMemo(
+    () => calcularPreciosOferta(cart, offers, payment),
+    [cart, offers, payment]);
+  const total = cart.reduce((s, i) => s + totalLinea(i, payment, preciosOferta), 0);
   const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, payment) * i.qty, 0);
+  const descuentoOfertaTotal = cart.reduce((s, i) => s + descuentoPorOferta(i, preciosOferta), 0);
   // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
   // imprime la misma máquina—; en efectivo o transferencia queda a criterio
   // de quien cobra, así que ahí sí se pregunta.
@@ -6593,6 +6602,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         // Se guarda el precio que se cobró —con recargo si lo hubo— para que la
         // boleta, la caja y los informes cuadren con lo que pagó el cliente.
         const recargo = recargoPorTarjeta(i, payment);
+        // Lo que de verdad se cobró por la línea es precio_unitario * qty -
+        // discount (ver descuento_cantidad, migración 0029): el precio de
+        // lista se conserva tal cual para no distorsionar el margen ni el
+        // historial de precios, y la oferta queda aparte, como el recargo.
+        const discount = descuentoPorOferta(i, preciosOferta);
         const base = {
           // Una línea de producto temporal no tiene producto real detrás: se
           // manda sin id (nulo) para no violar la llave foránea de
@@ -6602,6 +6616,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           productId: i.isTemporal ? null : i.productId, name: i.name, barcode: i.barcode, qty: i.qty,
           price: i.price + recargo, cost: i.cost, unitType: i.unitType,
           ...(recargo ? { cardSurcharge: recargo } : {}),
+          ...(discount ? { discount } : {}),
         };
         if (!i.isOldPriceLine) return base;
         // Se cobró TODO al precio anterior para no mezclar dos precios en la
@@ -6965,6 +6980,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                           temporal
                         </span>
                       )}
+                      {!i.isTemporal && tramosAplicables(i, preciosOferta).length > 0 && (
+                        <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.greenSoft, color: C.greenDark }}>
+                          oferta
+                        </span>
+                      )}
                     </div>
                     {i.isTemporal ? (
                       <div className="flex items-center gap-1.5 mt-1">
@@ -6987,7 +7007,15 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                         {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
                       </div>
                     ) : (
-                      <div className="text-xs font-mono mt-0.5" style={{ color: C.gray }}>{formatCLP(precioCobrado(i))} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                      <div className="mt-0.5">
+                        <div className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(precioCobrado(i))} {i.unitType === "peso" ? "/kg" : "c/u"}</div>
+                        {tramosAplicables(i, preciosOferta).length > 0 && (
+                          <div className="text-[11px] font-mono" style={{ color: C.greenDark }}>
+                            Oferta {preciosOferta.get(i.productId)?.offerName}: {tramosAplicables(i, preciosOferta).map(t => `${t.quantity}x${formatCLP(t.price)}`).join(" · ")}
+                            {descuentoPorOferta(i, preciosOferta) > 0 && ` — ahorras ${formatCLP(descuentoPorOferta(i, preciosOferta))}`}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                   <button onClick={() => removeItem(i.productId)} aria-label={`Quitar ${i.name}`} className="flex items-center justify-center min-w-[44px] rounded-lg" style={{ color: C.rust }}><Trash2 size={18} /></button>
@@ -7026,7 +7054,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       <button onClick={() => changeQty(i.productId, 1)} aria-label="Agregar una unidad" className="w-11 flex items-center justify-center" style={{ background: C.paperDark, color: C.ink }}><Plus size={17} /></button>
                     </div>
                   )}
-                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(precioCobrado(i) * i.qty)}</span>
+                  <span className="text-base font-mono font-bold" style={{ color: C.ink }}>{formatCLP(totalLinea(i, payment, preciosOferta))}</span>
                 </div>
               </div>
             ))}
@@ -7040,6 +7068,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               <div className="rounded-lg px-3 py-2 text-xs" style={{ background: C.inkSoft, color: C.brass }}>
                 Incluye {formatCLP(recargoTotal)} de recargo por pagar cigarros con tarjeta
                 ({formatCLP(RECARGO_TARJETA)} por unidad).
+              </div>
+            )}
+            {descuentoOfertaTotal > 0 && (
+              <div className="rounded-lg px-3 py-2 text-xs" style={{ background: C.inkSoft, color: C.green }}>
+                Ya descontamos {formatCLP(descuentoOfertaTotal)} por oferta de cantidad.
               </div>
             )}
             <div className="flex items-baseline justify-between gap-2">
@@ -7488,9 +7521,17 @@ function ReceiptModal({ sale, settings, onClose }) {
               mezclar dos precios en la misma boleta — esa aclaración (y la
               ganancia extra que a veces deja) queda para Análisis, no acá. */}
           {sale.items.map((i, idx) => (
-            <div key={idx} className="flex justify-between text-xs">
-              <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
-              <span>{formatCLP(i.price * i.qty)}</span>
+            <div key={idx}>
+              <div className="flex justify-between text-xs">
+                <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
+                <span>{formatCLP(i.price * i.qty - (i.discount || 0))}</span>
+              </div>
+              {i.discount > 0 && (
+                <div className="flex justify-between text-[11px]" style={{ color: C.greenDark }}>
+                  <span>&nbsp;&nbsp;Oferta por cantidad</span>
+                  <span>-{formatCLP(i.discount)}</span>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -7794,6 +7835,7 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], setS
           Mostrar como botón de acceso rápido en Vender
         </label>
       )}
+
       <Btn full onClick={submit} icon={Check} disabled={(quickMode && !form.category.trim()) || (showMarginWarning && !confirmedLoss)}>Guardar</Btn>
       {quickAddSupplier && <SupplierModal initial={null} onClose={() => setQuickAddSupplier(false)} onSave={saveQuickSupplier} />}
     </Modal>
@@ -9637,6 +9679,174 @@ function pagaConTarjeta(formaDePago) {
 function recargoPorTarjeta(item, formaDePago) {
   if (!pagaConTarjeta(formaDePago)) return 0;
   return SECCIONES_CON_RECARGO.includes(normalize(item?.category || "")) ? RECARGO_TARJETA : 0;
+}
+
+/* Ofertas por cantidad — "3 jugos por $1.000", acotada a ciertos medios de
+   pago y agrupada por "carpeta" (ver OfertasView y la migración 0030).
+
+   Una carpeta reúne varios productos —distintos sabores, marcas o
+   formatos, cada uno con su propio código de barras— y el cliente completa
+   la cantidad mezclando cualquiera de ellos: si lleva 3 sabores distintos
+   de la misma carpeta, cuenta igual que 3 unidades del mismo. Por eso el
+   cálculo no es por línea de carrito sino por carpeta completa: se juntan
+   las unidades de todas las líneas que pertenecen a ella.
+
+   Una carpeta puede tener varios tramos a la vez (3x$1.000 y también
+   6x$1.800). Cuál conviene usar puede cambiar con la cantidad que se lleve
+   y no siempre es "el tramo más grande que quepa": con tramos poco usuales
+   a veces conviene una combinación que no arranca por el tramo más grande.
+   Por eso no se arma con una regla fija, sino con programación dinámica: el
+   costo mínimo para llevarse "n" unidades es el menor entre pagar una
+   unidad más a su precio normal, o cerrar con cualquier tramo que quepa —
+   igual que el vuelto con el menor número de monedas.
+
+   Como los productos de una misma carpeta pueden tener precios distintos
+   entre sí, las unidades se ordenan de más cara a más barata antes de
+   correr la programación dinámica: así los tramos "consumen" primero las
+   unidades más caras, que es la combinación que más le conviene ahorrar al
+   cliente, y lo que quede sin entrar en ningún tramo se cobra a su propio
+   precio.
+
+   El descuento total de la carpeta se reparte de vuelta a cada línea que
+   aportó, en proporción a lo que esa línea vale a precio normal — la
+   última línea absorbe el resto del redondeo, para que la suma quede
+   exacta sin tener que reconstruir qué unidad exacta entró en qué tramo.
+
+   Solo aplica a productos por unidad (no tiene sentido con productos que
+   se venden por peso), y nunca a una línea de producto temporal ni a una
+   que quedó al precio anterior: esas ya tienen su propia regla de precio y
+   no se mezclan con esta. Se recalcula en vivo con el carrito y la forma
+   de pago, igual que el recargo de tarjeta: la forma de pago se elige al
+   final, y si el cliente cambia de opinión el carrito tiene que cambiar
+   con él — y lo mismo si el administrador edita la carpeta a mitad de una
+   venta ya abierta, porque no queda copiada en la línea. */
+function elegibleParaOferta(item) {
+  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine);
+}
+
+/* productId -> carpeta (galpon.oferta) a la que pertenece, si tiene alguna.
+   Un producto está, como mucho, en una sola carpeta a la vez (lo obliga la
+   base — ver oferta_producto_producto_uniq en la migración 0030). */
+function mapaOfertaPorProducto(offers) {
+  const mapa = new Map();
+  for (const o of offers || []) {
+    for (const productId of o.productIds || []) mapa.set(productId, o);
+  }
+  return mapa;
+}
+
+function tramosDeOferta(oferta, formaDePago) {
+  return (oferta?.tiers || []).filter((t) =>
+    t.quantity >= 2 && t.price > 0 && (t.paymentMethods || []).includes(formaDePago));
+}
+
+/* La mejor combinación de tramos para "unidades" (ya ordenadas de más cara a
+   más barata) más los productos que no entraron en ningún tramo a su propio
+   precio. Devuelve el total a cobrar por el grupo completo. */
+function importeConMejoresTramos(unidadesOrdenadas, tramos) {
+  const n = unidadesOrdenadas.length;
+  const dp = new Array(n + 1).fill(Infinity);
+  dp[0] = 0;
+  for (let i = 1; i <= n; i++) {
+    dp[i] = dp[i - 1] + unidadesOrdenadas[i - 1];
+    for (const t of tramos) {
+      const cantidad = Math.floor(t.quantity);
+      if (cantidad <= i && dp[i - cantidad] + t.price < dp[i]) dp[i] = dp[i - cantidad] + t.price;
+    }
+  }
+  return dp[n];
+}
+
+/* Calcula, para una carpeta y las líneas del carrito que le pertenecen, el
+   total y el descuento que le corresponde a cada línea. Devuelve un Map
+   productId -> { total, discount }. */
+function calcularOfertaDeCarpeta(oferta, lineas, formaDePago) {
+  const tramos = tramosDeOferta(oferta, formaDePago);
+  const conCantidad = lineas.filter((l) => Math.floor(l.qty) > 0);
+  if (!tramos.length || !conCantidad.length) {
+    return new Map(conCantidad.map((l) => [l.productId, { total: (Number(l.price) || 0) * Math.floor(l.qty), discount: 0 }]));
+  }
+
+  const unidades = [];
+  for (const l of conCantidad) {
+    const precio = Number(l.price) || 0;
+    for (let i = 0; i < Math.floor(l.qty); i++) unidades.push(precio);
+  }
+  unidades.sort((a, b) => b - a);
+
+  const totalNormal = unidades.reduce((s, p) => s + p, 0);
+  const totalConOferta = importeConMejoresTramos(unidades, tramos);
+  const descuentoGrupo = Math.max(0, totalNormal - totalConOferta);
+
+  const resultado = new Map();
+  let acumulado = 0;
+  conCantidad.forEach((l, idx) => {
+    const valorNormal = (Number(l.price) || 0) * Math.floor(l.qty);
+    let discount;
+    if (idx === conCantidad.length - 1) {
+      discount = Math.max(0, descuentoGrupo - acumulado);
+    } else {
+      discount = totalNormal > 0 ? Math.round(descuentoGrupo * (valorNormal / totalNormal)) : 0;
+      acumulado += discount;
+    }
+    resultado.set(l.productId, { total: valorNormal - discount, discount });
+  });
+  return resultado;
+}
+
+/* Punto de entrada: recorre el carrito completo, agrupa por carpeta y
+   calcula todo de una vez. Se usa desde un useMemo en POSView (ver
+   preciosOferta) porque depende del carrito entero, no de una sola línea.
+   Devuelve un Map productId -> { total, discount, tiers, offerName }. */
+function calcularPreciosOferta(cart, offers, formaDePago) {
+  const porProducto = mapaOfertaPorProducto(offers);
+  const grupos = new Map(); // oferta.id -> { oferta, lineas: [] }
+  const resultado = new Map();
+
+  for (const item of cart) {
+    if (!elegibleParaOferta(item)) continue;
+    const oferta = porProducto.get(item.productId);
+    if (!oferta) continue;
+    if (!grupos.has(oferta.id)) grupos.set(oferta.id, { oferta, lineas: [] });
+    grupos.get(oferta.id).lineas.push(item);
+  }
+
+  for (const { oferta, lineas } of grupos.values()) {
+    const tiers = tramosDeOferta(oferta, formaDePago);
+    const calc = calcularOfertaDeCarpeta(oferta, lineas, formaDePago);
+    for (const l of lineas) {
+      const info = calc.get(l.productId);
+      resultado.set(l.productId, {
+        total: info ? info.total : (Number(l.price) || 0) * (Number(l.qty) || 0),
+        discount: info ? info.discount : 0,
+        tiers,
+        offerName: oferta.name,
+      });
+    }
+  }
+  return resultado;
+}
+
+/* Accesores usados desde la UI y el checkout — todos reciben el Map que
+   arma calcularPreciosOferta (una vez por carrito, no por línea). */
+function tramosAplicables(item, preciosOferta) {
+  return preciosOferta.get(item?.productId)?.tiers || [];
+}
+
+function descuentoPorOferta(item, preciosOferta) {
+  return preciosOferta.get(item?.productId)?.discount || 0;
+}
+
+/* Total de la línea, con recargo de tarjeta y oferta de cantidad ya
+   incluidos — lo que de verdad corresponde cobrar por esa línea completa. */
+function totalLinea(item, formaDePago, preciosOferta) {
+  const qty = Number(item?.qty) || 0;
+  const recargo = recargoPorTarjeta(item, formaDePago) * qty;
+  if (!elegibleParaOferta(item)) {
+    return (Number(item?.price) || 0) * qty + recargo;
+  }
+  const info = preciosOferta.get(item?.productId);
+  return (info ? info.total : (Number(item?.price) || 0) * qty) + recargo;
 }
 
 /* Buscar un producto por nombre o código, para los desplegables del mesón,
@@ -12327,6 +12537,278 @@ function CategoryModal({ initial, onClose, onSave }) {
       <Field label="Orden (opcional)"><input type="number" value={form.order} onChange={e => set("order", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" /></Field>
       <p className="text-xs mb-4" style={{ color: C.gray }}>El orden decide en qué posición aparece esta sección en las listas — menor número, más arriba.</p>
       <Btn full icon={Check} onClick={submit}>Guardar</Btn>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   OFERTAS POR CANTIDAD, AGRUPADAS EN "CARPETAS" (migración 0030)
+
+   Una carpeta junta varios productos —distintos sabores, marcas o
+   formatos— que comparten los mismos tramos "N por $X": el cliente puede
+   completar la cantidad mezclando cualquiera de los productos de la
+   carpeta, no solo llevando varias unidades de uno solo. Un producto solo
+   puede estar en una carpeta a la vez (lo impone la base). El cálculo del
+   precio en el carrito vive en calcularPreciosOferta, más abajo en el
+   archivo, junto al resto del motor de precios del POS.
+--------------------------------------------------------- */
+function OfertasView({ offers, setOffers, products, toast }) {
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
+
+  const nombreDeProducto = (id) => products.find(p => p.id === id)?.name || "producto eliminado";
+
+  const sorted = useMemo(
+    () => [...offers].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" })),
+    [offers]
+  );
+  const filtered = useMemo(() => {
+    const q = normalize(query);
+    if (!q) return sorted;
+    return sorted.filter(o =>
+      normalize(o.name).includes(q) ||
+      (o.productIds || []).some(id => normalize(nombreDeProducto(id)).includes(q))
+    );
+  }, [sorted, query, products]);
+
+  async function persist(ns) { setOffers(ns); await saveJSON("quantity-offers", ns); }
+
+  async function saveOferta(o) {
+    try {
+      const latest = await loadJSON("quantity-offers", offers);
+      const exists = latest.some(x => x.id === o.id);
+      const ns = exists ? latest.map(x => x.id === o.id ? o : x) : [...latest, o];
+      await persist(ns);
+      setEditing(null);
+      toast(exists ? "Oferta actualizada" : "Oferta creada", "success");
+    } catch (e) {
+      console.error("[ofertas] no se pudo guardar", e);
+      toast(friendlyError(e, "No se pudo guardar la oferta"), "error");
+    }
+  }
+
+  async function deleteOferta(id) {
+    try {
+      const latest = await loadJSON("quantity-offers", offers);
+      await persist(latest.filter(o => o.id !== id));
+      setDeleting(null);
+      toast("Oferta desactivada", "success");
+    } catch (e) {
+      console.error("[ofertas] no se pudo desactivar", e);
+      toast(friendlyError(e, "No se pudo desactivar la oferta"), "error");
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar oferta o producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <Btn icon={Plus} onClick={() => setEditing({})}>Nueva oferta</Btn>
+      </div>
+
+      {filtered.length === 0 ? (
+        <EmptyState icon={Percent} title="Sin ofertas por cantidad" hint='Ej: "3 jugos por $1.000" — junta en una carpeta todos los sabores que participan y define los tramos de cantidad y precio.' />
+      ) : (
+        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {filtered.map(o => (
+              <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium" style={{ color: C.ink }}>{o.name}</div>
+                  <div className="text-xs" style={{ color: C.gray }}>
+                    {(o.productIds || []).length} producto(s) · {(o.tiers || []).length === 0
+                      ? "sin tramos"
+                      : (o.tiers || []).map(t => `${t.quantity}x${formatCLP(t.price)}`).join(" · ")}
+                  </div>
+                  {(o.productIds || []).length > 0 && (
+                    <div className="text-[11px] truncate" style={{ color: C.gray }}>
+                      {(o.productIds || []).map(nombreDeProducto).join(", ")}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button onClick={() => setEditing(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
+                  <button onClick={() => setDeleting(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {editing !== null && (
+        <OfertaModal
+          initial={editing.id ? editing : null}
+          offers={offers}
+          products={products}
+          onClose={() => setEditing(null)}
+          onSave={saveOferta}
+        />
+      )}
+      {deleting && (
+        <Modal title="Desactivar oferta" onClose={() => setDeleting(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>
+            ¿Desactivar <strong>{deleting.name}</strong>? Deja de aplicarse en el mesón; los productos quedan libres para entrar a otra carpeta.
+          </p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteOferta(deleting.id)}>Desactivar</Btn></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function OfertaModal({ initial, offers, products, onClose, onSave }) {
+  const [form, setForm] = useState({
+    id: initial?.id || uid("ofr"),
+    name: initial?.name || "",
+    productIds: initial?.productIds || [],
+    tiers: initial?.tiers || [],
+  });
+  const [productQuery, setProductQuery] = useState("");
+  function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+
+  // Qué carpeta (si alguna, y no esta misma) ya tiene reclamado cada producto —
+  // un producto solo puede estar en una a la vez, así que acá se avisa en vez
+  // de dejar que el guardado lo rechace sin explicar por qué.
+  const otraCarpetaDe = useMemo(() => {
+    const mapa = new Map();
+    for (const o of offers || []) {
+      if (o.id === form.id) continue;
+      for (const pid of o.productIds || []) mapa.set(pid, o.name);
+    }
+    return mapa;
+  }, [offers, form.id]);
+
+  const elegibles = useMemo(
+    () => products.filter(p => p.unitType !== "peso"),
+    [products]
+  );
+  const productosFiltrados = useMemo(() => {
+    const q = normalize(productQuery);
+    if (!q) return elegibles;
+    return elegibles.filter(p => normalize(p.name).includes(q) || normalize(p.barcode || "").includes(q));
+  }, [elegibles, productQuery]);
+
+  function alternarProducto(id) {
+    setForm(f => ({
+      ...f,
+      productIds: f.productIds.includes(id) ? f.productIds.filter(x => x !== id) : [...f.productIds, id],
+    }));
+  }
+
+  function agregarTramo() {
+    set("tiers", [...form.tiers, { quantity: "", price: "", paymentMethods: ["Efectivo", "Transferencia"] }]);
+  }
+  function cambiarTramo(idx, patch) {
+    const copia = [...form.tiers];
+    copia[idx] = { ...copia[idx], ...patch };
+    set("tiers", copia);
+  }
+  function quitarTramo(idx) { set("tiers", form.tiers.filter((_, i) => i !== idx)); }
+
+  function submit() {
+    if (!form.name.trim()) return;
+    if (form.productIds.length === 0) return;
+    onSave({
+      ...form,
+      name: form.name.trim(),
+      // Igual que antes: un tramo a medio llenar (se agregó la fila y no se
+      // alcanzó a poner el precio) se descarta acá, no queda guardado a medias.
+      tiers: form.tiers.filter(t => Number(t.quantity) >= 2 && Number(t.price) > 0),
+    });
+  }
+
+  return (
+    <Modal title={initial?.id ? "Editar oferta" : "Nueva oferta"} onClose={onClose} wide>
+      <Field label="Nombre de la oferta"><input autoFocus value={form.name} onChange={e => set("name", e.target.value)} className={inputCls} style={inputStyle()} placeholder='Ej. "Jugos tetrapack 3x$1.000"' /></Field>
+
+      <div className="mb-4">
+        <span className="text-sm font-semibold block mb-1" style={{ color: C.ink }}>Productos de la carpeta</span>
+        <p className="text-xs mb-2" style={{ color: C.gray }}>
+          El cliente completa la cantidad con cualquier combinación de estos productos — no hace falta que lleve varias unidades del mismo.
+        </p>
+        <div className="relative mb-2">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={productQuery} onChange={e => setProductQuery(e.target.value)} placeholder="Buscar producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <div className="rounded-lg overflow-y-auto max-h-56" style={{ border: `1px solid ${C.paperLine}` }}>
+          {productosFiltrados.length === 0 ? (
+            <p className="text-xs p-3" style={{ color: C.gray }}>Sin productos que calcen con la búsqueda.</p>
+          ) : productosFiltrados.map(p => {
+            const yaEnOtra = otraCarpetaDe.get(p.id);
+            const marcado = form.productIds.includes(p.id);
+            return (
+              <label key={p.id} className={`flex items-center gap-2 px-3 py-2 text-sm border-b last:border-b-0 ${yaEnOtra ? "opacity-50" : ""}`} style={{ borderColor: C.paperLine, color: C.ink }}>
+                <input type="checkbox" checked={marcado} disabled={!!yaEnOtra} onChange={() => alternarProducto(p.id)} />
+                <span className="flex-1 truncate">{p.name}</span>
+                {yaEnOtra && <span className="text-[11px] flex-shrink-0" style={{ color: C.gray }}>en "{yaEnOtra}"</span>}
+              </label>
+            );
+          })}
+        </div>
+        {form.productIds.length === 0 && (
+          <p className="text-xs mt-1" style={{ color: C.rust }}>Elige al menos un producto.</p>
+        )}
+      </div>
+
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-semibold" style={{ color: C.ink }}>Tramos de cantidad</span>
+          <button type="button" onClick={agregarTramo} className="text-xs font-medium underline" style={{ color: C.green }}>+ Agregar tramo</button>
+        </div>
+        {form.tiers.length === 0 && (
+          <p className="text-xs mb-1" style={{ color: C.gray }}>Sin tramos todavía. Ej: 3 unidades por $1.000.</p>
+        )}
+        {form.tiers.map((t, idx) => (
+          <div key={idx} className="rounded-lg p-2.5 mb-2" style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}>
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="number" min="2" value={t.quantity}
+                onChange={e => cambiarTramo(idx, { quantity: e.target.value })}
+                className={`${inputCls} font-mono w-20`} style={inputStyle()} placeholder="3"
+                aria-label="Cantidad del tramo"
+              />
+              <span className="text-xs whitespace-nowrap" style={{ color: C.gray }}>unidades por</span>
+              <input
+                type="number" min="1" value={t.price}
+                onChange={e => cambiarTramo(idx, { price: e.target.value })}
+                className={`${inputCls} font-mono flex-1`} style={inputStyle()} placeholder="1000"
+                aria-label="Precio del tramo"
+              />
+              <button type="button" onClick={() => quitarTramo(idx)} aria-label="Quitar tramo" className="flex-shrink-0" style={{ color: C.rust }}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {PAYMENT_METHODS.map(m => (
+                <label key={m} className="flex items-center gap-1 text-xs" style={{ color: C.ink }}>
+                  <input
+                    type="checkbox"
+                    checked={(t.paymentMethods || []).includes(m)}
+                    onChange={e => cambiarTramo(idx, {
+                      paymentMethods: e.target.checked
+                        ? [...(t.paymentMethods || []), m]
+                        : (t.paymentMethods || []).filter(x => x !== m),
+                    })}
+                  />
+                  {m}
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        {form.tiers.length > 0 && (
+          <p className="text-[11px]" style={{ color: C.gray }}>
+            Una carpeta puede tener varios tramos a la vez (ej. 3x$1.000 y 6x$1.800): en el carrito se aplica sola la combinación que le sale más barata al cliente.
+          </p>
+        )}
+      </div>
+
+      <Btn full onClick={submit} icon={Check} disabled={!form.name.trim() || form.productIds.length === 0}>Guardar</Btn>
     </Modal>
   );
 }
@@ -16669,6 +17151,7 @@ const GRUPOS = {
       { id: "conteos", label: "Conteos", icon: ClipboardList },
       { id: "transformar", label: "Transformar", icon: Blend },
       { id: "categorias", label: "Categorías", icon: Tags },
+      { id: "ofertas", label: "Ofertas", icon: Percent },
       { id: "revisar", label: "Productos", icon: ClipboardCheck },
     ]},
     { titulo: "Administración", items: [
@@ -16869,6 +17352,7 @@ export default function SistemaVentas() {
   const [shiftsLog, setShiftsLog] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [offers, setOffers] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [customerLedger, setCustomerLedger] = useState([]);
   const [supplierLedger, setSupplierLedger] = useState([]);
@@ -16999,10 +17483,11 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        const [s, p, cat, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
+        const [s, p, cat, ofr, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
           loadJSON("product-categories", []),
+          loadJSON("quantity-offers", []),
           loadJSON("sales-log", []),
           loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
@@ -17027,7 +17512,7 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setCategories(cat); setSales(sl); setMovements(mv);
+        setProducts(p); setCategories(cat); setOffers(ofr); setSales(sl); setMovements(mv);
         setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
         setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
         setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
@@ -17068,6 +17553,7 @@ export default function SistemaVentas() {
         // productos que cambiaron desde la última vuelta, y acá se fusionan.
         loadJSONStrict("products-catalog", reciente),
         loadJSONStrict("product-categories"),
+        loadJSONStrict("quantity-offers"),
         loadJSONStrict("sales-log", reciente),
         loadJSONStrict("movements-log", reciente),
         loadJSONStrict("open-shifts"),
@@ -17088,13 +17574,14 @@ export default function SistemaVentas() {
       // un corte de red momentáneo), esa pieza en particular simplemente se deja
       // como estaba — nunca se reemplaza el catálogo, las ventas, etc. por una
       // lista vacía solo porque la sincronización tuvo un tropiezo puntual.
-      const [s, p, cat, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
+      const [s, p, cat, ofr, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
       if (s) setSettings(s);
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
       // así una lectura vacía puntual nunca borra lo que ya se veía en pantalla.
       if (p !== undefined) setProducts(prev => fusionarProductos(prev, p));
       if (cat !== undefined) setCategories(prev => (cat.length > 0 || prev.length === 0) ? cat : prev);
+      if (ofr !== undefined) setOffers(prev => (ofr.length > 0 || prev.length === 0) ? ofr : prev);
       if (os !== undefined) setOpenShifts(prev => (os.length > 0 || prev.length === 0) ? os : prev);
       if (sup !== undefined) setSuppliers(prev => (sup.length > 0 || prev.length === 0) ? sup : prev);
       if (cu !== undefined) setCustomers(prev => (cu.length > 0 || prev.length === 0) ? cu : prev);
@@ -17417,7 +17904,7 @@ export default function SistemaVentas() {
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
 
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
+        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
@@ -17427,6 +17914,7 @@ export default function SistemaVentas() {
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} products={products} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
