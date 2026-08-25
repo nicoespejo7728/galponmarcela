@@ -6474,6 +6474,22 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       .filter(i => i.qty > 0));
   }
 
+  /* Solo las líneas de venta manual dejan tocar el precio desde el carrito
+     —no hay ficha de producto detrás que lo fije—; en cualquier otro
+     producto el precio no se edita acá, solo la cantidad. Mismo patrón que
+     setUnitQty: se deja vacío mientras se escribe para poder borrar y
+     corregir sin que salte un 0 a mitad de camino. */
+  function setManualPrice(productId, texto) {
+    setCart(prev => prev.map(i => {
+      if (i.productId !== productId || !i.isManual) return i;
+      if (texto === "") return { ...i, priceTexto: "" };
+      return { ...i, price: Math.max(0, Number(texto) || 0), priceTexto: undefined };
+    }));
+  }
+  function confirmarManualPrice(productId) {
+    setCart(prev => prev.map(i => (i.productId === productId ? { ...i, priceTexto: undefined } : i)));
+  }
+
   function setWeightQty(productId, newQty) {
     setCart(prev => prev.map(i => {
       if (i.productId !== productId) return i;
@@ -6935,7 +6951,22 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                         </span>
                       )}
                     </div>
-                    {i.isOldPriceLine ? (
+                    {i.isManual ? (
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="text-[11px]" style={{ color: C.gray }}>precio c/u</span>
+                        <input
+                          type="number" inputMode="numeric" min="0" step="1"
+                          value={i.priceTexto !== undefined ? i.priceTexto : i.price}
+                          onChange={e => setManualPrice(i.productId, e.target.value)}
+                          onBlur={() => confirmarManualPrice(i.productId)}
+                          onKeyDown={e => { if (e.key === "Enter") { confirmarManualPrice(i.productId); e.target.blur(); } }}
+                          onFocus={e => e.target.select()}
+                          aria-label={`Precio de ${i.name}`}
+                          className="w-24 text-sm font-mono font-bold rounded-md px-1.5 py-1 outline-none"
+                          style={{ color: C.brassText, background: C.brassSoft, border: `1.5px solid ${C.brass}` }}
+                        />
+                      </div>
+                    ) : i.isOldPriceLine ? (
                       <div className="text-xs font-mono mt-0.5" style={{ color: "#8a6a1f" }}>
                         {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
                       </div>
