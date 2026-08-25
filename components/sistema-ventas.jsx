@@ -6152,7 +6152,7 @@ function WeightPromptModal({ product, onClose, onConfirm }) {
   );
 }
 
-function QuickCatalogPanel({ products, onAdd }) {
+function QuickCatalogPanel({ products, onAdd, onVentaManual }) {
   const [activeCategory, setActiveCategory] = useState("Todos");
   // Muestra los productos marcados explícitamente como "acceso rápido"; también
   // incluye, por compatibilidad, los productos antiguos sin código de barras
@@ -6185,6 +6185,26 @@ function QuickCatalogPanel({ products, onAdd }) {
     return [...hay, ...noHay];
   }, [uncoded, activeCategory]);
 
+  /* La ficha de "venta manual" —precio puesto a mano, sin producto real
+     detrás— va SIEMPRE primera en el tablero, sin importar la categoría
+     elegida: no es un producto más, es un atajo aparte. Función temporal
+     (ver VENTA_MANUAL_DISPONIBLE_HASTA en POSView) — onVentaManual llega
+     nulo pasada esa fecha y la ficha deja de aparecer sola. */
+  const fichaVentaManual = onVentaManual && (
+    <button
+      key="venta-manual" onClick={onVentaManual}
+      className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] active:scale-[.97] transition hover:shadow-md"
+      style={{ background: C.brassSoft, border: `1.5px dashed ${C.brass}` }}
+    >
+      <span className="flex items-center gap-1.5 text-sm font-semibold leading-snug" style={{ color: C.brassText }}>
+        <Banknote size={16} /> Venta manual
+      </span>
+      <span className="text-xs" style={{ color: C.brassText, opacity: 0.85 }}>
+        Precio a mano, sin código ni ficha
+      </span>
+    </button>
+  );
+
   return (
     <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
       <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
@@ -6195,7 +6215,14 @@ function QuickCatalogPanel({ products, onAdd }) {
         </span>
       </header>
       {uncoded.length === 0 ? (
-        <p className="text-sm p-6 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
+        fichaVentaManual ? (
+          <div className="p-4">
+            <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5">{fichaVentaManual}</div>
+            <p className="text-sm mt-3 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
+          </div>
+        ) : (
+          <p className="text-sm p-6 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
+        )
       ) : (
         <>
           {/* Las categorías van arriba, en una fila propia: es el filtro del
@@ -6215,6 +6242,7 @@ function QuickCatalogPanel({ products, onAdd }) {
           {/* Botonera de productos. Las fichas son grandes a propósito: se usan
               con el dedo o de un vistazo, mientras el cliente espera. */}
           <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5 p-4 overflow-y-auto md:max-h-[calc(100vh-21rem)]">
+            {fichaVentaManual}
             {filtered.map(p => {
               const outOfStock = p.stock <= 0;
               return (
@@ -6237,7 +6265,7 @@ function QuickCatalogPanel({ products, onAdd }) {
               </button>
               );
             })}
-            {filtered.length === 0 && <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta categoría.</p>}
+            {filtered.length === 0 && !fichaVentaManual && <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta categoría.</p>}
           </div>
         </>
       )}
@@ -6854,14 +6882,6 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             </div>
           </div>
         )}
-        {ventaManualDisponible && (
-          <div className="mt-2 text-right">
-            <button type="button" onClick={() => setVentaManualOpen(true)}
-              className="text-xs underline underline-offset-2" style={{ color: C.gray }}>
-              ¿Vendes algo sin código ni ficha? Pon el precio a mano
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Dos zonas de trabajo y nada más: a la izquierda de dónde saco los
@@ -6870,7 +6890,8 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           mientras se carga la venta. */}
       <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px] lg:grid-cols-[minmax(0,1fr)_400px] items-start">
         <div className="order-2 md:order-1 min-w-0">
-          <QuickCatalogPanel products={products} onAdd={addToCart} />
+          <QuickCatalogPanel products={products} onAdd={addToCart}
+            onVentaManual={ventaManualDisponible ? () => setVentaManualOpen(true) : null} />
         </div>
 
         <section className="order-1 md:order-2 lg:sticky lg:top-4 min-w-0 rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
