@@ -6152,7 +6152,7 @@ function WeightPromptModal({ product, onClose, onConfirm }) {
   );
 }
 
-function QuickCatalogPanel({ products, onAdd, onProductoTemporal }) {
+function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) {
   const [activeCategory, setActiveCategory] = useState("Todos");
   // Muestra los productos marcados explícitamente como "acceso rápido"; también
   // incluye, por compatibilidad, los productos antiguos sin código de barras
@@ -6248,19 +6248,28 @@ function QuickCatalogPanel({ products, onAdd, onProductoTemporal }) {
             {fichaProductoTemporal}
             {filtered.map(p => {
               const outOfStock = p.stock <= 0;
+              const clearance = liquidacionDeProducto(p.id, clearances);
               return (
               <button
                 key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
                 className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
-                style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
+                style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
               >
-                <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>{p.name}</span>
+                <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>
+                  {p.name}
+                  {clearance && !outOfStock && (
+                    <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
+                  )}
+                </span>
                 <span className="flex items-end justify-between gap-1">
                   {outOfStock ? (
                     <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
                   ) : (
-                    <span className="text-base font-mono font-bold leading-none" style={{ color: C.greenDark }}>
-                      {formatCLP(p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+                    <span className="flex items-baseline gap-1.5">
+                      {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+                      <span className="text-base font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
+                        {formatCLP(clearance ? clearance.price : p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+                      </span>
                     </span>
                   )}
                   {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
@@ -6342,7 +6351,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
    momento se necesita de nuevo, basta con mover esta fecha hacia adelante. */
 const PRODUCTO_TEMPORAL_DISPONIBLE_HASTA = "2026-08-31T23:59:59";
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, clearances, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -6420,6 +6429,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       return;
     }
     setNotFound(null);
+    // Liquidación activa de este producto (migración 0031), si tiene: un
+    // precio rebajado puntual que el administrador dejó corriendo desde
+    // "Ofertas" para darle salida a stock parado. Tiene prioridad sobre el
+    // precio anterior (ver oldPriceInfo más abajo): si el administrador ya
+    // decidió el precio nuevo a mano, no corresponde aplicarle encima la
+    // regla de "se respeta el precio viejo hasta agotar ese stock".
+    const clearance = liquidacionDeProducto(product.id, clearances);
     setCart(prev => {
       const existing = prev.find(i => i.productId === product.id);
       if (product.unitType === "peso") {
@@ -6428,7 +6444,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         const already = existing ? existing.qty : 0;
         if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
         if (existing) return prev.map(i => i.productId === product.id ? { ...i, qty: Number((i.qty + addQty).toFixed(3)) } : i);
-        return [...prev, { productId: product.id, barcode: product.barcode, name: product.name, price: product.price, cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso", category: product.category }];
+        return [...prev, {
+          productId: product.id, barcode: product.barcode, name: product.name,
+          price: clearance ? clearance.price : product.price,
+          cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso", category: product.category,
+          isLiquidacion: !!clearance,
+        }];
       }
       if (existing) {
         if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
@@ -6442,15 +6463,16 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // cantidad que se termine llevando supera lo que en rigor correspondía
       // al precio viejo, ese excedente queda registrado en checkout() como
       // ganancia extra, no como error ni como pérdida.
-      const oldPriceInfo = unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts, settings);
+      const oldPriceInfo = clearance ? null : unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts, settings);
       return [...prev, {
         productId: product.id, barcode: product.barcode, name: product.name,
-        price: oldPriceInfo ? oldPriceInfo.oldPrice : product.price,
+        price: clearance ? clearance.price : (oldPriceInfo ? oldPriceInfo.oldPrice : product.price),
         cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
         category: product.category,
         isOldPriceLine: !!oldPriceInfo,
         maxOldPriceQty: oldPriceInfo?.qty ?? 0,
         newPrice: oldPriceInfo?.newPrice ?? product.price,
+        isLiquidacion: !!clearance,
       }];
     });
   }
@@ -6897,15 +6919,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             />
             {nameMatches.length > 0 && (
               <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-                {nameMatches.map(p => (
+                {nameMatches.map(p => {
+                  const clearance = liquidacionDeProducto(p.id, clearances);
+                  return (
                   <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                    <span className="truncate" style={{ color: C.ink }}>{p.name}</span>
+                    <span className="truncate" style={{ color: C.ink }}>{p.name}{clearance && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>liquidación</span>}</span>
                     <span className="flex items-center gap-2 flex-shrink-0">
                       <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}{p.unitType === "peso" ? " kg" : ""}</span>
-                      <span className="font-semibold font-mono" style={{ color: C.greenDark }}>{formatCLP(p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
+                      {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+                      <span className="font-semibold font-mono" style={{ color: clearance ? C.rust : C.greenDark }}>{formatCLP(clearance ? clearance.price : p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
                     </span>
                   </button>
-                ))}
+                  );
+                })}
                 <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
               </div>
             )}
@@ -6936,7 +6962,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           mientras se carga la venta. */}
       <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px] lg:grid-cols-[minmax(0,1fr)_400px] items-start">
         <div className="order-2 md:order-1 min-w-0">
-          <QuickCatalogPanel products={products} onAdd={addToCart}
+          <QuickCatalogPanel products={products} clearances={clearances} onAdd={addToCart}
             onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
         </div>
 
@@ -6983,6 +7009,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       {!i.isTemporal && tramosAplicables(i, preciosOferta).length > 0 && (
                         <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.greenSoft, color: C.greenDark }}>
                           oferta
+                        </span>
+                      )}
+                      {i.isLiquidacion && (
+                        <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>
+                          liquidación
                         </span>
                       )}
                     </div>
@@ -9721,7 +9752,12 @@ function recargoPorTarjeta(item, formaDePago) {
    con él — y lo mismo si el administrador edita la carpeta a mitad de una
    venta ya abierta, porque no queda copiada en la línea. */
 function elegibleParaOferta(item) {
-  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine);
+  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine || item?.isLiquidacion);
+}
+
+/* Liquidación activa de un producto (migración 0031), si tiene. */
+function liquidacionDeProducto(productId, clearances) {
+  return (clearances || []).find((c) => c.productId === productId) || null;
 }
 
 /* productId -> carpeta (galpon.oferta) a la que pertenece, si tiene alguna.
@@ -12552,13 +12588,24 @@ function CategoryModal({ initial, onClose, onSave }) {
    precio en el carrito vive en calcularPreciosOferta, más abajo en el
    archivo, junto al resto del motor de precios del POS.
 --------------------------------------------------------- */
-function OfertasView({ offers, setOffers, products, toast }) {
+/* Sin ventas en este umbral de días (y con stock en la mano) un producto
+   entra a la pestaña "Recomendados" de Ofertas — es la señal de "stock
+   estancado" que pidió Fran para darle salida con una oferta o una
+   liquidación. */
+const UMBRAL_DIAS_SIN_VENTA = 60;
+
+function OfertasView({ offers, setOffers, clearances, setClearances, products, sales, toast }) {
+  const [subTab, setSubTab] = useState("ofertas");
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [editingLiq, setEditingLiq] = useState(null);
+  const [deletingLiq, setDeletingLiq] = useState(null);
 
   const nombreDeProducto = (id) => products.find(p => p.id === id)?.name || "producto eliminado";
+  const productoDe = (id) => products.find(p => p.id === id) || null;
 
+  /* ---- Ofertas por cantidad (carpetas) ---- */
   const sorted = useMemo(
     () => [...offers].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" })),
     [offers]
@@ -12600,43 +12647,198 @@ function OfertasView({ offers, setOffers, products, toast }) {
     }
   }
 
+  /* ---- Liquidaciones ---- */
+  const sortedLiq = useMemo(
+    () => [...clearances].sort((a, b) => normalize(nombreDeProducto(a.productId)).localeCompare(normalize(nombreDeProducto(b.productId)), "es")),
+    [clearances, products]
+  );
+  const filteredLiq = useMemo(() => {
+    const q = normalize(query);
+    if (!q) return sortedLiq;
+    return sortedLiq.filter(l => normalize(nombreDeProducto(l.productId)).includes(q));
+  }, [sortedLiq, query, products]);
+
+  async function persistLiq(ns) { setClearances(ns); await saveJSON("price-clearance", ns); }
+
+  async function saveLiquidacion(l) {
+    try {
+      const latest = await loadJSON("price-clearance", clearances);
+      const exists = latest.some(x => x.id === l.id);
+      const ns = exists ? latest.map(x => x.id === l.id ? l : x) : [...latest, l];
+      await persistLiq(ns);
+      setEditingLiq(null);
+      toast(exists ? "Liquidación actualizada" : "Liquidación creada", "success");
+    } catch (e) {
+      console.error("[liquidaciones] no se pudo guardar", e);
+      toast(friendlyError(e, "No se pudo guardar la liquidación"), "error");
+    }
+  }
+
+  async function deleteLiquidacion(id) {
+    try {
+      const latest = await loadJSON("price-clearance", clearances);
+      await persistLiq(latest.filter(l => l.id !== id));
+      setDeletingLiq(null);
+      toast("Liquidación desactivada", "success");
+    } catch (e) {
+      console.error("[liquidaciones] no se pudo desactivar", e);
+      toast(friendlyError(e, "No se pudo desactivar la liquidación"), "error");
+    }
+  }
+
+  /* ---- Recomendados: poco movimiento o stock estancado ---- */
+  const recomendados = useMemo(() => {
+    const ultimaVenta = new Map();
+    for (const s of sales || []) {
+      for (const it of s.items || []) {
+        if (!it.productId) continue;
+        const previa = ultimaVenta.get(it.productId);
+        if (!previa || s.date > previa) ultimaVenta.set(it.productId, s.date);
+      }
+    }
+    const yaCubiertos = new Set([
+      ...offers.flatMap(o => o.productIds || []),
+      ...clearances.map(c => c.productId),
+    ]);
+    return products
+      .filter(p => (Number(p.stock) || 0) > 0 && !yaCubiertos.has(p.id))
+      .map(p => {
+        const ultima = ultimaVenta.get(p.id) || null;
+        const dias = ultima ? (Date.now() - new Date(ultima).getTime()) / 86400000 : Infinity;
+        return { product: p, ultimaVenta: ultima, dias };
+      })
+      .filter(x => x.dias >= UMBRAL_DIAS_SIN_VENTA)
+      .sort((a, b) => b.dias - a.dias);
+  }, [products, sales, offers, clearances]);
+
+  const TABS_OFERTAS = [
+    { id: "ofertas", label: "Ofertas por cantidad" },
+    { id: "liquidaciones", label: "Liquidaciones" },
+    { id: "recomendados", label: `Recomendados${recomendados.length > 0 ? ` (${recomendados.length})` : ""}` },
+  ];
+
   return (
     <div>
-      <div className="flex flex-wrap gap-2 mb-3">
-        <div className="relative flex-1 min-w-[200px]">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar oferta o producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
-        </div>
-        <Btn icon={Plus} onClick={() => setEditing({})}>Nueva oferta</Btn>
+      <div className="flex gap-2 overflow-x-auto mb-4">
+        {TABS_OFERTAS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => { setSubTab(t.id); setQuery(""); }}
+            className="px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap flex-shrink-0 transition"
+            style={subTab === t.id
+              ? { background: C.green, color: "#fff" }
+              : { background: "#fff", color: C.inkSoft, border: `1.5px solid ${C.paperLine}` }}
+          >{t.label}</button>
+        ))}
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon={Percent} title="Sin ofertas por cantidad" hint='Ej: "3 jugos por $1.000" — junta en una carpeta todos los sabores que participan y define los tramos de cantidad y precio.' />
-      ) : (
-        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div className="divide-y" style={{ borderColor: C.paperLine }}>
-            {filtered.map(o => (
-              <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium" style={{ color: C.ink }}>{o.name}</div>
-                  <div className="text-xs" style={{ color: C.gray }}>
-                    {(o.productIds || []).length} producto(s) · {(o.tiers || []).length === 0
-                      ? "sin tramos"
-                      : (o.tiers || []).map(t => `${t.quantity}x${formatCLP(t.price)}`).join(" · ")}
-                  </div>
-                  {(o.productIds || []).length > 0 && (
-                    <div className="text-[11px] truncate" style={{ color: C.gray }}>
-                      {(o.productIds || []).map(nombreDeProducto).join(", ")}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <button onClick={() => setEditing(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
-                  <button onClick={() => setDeleting(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
-                </div>
-              </div>
-            ))}
+      {subTab === "ofertas" && (
+        <div>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+              <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar oferta o producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+            </div>
+            <Btn icon={Plus} onClick={() => setEditing({})}>Nueva oferta</Btn>
           </div>
+
+          {filtered.length === 0 ? (
+            <EmptyState icon={Percent} title="Sin ofertas por cantidad" hint='Ej: "3 jugos por $1.000" — junta en una carpeta todos los sabores que participan y define los tramos de cantidad y precio.' />
+          ) : (
+            <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {filtered.map(o => (
+                  <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium" style={{ color: C.ink }}>{o.name}</div>
+                      <div className="text-xs" style={{ color: C.gray }}>
+                        {(o.productIds || []).length} producto(s) · {(o.tiers || []).length === 0
+                          ? "sin tramos"
+                          : (o.tiers || []).map(t => `${t.quantity}x${formatCLP(t.price)}`).join(" · ")}
+                      </div>
+                      {(o.productIds || []).length > 0 && (
+                        <div className="text-[11px] truncate" style={{ color: C.gray }}>
+                          {(o.productIds || []).map(nombreDeProducto).join(", ")}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <button onClick={() => setEditing(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
+                      <button onClick={() => setDeleting(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {subTab === "liquidaciones" && (
+        <div>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+              <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+            </div>
+            <Btn icon={Plus} onClick={() => setEditingLiq({})}>Nueva liquidación</Btn>
+          </div>
+
+          {filteredLiq.length === 0 ? (
+            <EmptyState icon={PackageMinus} title="Sin liquidaciones activas" hint='Baja el precio de un producto puntual por un tiempo — útil para darle salida a stock que no se está moviendo. No puede quedar bajo el costo del producto.' />
+          ) : (
+            <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {filteredLiq.map(l => {
+                  const p = productoDe(l.productId);
+                  return (
+                    <div key={l.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium" style={{ color: C.ink }}>{nombreDeProducto(l.productId)}</div>
+                        <div className="text-xs" style={{ color: C.gray }}>
+                          {p && <span className="line-through mr-1.5">{formatCLP(p.price)}</span>}
+                          <span className="font-semibold" style={{ color: C.rust }}>{formatCLP(l.price)}</span>
+                          {l.endDate && ` · hasta ${new Date(`${l.endDate}T00:00:00`).toLocaleDateString("es-CL")}`}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <button onClick={() => setEditingLiq(l)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
+                        <button onClick={() => setDeletingLiq(l)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {subTab === "recomendados" && (
+        <div>
+          <p className="text-xs mb-3" style={{ color: C.gray }}>
+            Productos con stock en la mano y sin ventas en los últimos {UMBRAL_DIAS_SIN_VENTA} días — candidatos para una oferta o una liquidación que les dé movimiento. No se muestran los que ya están en una oferta o liquidación activa.
+          </p>
+          {recomendados.length === 0 ? (
+            <EmptyState icon={PackageMinus} title="Nada estancado por ahora" hint={`Todos los productos con stock se han vendido en los últimos ${UMBRAL_DIAS_SIN_VENTA} días, o ya están en una oferta o liquidación.`} />
+          ) : (
+            <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {recomendados.map(({ product: p, dias }) => (
+                  <div key={p.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+                      <div className="text-xs" style={{ color: C.gray }}>
+                        stock {p.stock}{p.unitType === "peso" ? " kg" : ""} · {formatCLP(p.price)} ·{" "}
+                        {dias === Infinity ? "nunca se ha vendido" : `sin ventas hace ${Math.floor(dias)} días`}
+                      </div>
+                    </div>
+                    <Btn size="sm" variant="ghost" onClick={() => setEditingLiq({ productId: p.id })}>Crear liquidación</Btn>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -12655,6 +12857,25 @@ function OfertasView({ offers, setOffers, products, toast }) {
             ¿Desactivar <strong>{deleting.name}</strong>? Deja de aplicarse en el mesón; los productos quedan libres para entrar a otra carpeta.
           </p>
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteOferta(deleting.id)}>Desactivar</Btn></div>
+        </Modal>
+      )}
+
+      {editingLiq !== null && (
+        <LiquidacionModal
+          initial={editingLiq.id ? editingLiq : null}
+          preselectedProductId={editingLiq.productId || null}
+          clearances={clearances}
+          products={products}
+          onClose={() => setEditingLiq(null)}
+          onSave={saveLiquidacion}
+        />
+      )}
+      {deletingLiq && (
+        <Modal title="Desactivar liquidación" onClose={() => setDeletingLiq(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>
+            ¿Desactivar la liquidación de <strong>{nombreDeProducto(deletingLiq.productId)}</strong>? Vuelve a cobrarse a su precio normal.
+          </p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeletingLiq(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteLiquidacion(deletingLiq.id)}>Desactivar</Btn></div>
         </Modal>
       )}
     </div>
@@ -12809,6 +13030,124 @@ function OfertaModal({ initial, offers, products, onClose, onSave }) {
       </div>
 
       <Btn full onClick={submit} icon={Check} disabled={!form.name.trim() || form.productIds.length === 0}>Guardar</Btn>
+    </Modal>
+  );
+}
+
+/* Liquidación de precio de un solo producto (migración 0031). A diferencia
+   de OfertaModal, no hay tramos ni carpeta: un producto, un precio nuevo, y
+   opcionalmente hasta cuándo corre. La única regla dura es no vender bajo
+   el costo — no se bloquea, se avisa, y quien administra confirma si igual
+   quiere dejarlo así (por ejemplo, para no perder lo poco que queda de un
+   producto que ya no se va a reponer). */
+function LiquidacionModal({ initial, preselectedProductId, clearances, products, onClose, onSave }) {
+  const [productId, setProductId] = useState(initial?.productId || preselectedProductId || "");
+  const [productQuery, setProductQuery] = useState("");
+  const [price, setPrice] = useState(initial?.price ?? "");
+  const [endDate, setEndDate] = useState(initial?.endDate || "");
+  const [confirmedLoss, setConfirmedLoss] = useState(false);
+
+  const product = products.find(p => p.id === productId) || null;
+
+  // Qué productos ya tienen otra liquidación activa (para no dejar elegir
+  // uno que ya la tiene — la base lo rechazaría igual, pero avisar antes es
+  // más claro que un error después de llenar todo el formulario).
+  const otraLiquidacionDe = useMemo(() => {
+    const set = new Set();
+    for (const l of clearances || []) {
+      if (l.id === initial?.id) continue;
+      set.add(l.productId);
+    }
+    return set;
+  }, [clearances, initial]);
+
+  const elegibles = useMemo(() => {
+    const q = normalize(productQuery);
+    if (!q) return products;
+    return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode || "").includes(q));
+  }, [products, productQuery]);
+
+  const cost = Number(product?.cost) || 0;
+  const priceNum = Number(price) || 0;
+  const belowCost = !!product && priceNum > 0 && priceNum < cost;
+
+  function submit() {
+    if (!productId || !(priceNum > 0)) return;
+    if (belowCost && !confirmedLoss) return;
+    onSave({
+      id: initial?.id || uid("liq"),
+      productId,
+      price: priceNum,
+      endDate: endDate || null,
+    });
+  }
+
+  return (
+    <Modal title={initial?.id ? "Editar liquidación" : "Nueva liquidación"} onClose={onClose}>
+      <div className="mb-4">
+        <span className="text-sm font-semibold block mb-1" style={{ color: C.ink }}>Producto</span>
+        {productId ? (
+          <div className="flex items-center justify-between rounded-lg px-3 py-2" style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}>
+            <span className="text-sm truncate" style={{ color: C.ink }}>{product?.name || "producto eliminado"}</span>
+            {!initial?.id && <button type="button" onClick={() => setProductId("")} className="text-xs underline flex-shrink-0" style={{ color: C.gray }}>Cambiar</button>}
+          </div>
+        ) : (
+          <>
+            <div className="relative mb-2">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+              <input autoFocus value={productQuery} onChange={e => setProductQuery(e.target.value)} placeholder="Buscar producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+            </div>
+            <div className="rounded-lg overflow-y-auto max-h-56" style={{ border: `1px solid ${C.paperLine}` }}>
+              {elegibles.length === 0 ? (
+                <p className="text-xs p-3" style={{ color: C.gray }}>Sin productos que calcen con la búsqueda.</p>
+              ) : elegibles.slice(0, 60).map(p => {
+                const yaTiene = otraLiquidacionDe.has(p.id);
+                return (
+                  <button
+                    type="button" key={p.id} disabled={yaTiene} onClick={() => setProductId(p.id)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left border-b last:border-b-0 disabled:opacity-50"
+                    style={{ borderColor: C.paperLine, color: C.ink }}
+                  >
+                    <span className="truncate">{p.name}</span>
+                    {yaTiene
+                      ? <span className="text-[11px] flex-shrink-0" style={{ color: C.gray }}>ya en liquidación</span>
+                      : <span className="text-xs font-mono flex-shrink-0" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+                  </button>
+                );
+              })}
+              {elegibles.length > 60 && (
+                <p className="text-[11px] p-2" style={{ color: C.gray }}>Y más — sigue escribiendo para acotar la búsqueda.</p>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {product && (
+        <>
+          <p className="text-xs mb-3" style={{ color: C.gray }}>Precio normal {formatCLP(product.price)} · costo {formatCLP(cost)}</p>
+          <Field label="Precio de liquidación">
+            <input type="number" min="1" value={price} onChange={e => setPrice(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" />
+          </Field>
+          {belowCost && (
+            <div className="rounded-lg p-3 mb-3" style={{ background: C.rustSoft }}>
+              <p className="text-xs font-semibold mb-1.5" style={{ color: C.rust }}>
+                Este precio queda bajo el costo ({formatCLP(cost)}): se estaría vendiendo perdiendo plata.
+              </p>
+              <label className="flex items-center gap-2 text-xs" style={{ color: C.rust }}>
+                <input type="checkbox" checked={confirmedLoss} onChange={e => setConfirmedLoss(e.target.checked)} />
+                Igual quiero dejarlo así
+              </label>
+            </div>
+          )}
+          <Field label="Fecha de término (opcional)">
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className={inputCls} style={inputStyle()} />
+          </Field>
+          <p className="text-xs mb-4" style={{ color: C.gray }}>Sin fecha, queda activa hasta que la desactives desde la lista.</p>
+        </>
+      )}
+
+      <Btn full onClick={submit} icon={Check} disabled={!productId || !(priceNum > 0) || (belowCost && !confirmedLoss)}>Guardar</Btn>
     </Modal>
   );
 }
@@ -17353,6 +17692,7 @@ export default function SistemaVentas() {
   const [suppliers, setSuppliers] = useState([]);
   const [categories, setCategories] = useState([]);
   const [offers, setOffers] = useState([]);
+  const [clearances, setClearances] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [customerLedger, setCustomerLedger] = useState([]);
   const [supplierLedger, setSupplierLedger] = useState([]);
@@ -17483,11 +17823,12 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        const [s, p, cat, ofr, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
+        const [s, p, cat, ofr, liq, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
           loadJSON("product-categories", []),
           loadJSON("quantity-offers", []),
+          loadJSON("price-clearance", []),
           loadJSON("sales-log", []),
           loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
@@ -17512,7 +17853,7 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setCategories(cat); setOffers(ofr); setSales(sl); setMovements(mv);
+        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setSales(sl); setMovements(mv);
         setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
         setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
         setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
@@ -17554,6 +17895,7 @@ export default function SistemaVentas() {
         loadJSONStrict("products-catalog", reciente),
         loadJSONStrict("product-categories"),
         loadJSONStrict("quantity-offers"),
+        loadJSONStrict("price-clearance"),
         loadJSONStrict("sales-log", reciente),
         loadJSONStrict("movements-log", reciente),
         loadJSONStrict("open-shifts"),
@@ -17574,7 +17916,7 @@ export default function SistemaVentas() {
       // un corte de red momentáneo), esa pieza en particular simplemente se deja
       // como estaba — nunca se reemplaza el catálogo, las ventas, etc. por una
       // lista vacía solo porque la sincronización tuvo un tropiezo puntual.
-      const [s, p, cat, ofr, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
+      const [s, p, cat, ofr, liq, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
       if (s) setSettings(s);
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
@@ -17582,6 +17924,12 @@ export default function SistemaVentas() {
       if (p !== undefined) setProducts(prev => fusionarProductos(prev, p));
       if (cat !== undefined) setCategories(prev => (cat.length > 0 || prev.length === 0) ? cat : prev);
       if (ofr !== undefined) setOffers(prev => (ofr.length > 0 || prev.length === 0) ? ofr : prev);
+      // Acá SÍ se reemplaza directo con lo que llegue, aunque sea una lista
+      // vacía: a diferencia de categorías u ofertas —que solo cambian por
+      // acción de un administrador—, una liquidación vence sola con la
+      // fecha (leer() ya filtra las vencidas) y es normal que la lista baje
+      // a cero sin que nadie haya tocado nada.
+      if (liq !== undefined) setClearances(liq);
       if (os !== undefined) setOpenShifts(prev => (os.length > 0 || prev.length === 0) ? os : prev);
       if (sup !== undefined) setSuppliers(prev => (sup.length > 0 || prev.length === 0) ? sup : prev);
       if (cu !== undefined) setCustomers(prev => (cu.length > 0 || prev.length === 0) ? cu : prev);
@@ -17904,7 +18252,7 @@ export default function SistemaVentas() {
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
 
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
+        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
@@ -17914,7 +18262,7 @@ export default function SistemaVentas() {
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} products={products} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
