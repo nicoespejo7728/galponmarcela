@@ -15609,15 +15609,17 @@ const CATEGORIAS_MOVIMIENTO = GRUPOS_CATEGORIA_MOVIMIENTO.flatMap(g => g.options
 // aplica acá, ese vocabulario es para deudas con proveedores (Recepción).
 const EXPENSE_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado"];
 
-function MovementModal({ onClose, onSave }) {
-  const [concept, setConcept] = useState("");
-  const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState("General");
-  const [paymentMethod, setPaymentMethod] = useState("Efectivo");
-  const [paymentBreakdown, setPaymentBreakdown] = useState([
-    { method: "Efectivo", amount: "" },
-    { method: "Transferencia", amount: "" },
-  ]);
+function MovementModal({ initial, onClose, onSave }) {
+  const isEdit = !!initial?.id;
+  const [concept, setConcept] = useState(initial?.concept || "");
+  const [amount, setAmount] = useState(initial?.amount != null ? String(initial.amount) : "");
+  const [category, setCategory] = useState(initial?.category || "General");
+  const [paymentMethod, setPaymentMethod] = useState(initial?.paymentMethod || "Efectivo");
+  const [paymentBreakdown, setPaymentBreakdown] = useState(
+    Array.isArray(initial?.paymentBreakdown) && initial.paymentBreakdown.length > 0
+      ? initial.paymentBreakdown.map(d => ({ method: d.method, amount: String(d.amount) }))
+      : [{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]
+  );
   const [saving, setSaving] = useState(false);
 
   const esCombinado = paymentMethod === "Pago combinado";
@@ -15629,9 +15631,13 @@ function MovementModal({ onClose, onSave }) {
     setSaving(true);
     try {
       await onSave({
-        id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept,
-        category: category || "General", amount: Number(amount), auto: false,
-        paymentMethod,
+        // Al editar se conserva el id y la fecha original — es el mismo
+        // pago corregido, no uno nuevo que se suma al lado del que estaba
+        // mal. type/auto tampoco cambian: esto solo edita pagos manuales
+        // (los que nacen acá mismo), nunca uno automático de otra pantalla.
+        id: initial?.id || uid("mov"), date: initial?.date || new Date().toISOString(),
+        type: "egreso", concept, category: category || "General",
+        amount: Number(amount), auto: false, paymentMethod,
         ...(esCombinado ? { paymentBreakdown: filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) })) } : {}),
       });
     } finally {
@@ -15640,7 +15646,7 @@ function MovementModal({ onClose, onSave }) {
   }
 
   return (
-    <Modal title="Nuevo pago" onClose={onClose}>
+    <Modal title={isEdit ? "Editar pago" : "Nuevo pago"} onClose={onClose}>
       <Field label="Categoría">
         <select value={category} onChange={e => setCategory(e.target.value)} className={inputCls} style={inputStyle()}>
           {GRUPOS_CATEGORIA_MOVIMIENTO.map(g => (
@@ -15696,7 +15702,7 @@ function MovementModal({ onClose, onSave }) {
         </div>
       )}
 
-      <Btn full icon={saving ? Loader2 : Check} disabled={!concept || !amount || saving || !desglosePagoValido} onClick={submit}>{saving ? "Guardando…" : "Guardar"}</Btn>
+      <Btn full icon={saving ? Loader2 : Check} disabled={!concept || !amount || saving || !desglosePagoValido} onClick={submit}>{saving ? "Guardando…" : isEdit ? "Guardar cambios" : "Guardar"}</Btn>
     </Modal>
   );
 }
@@ -15868,6 +15874,8 @@ function FinanceView({ sales, movements, products }) {
 function ExpensesView({ movements, setMovements, toast }) {
   const [range, setRange] = useState("mes");
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
   const [viewingReceipt, setViewingReceipt] = useState(null);
   const now = new Date().toISOString();
 
@@ -15883,10 +15891,25 @@ function ExpensesView({ movements, setMovements, toast }) {
 
   async function saveMovement(m) {
     const latest = await loadJSON("movements-log", movements);
-    const nm = [m, ...latest];
+    const existe = latest.some(x => x.id === m.id);
+    const nm = existe ? latest.map(x => x.id === m.id ? m : x) : [m, ...latest];
     setMovements(nm); await saveJSON("movements-log", nm);
-    setAdding(false);
-    toast("Pago registrado", "success");
+    setAdding(false); setEditing(null);
+    toast(existe ? "Pago corregido" : "Pago registrado", "success");
+  }
+
+  // Solo se puede borrar (o editar, ver más abajo en el render) un pago
+  // manual — uno con "Nuevo pago" en esta misma pantalla, category
+  // "Pago a proveedor" incluida. Uno automático (una venta, una recepción,
+  // un abono del libro de crédito de Proveedores) nace de otro registro que
+  // vive en otra pantalla; borrarlo solo acá los dejaría contando historias
+  // distintas del mismo movimiento, así que esos se corrigen donde nacieron.
+  async function deleteMovement(m) {
+    const latest = await loadJSON("movements-log", movements);
+    const nm = latest.filter(x => x.id !== m.id);
+    setMovements(nm); await saveJSON("movements-log", nm);
+    setDeleting(null);
+    toast("Pago eliminado", "success");
   }
 
   return (
@@ -15905,19 +15928,27 @@ function ExpensesView({ movements, setMovements, toast }) {
         ) : (
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
             {filteredMovs.slice(0, 80).map(m => (
-              <div key={m.id} className="flex items-center justify-between px-4 py-2.5">
-                <div className="flex items-center gap-2.5">
-                  <ArrowDownCircle size={16} style={{ color: C.rust }} />
-                  <div>
-                    <div className="text-sm" style={{ color: C.ink }}>{m.concept}</div>
+              <div key={m.id} className="flex items-center justify-between px-4 py-2.5 gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <ArrowDownCircle size={16} style={{ color: C.rust, flexShrink: 0 }} />
+                  <div className="min-w-0">
+                    <div className="text-sm truncate" style={{ color: C.ink }}>{m.concept}</div>
                     <div className="text-xs" style={{ color: C.gray }}>{formatDate(m.date)} · {m.category}{!m.auto ? " · manual" : ""}{m.paymentMethod ? ` · ${m.paymentMethod}` : ""}</div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-2.5 flex-shrink-0">
                   {m.hasDocument && (
                     <button onClick={() => setViewingReceipt(m)} aria-label="Ver boleta o factura adjunta" className="flex items-center justify-center" style={{ color: C.gray }}><Receipt size={16} /></button>
                   )}
                   <span className="font-mono font-semibold text-sm" style={{ color: C.rust }}>−{formatCLP(m.amount)}</span>
+                  {/* Solo los pagos manuales (los de "Nuevo pago", acá mismo) se
+                      pueden editar o borrar — ver por qué en deleteMovement. */}
+                  {!m.auto && (
+                    <>
+                      <button onClick={() => setEditing(m)} aria-label="Editar" style={{ color: C.gray }}><Pencil size={14} /></button>
+                      <button onClick={() => setDeleting(m)} aria-label="Eliminar" style={{ color: C.rust }}><Trash2 size={14} /></button>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
@@ -15926,6 +15957,13 @@ function ExpensesView({ movements, setMovements, toast }) {
       </div>
 
       {adding && <MovementModal onClose={() => setAdding(false)} onSave={saveMovement} />}
+      {editing && <MovementModal initial={editing} onClose={() => setEditing(null)} onSave={saveMovement} />}
+      {deleting && (
+        <Modal title="Eliminar pago" onClose={() => setDeleting(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar el pago <strong>{deleting.concept}</strong> por <strong>{formatCLP(deleting.amount)}</strong>?</p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteMovement(deleting)}>Eliminar</Btn></div>
+        </Modal>
+      )}
       {viewingReceipt && <MovementReceiptViewerModal movement={viewingReceipt} onClose={() => setViewingReceipt(null)} />}
     </div>
   );
