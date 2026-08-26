@@ -6260,6 +6260,9 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
                   {clearance && !outOfStock && (
                     <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
                   )}
+                  {p.isGrupo && (
+                    <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
+                  )}
                 </span>
                 <span className="flex items-end justify-between gap-1">
                   {outOfStock ? (
@@ -6351,7 +6354,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
    momento se necesita de nuevo, basta con mover esta fecha hacia adelante. */
 const PRODUCTO_TEMPORAL_DISPONIBLE_HASTA = "2026-08-31T23:59:59";
 
-function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, clearances, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
+function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, clearances, productGroups, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
   const [cart, setCart] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -6410,9 +6413,29 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
      por atender. La caja funciona igual, escribiendo los gramos. */
   useEffect(() => { balanza.conectarSolo().catch(() => {}); }, []);
 
+  // Los grupos de productos (migración 0033) se buscan y se agregan al
+  // carrito exactamente igual que un producto de verdad — ver
+  // construirGruposComoProductos y el manejo de isGrupo en addToCart. Las
+  // marcas que ya están agrupadas se esconden de la búsqueda y del catálogo
+  // rápido normales —solo se vende el grupo—, para que nadie termine
+  // cobrando por error la marca suelta a su propio precio en vez de la
+  // "Jamonada tradicional" unificada. Siguen intactas en Inventario,
+  // Recepción y todo lo demás: esto solo cambia lo que se ve al vender.
+  const idsAgrupados = useMemo(() => {
+    const set = new Set();
+    for (const g of productGroups || []) for (const id of g.memberIds || []) set.add(id);
+    return set;
+  }, [productGroups]);
+  const gruposComoProductos = useMemo(
+    () => construirGruposComoProductos(productGroups, products),
+    [productGroups, products]);
+  const productosYGrupos = useMemo(
+    () => [...products.filter(p => !idsAgrupados.has(p.id)), ...gruposComoProductos],
+    [products, idsAgrupados, gruposComoProductos]);
+
   const nameHits = useMemo(
-    () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(products, nameQuery),
-    [nameQuery, products]);
+    () => nameQuery.trim().length < 2 ? { lista: [], total: 0 } : buscarProductos(productosYGrupos, nameQuery),
+    [nameQuery, productosYGrupos]);
   const nameMatches = nameHits.lista;
 
   const customerMatches = useMemo(() => {
@@ -6436,6 +6459,40 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       return;
     }
     setNotFound(null);
+
+    // Grupo de productos (migración 0033): se agrega como una sola línea con
+    // el nombre y precio del grupo, sin liquidación ni "precio anterior" —
+    // esas reglas son de un producto real, y acá el vendedor nunca ve cuál
+    // marca es. La cantidad recién se reparte entre las marcas en checkout().
+    if (product.isGrupo) {
+      setCart(prev => {
+        const existing = prev.find(i => i.productId === product.id);
+        if (product.unitType === "peso") {
+          const addQty = Number(weightKg) || 0;
+          if (addQty <= 0) return prev;
+          const already = existing ? existing.qty : 0;
+          if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
+          if (existing) return prev.map(i => i.productId === product.id ? { ...i, qty: Number((i.qty + addQty).toFixed(3)) } : i);
+          return [...prev, {
+            productId: product.id, barcode: null, name: product.name,
+            price: product.price, cost: product.cost, qty: addQty, stock: product.stock,
+            unitType: "peso", category: null, isGrupo: true, groupId: product.groupId,
+          }];
+        }
+        if (existing) {
+          if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
+          return prev.map(i => i.productId === product.id ? { ...i, qty: i.qty + 1 } : i);
+        }
+        if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
+        return [...prev, {
+          productId: product.id, barcode: null, name: product.name,
+          price: product.price, cost: product.cost, qty: 1, stock: product.stock,
+          unitType: "unidad", category: null, isGrupo: true, groupId: product.groupId,
+        }];
+      });
+      return;
+    }
+
     // Liquidación activa de este producto (migración 0031), si tiene: un
     // precio rebajado puntual que el administrador dejó corriendo desde
     // "Ofertas" para darle salida a stock parado. Tiene prioridad sobre el
@@ -6542,7 +6599,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   function handleScan(code) {
     const clean = code.trim();
     if (!clean) return;
-    const found = products.find(p => p.barcode === clean);
+    // Igual criterio que la búsqueda por nombre: si el código escaneado es de
+    // una marca ya agrupada, no se vende suelta a su propio precio — se
+    // busca entre los productos y grupos visibles, no en el catálogo crudo.
+    const found = productosYGrupos.find(p => p.barcode === clean);
     if (found) addToCart(found);
     else setNotFound(clean);
     setBarcode("");
@@ -6636,6 +6696,24 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     let finalInvoiceNumber = invoiceNumber;
     while (usedNumbers.has(finalInvoiceNumber)) finalInvoiceNumber++;
 
+    // Grupos de productos (migración 0033): cada línea de carrito marcada
+    // como grupo se resuelve ACÁ, con el catálogo recién releído, en las
+    // marcas reales que hay que descontar (ver resolverLineasDeGrupo). Si ni
+    // sumando todo el stock del grupo alcanza —por ejemplo, otra caja vendió
+    // al mismo tiempo—, se frena la venta en vez de dejarla pasar con menos
+    // stock del que en realidad hay.
+    const resolucionesGrupo = new Map();
+    for (const i of cart) {
+      if (!i.isGrupo) continue;
+      const grupo = productGroups.find(g => g.id === i.groupId);
+      const { partes, faltante } = resolverLineasDeGrupo(i.qty, grupo, latestProducts);
+      if (faltante > 0) {
+        toast(`No hay stock suficiente de "${i.name}" entre las marcas agrupadas`, "error");
+        return;
+      }
+      resolucionesGrupo.set(i.productId, partes);
+    }
+
     const sale = {
       id: uid("sale"),
       invoiceNumber: finalInvoiceNumber,
@@ -6647,7 +6725,22 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       sellerId: seller.id,
       customer: payment === "Fiado" ? selectedCustomer.name : null,
       customerId: payment === "Fiado" ? selectedCustomer.id : null,
-      items: cart.map(i => {
+      items: cart.flatMap(i => {
+        // Grupo de productos: una sola línea de carrito se reparte en tantas
+        // líneas de venta como marcas haya tocado descontar (ver
+        // resolucionesGrupo más arriba), todas con el mismo nombre y precio
+        // del grupo — el vendedor y el cliente ven una sola línea igual en
+        // el carrito y en la boleta (ver ReceiptModal/boleta.js, que las
+        // vuelve a juntar con groupSaleTag); solo el kárdex y el margen
+        // quedan con el detalle real de qué marca salió.
+        if (i.isGrupo) {
+          const partes = resolucionesGrupo.get(i.productId) || [];
+          return partes.map(parte => ({
+            productId: parte.productId, name: i.name, barcode: null, qty: parte.qty,
+            price: i.price, cost: parte.cost, unitType: i.unitType,
+            groupSaleTag: i.productId,
+          }));
+        }
         // Se guarda el precio que se cobró —con recargo si lo hubo— para que la
         // boleta, la caja y los informes cuadren con lo que pagó el cliente.
         const recargo = recargoPorTarjeta(i, formaDePagoEfectiva);
@@ -6667,7 +6760,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           ...(recargo ? { cardSurcharge: recargo } : {}),
           ...(discount ? { discount } : {}),
         };
-        if (!i.isOldPriceLine) return base;
+        if (!i.isOldPriceLine) return [base];
         // Se cobró TODO al precio anterior para no mezclar dos precios en la
         // misma boleta. Si la cantidad superó lo que en rigor quedaba a ese
         // precio, el excedente no es un error ni una pérdida: es ganancia
@@ -6675,7 +6768,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         // Análisis después — ver buildOldPriceSalesLog más abajo.
         const extraQty = Math.max(0, i.qty - (i.maxOldPriceQty || 0));
         const extraProfit = extraQty * (i.price - i.newPrice);
-        return { ...base, oldPriceApplied: true, oldPrice: i.price, newPrice: i.newPrice, extraQty, extraProfit };
+        return [{ ...base, oldPriceApplied: true, oldPrice: i.price, newPrice: i.newPrice, extraQty, extraProfit }];
       }),
       total,
       paymentMethod: payment,
@@ -6688,9 +6781,23 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     };
     const newProducts = latestProducts.map(p => {
       const item = cart.find(i => i.productId === p.id);
-      if (!item) return p;
-      const nextStock = Math.max(0, p.stock - item.qty);
-      return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+      if (item) {
+        const nextStock = Math.max(0, p.stock - item.qty);
+        return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+      }
+      // Este producto no es una línea del carrito directamente, pero puede
+      // ser una de las marcas que le tocó descontar a un grupo (ver
+      // resolucionesGrupo más arriba) — ahí la línea de carrito usa el id
+      // sintético del grupo, nunca el id real de esta marca.
+      let descontarGrupo = 0;
+      for (const partes of resolucionesGrupo.values()) {
+        for (const parte of partes) if (parte.productId === p.id) descontarGrupo += parte.qty;
+      }
+      if (descontarGrupo > 0) {
+        const nextStock = Math.max(0, p.stock - descontarGrupo);
+        return { ...p, stock: nextStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nextStock) };
+      }
+      return p;
     });
     const newSales = [sale, ...latestSales];
 
@@ -6957,7 +7064,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                   const clearance = liquidacionDeProducto(p.id, clearances);
                   return (
                   <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                    <span className="truncate" style={{ color: C.ink }}>{p.name}{clearance && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>liquidación</span>}</span>
+                    <span className="truncate" style={{ color: C.ink }}>{p.name}{clearance && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>liquidación</span>}{p.isGrupo && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>grupo</span>}</span>
                     <span className="flex items-center gap-2 flex-shrink-0">
                       <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}{p.unitType === "peso" ? " kg" : ""}</span>
                       {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
@@ -6996,7 +7103,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           mientras se carga la venta. */}
       <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px] lg:grid-cols-[minmax(0,1fr)_400px] items-start">
         <div className="order-2 md:order-1 min-w-0">
-          <QuickCatalogPanel products={products} clearances={clearances} onAdd={addToCart}
+          <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
             onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
         </div>
 
@@ -7048,6 +7155,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                       {i.isLiquidacion && (
                         <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>
                           liquidación
+                        </span>
+                      )}
+                      {i.isGrupo && (
+                        <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>
+                          grupo
                         </span>
                       )}
                     </div>
@@ -7605,6 +7717,26 @@ function limpiarImpresion() {
   }
 }
 
+/* Una venta de grupo de productos (migración 0033) queda guardada como
+   varias líneas —una por marca real que se descontó— pero al cliente se le
+   muestra una sola, igual que la vio armar en el carrito: se juntan de
+   vuelta las líneas que comparten groupSaleTag, sumando la cantidad. Lo usa
+   tanto este recibo en pantalla como la boleta térmica (ver lib/boleta.js,
+   que trae su propia copia de esta misma función). */
+function itemsParaMostrar(items) {
+  const porTag = new Map();
+  const resultado = [];
+  for (const it of items || []) {
+    if (!it.groupSaleTag) { resultado.push(it); continue; }
+    const existente = porTag.get(it.groupSaleTag);
+    if (existente) { existente.qty = Number((existente.qty + it.qty).toFixed(3)); continue; }
+    const copia = { ...it };
+    porTag.set(it.groupSaleTag, copia);
+    resultado.push(copia);
+  }
+  return resultado;
+}
+
 function ReceiptModal({ sale, settings, onClose }) {
   const iva = settings.ivaIncluded ? sale.total - sale.total / 1.19 : 0;
   const neto = sale.total - iva;
@@ -7629,7 +7761,7 @@ function ReceiptModal({ sale, settings, onClose }) {
               detrás se haya decidido cobrar todo al precio anterior para no
               mezclar dos precios en la misma boleta — esa aclaración (y la
               ganancia extra que a veces deja) queda para Análisis, no acá. */}
-          {sale.items.map((i, idx) => (
+          {itemsParaMostrar(sale.items).map((i, idx) => (
             <div key={idx}>
               <div className="flex justify-between text-xs">
                 <span>{i.unitType === "peso" ? `${enGramos(i.qty)} g` : `${i.qty}×`} {i.name}</span>
@@ -9931,12 +10063,88 @@ function recargoPorTarjeta(item, formaDePago) {
    con él — y lo mismo si el administrador edita la carpeta a mitad de una
    venta ya abierta, porque no queda copiada en la línea. */
 function elegibleParaOferta(item) {
-  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine || item?.isLiquidacion);
+  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine || item?.isLiquidacion || item?.isGrupo);
 }
 
 /* Liquidación activa de un producto (migración 0031), si tiene. */
 function liquidacionDeProducto(productId, clearances) {
   return (clearances || []).find((c) => c.productId === productId) || null;
+}
+
+/* =====================================================================
+   Grupos de productos (migración 0033) — "producto unificado": varias
+   marcas o proveedores que se reciben y cuestan cada uno por separado,
+   pero se venden todos bajo un solo nombre y a un solo precio.
+   ===================================================================== */
+
+/* Señal aproximada de "cuándo llegó" un producto: la fecha de la última
+   entrada de priceHistory, que se agrega cada vez que se recibe mercadería
+   de ese producto (ver confirmReception más abajo). No es un lote exacto
+   —un simple cambio de precio sin recepción también la mueve—, pero alcanza
+   para no dejar que una marca se quede parada mientras se vende siempre
+   otra: sin ninguna entrada, se trata como "la más antigua", así se usa
+   primero en vez de quedar sin tocar por falta de dato. */
+function fechaUltimoIngreso(product) {
+  const historial = product?.priceHistory;
+  const ultima = Array.isArray(historial) && historial.length ? historial[historial.length - 1]?.date : null;
+  return ultima ? new Date(ultima).getTime() : 0;
+}
+
+/* Costo promedio ponderado por el stock actual entre las marcas de un
+   grupo (decisión de Fran: más simple de leer en los informes de margen
+   que el costo exacto de la marca puntual que se vendió). Se recalcula
+   cada vez con el catálogo más fresco a mano —al armar el carrito, y de
+   nuevo en checkout() con los datos recién releídos—, nunca se guarda. */
+function costoPromedioDeGrupo(grupo, products) {
+  const miembros = products.filter((p) => (grupo?.memberIds || []).includes(p.id));
+  const stockTotal = miembros.reduce((s, p) => s + Math.max(0, Number(p.stock) || 0), 0);
+  if (stockTotal > 0) {
+    return miembros.reduce((s, p) => s + Math.max(0, Number(p.stock) || 0) * (Number(p.cost) || 0), 0) / stockTotal;
+  }
+  return Number(miembros[0]?.cost) || 0;
+}
+
+/* Arma, a partir de los grupos activos y el catálogo real, una lista de
+   "productos" sintéticos que se pueden buscar y agregar al carrito
+   exactamente igual que cualquier producto de verdad (ver addToCart) — el
+   id sintético (prefijo "grupo:") nunca choca con un id real de producto. */
+function construirGruposComoProductos(productGroups, products) {
+  return (productGroups || []).map((g) => {
+    const miembros = products.filter((p) => (g.memberIds || []).includes(p.id));
+    const stockTotal = miembros.reduce((s, p) => s + Math.max(0, Number(p.stock) || 0), 0);
+    return {
+      id: `grupo:${g.id}`, isGrupo: true, groupId: g.id,
+      name: g.name, barcode: "", price: Number(g.price) || 0, cost: costoPromedioDeGrupo(g, products),
+      stock: stockTotal, unitType: g.unitType || "peso", category: "Grupos", quickAccess: true,
+    };
+  });
+}
+
+/* Al vender un grupo, decide de qué marca(s) se descuenta stock: empieza por
+   la que se recibió hace más tiempo (fechaUltimoIngreso) y, si esa no
+   alcanza para completar la cantidad, sigue solo con la siguiente — el
+   vendedor nunca ve el cambio de marca. El costo de cada parte es siempre
+   el promedio del grupo (ver costoPromedioDeGrupo), no el costo real de la
+   marca puntual, para que las tres líneas resultantes queden con el mismo
+   costo unitario y el margen se lea parejo. Si ni sumando todas alcanza
+   (otra caja vendió al mismo tiempo, por ejemplo), lo que falte vuelve en
+   "faltante" para que quien llama pueda frenar la venta en vez de dejarla
+   pasar con menos stock del que en realidad hay. */
+function resolverLineasDeGrupo(cantidad, grupo, products) {
+  const miembros = products.filter((p) => (grupo?.memberIds || []).includes(p.id));
+  const ordenados = [...miembros].sort((a, b) => fechaUltimoIngreso(a) - fechaUltimoIngreso(b));
+  const costo = costoPromedioDeGrupo(grupo, products);
+  let restante = Number(cantidad) || 0;
+  const partes = [];
+  for (const m of ordenados) {
+    if (restante <= 0) break;
+    const disponible = Math.max(0, Number(m.stock) || 0);
+    if (disponible <= 0) continue;
+    const usar = Math.min(restante, disponible);
+    partes.push({ productId: m.id, qty: Number(usar.toFixed(3)), cost: costo });
+    restante = Number((restante - usar).toFixed(3));
+  }
+  return { partes, faltante: Math.max(0, restante) };
 }
 
 /* productId -> carpeta (galpon.oferta) a la que pertenece, si tiene alguna.
@@ -12193,7 +12401,7 @@ function escaparHtml(t) {
    productos con stock pero sin código de barras real, sin precio o sin
    sección. Esta pantalla los junta en un solo lugar, con la acción al lado
    del problema, en vez de hacer buscarlos entre cinco mil. */
-function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, setSettings, role, session, toast }) {
+function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, setSettings, productGroups, setProductGroups, role, session, toast }) {
   const [seccion, setSeccion] = useState("duplicados");
   const [elegido, setElegido] = useState({});     // clave del grupo → id que se conserva
   const [trabajando, setTrabajando] = useState(null);
@@ -12202,6 +12410,11 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
   // base: si no, reaparecerían cada vez que se abre la pantalla.
   const [descartados, setDescartados] = useState([]);
   const [verDescartados, setVerDescartados] = useState(false);
+  // Grupos de productos (migración 0033): "producto unificado" para marcas
+  // que se reciben por separado pero se venden todas como una — ver
+  // ProductGroupModal más abajo.
+  const [editingGroup, setEditingGroup] = useState(null);
+  const [deletingGroup, setDeletingGroup] = useState(null);
 
   useEffect(() => {
     let vivo = true;
@@ -12340,6 +12553,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
     { id: "sinCodigo", label: "Códigos internos", cuenta: sinCodigo.length },
     { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
     { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
+    { id: "grupos", label: "Grupos", cuenta: productGroups.length },
   ];
 
   const listaSimple = seccion === "sinCodigo" ? sinCodigo
@@ -12351,7 +12565,36 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
     sinCodigo: "No traen código en el envase, así que la pistola no los encuentra y hay que buscarlos a mano con el cliente esperando. Acá se les crea uno propio y se imprime la etiqueta. El código interno no toca la sección del producto: un fideo con código nuestro sigue estando en ABARROTES. Si el producto sí tiene código impreso, es mejor escanear ese: usa \"Completar\".",
     sinPrecio: "Tienen stock y no se pueden cobrar hasta que alguien les ponga precio.",
     sinSeccion: "Sin sección no aparecen agrupados en Inventario ni en el catálogo rápido.",
+    grupos: "Para marcas o proveedores que se reciben por separado —cada uno con su propio costo— pero se venden todas como un solo producto, a un solo precio (ej. varias jamonadas vendidas como \"Jamonada tradicional\"). Al vender, el sistema descuenta stock de la marca que se recibió hace más tiempo, y sigue con la siguiente si esa se acaba a medio pesaje — el vendedor solo ve el nombre del grupo.",
   };
+
+  async function persistGroups(ns) { setProductGroups(ns); await saveJSON("product-groups", ns); }
+
+  async function saveGroup(g) {
+    try {
+      const latest = await loadJSON("product-groups", productGroups);
+      const exists = latest.some(x => x.id === g.id);
+      const ns = exists ? latest.map(x => x.id === g.id ? g : x) : [...latest, g];
+      await persistGroups(ns);
+      setEditingGroup(null);
+      toast(exists ? "Grupo actualizado" : "Grupo creado", "success");
+    } catch (e) {
+      console.error("[grupos de productos] no se pudo guardar", e);
+      toast(friendlyError(e, "No se pudo guardar el grupo"), "error");
+    }
+  }
+
+  async function deleteGroup(id) {
+    try {
+      const latest = await loadJSON("product-groups", productGroups);
+      await persistGroups(latest.filter(g => g.id !== id));
+      setDeletingGroup(null);
+      toast("Grupo desactivado", "success");
+    } catch (e) {
+      console.error("[grupos de productos] no se pudo desactivar", e);
+      toast(friendlyError(e, "No se pudo desactivar el grupo"), "error");
+    }
+  }
 
   return (
     <div>
@@ -12473,6 +12716,55 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
               )}
             </div>
           )
+      )}
+
+      {seccion === "grupos" && (
+        <div>
+          <div className="mb-3"><Btn size="sm" icon={Plus} onClick={() => setEditingGroup({})}>Nuevo grupo</Btn></div>
+          {productGroups.length === 0 ? (
+            <EmptyState icon={Blend} title="Sin grupos de productos" hint='Crea uno cuando varias marcas o proveedores se vendan bajo un solo nombre — ej. "Jamonada tradicional".' />
+          ) : (
+            <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+              <div className="divide-y" style={{ borderColor: C.paperLine }}>
+                {productGroups.map(g => {
+                  const miembros = products.filter(p => (g.memberIds || []).includes(p.id));
+                  const stockTotal = miembros.reduce((s, p) => s + Math.max(0, Number(p.stock) || 0), 0);
+                  return (
+                    <div key={g.id} className="px-4 py-3 flex items-center gap-3">
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm font-semibold" style={{ color: C.ink }}>{g.name}</span>
+                        <span className="block text-xs font-mono" style={{ color: C.gray }}>
+                          {formatCLP(g.price)}{g.unitType === "peso" ? "/kg" : "/u"} · {miembros.length} marca{miembros.length === 1 ? "" : "s"} · stock combinado {stockTotal}
+                        </span>
+                        <span className="block text-xs mt-0.5" style={{ color: C.gray }}>
+                          {miembros.map(p => p.name).join(" · ") || "sin productos asignados"}
+                        </span>
+                      </span>
+                      <Btn size="sm" variant="ghost" icon={Pencil} onClick={() => setEditingGroup(g)}>Editar</Btn>
+                      <Btn size="sm" variant="ghost" icon={Trash2} onClick={() => setDeletingGroup(g)}>Quitar</Btn>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {editingGroup && (
+        <ProductGroupModal
+          initial={editingGroup.id ? editingGroup : null}
+          productGroups={productGroups} products={products}
+          onClose={() => setEditingGroup(null)} onSave={saveGroup}
+        />
+      )}
+      {deletingGroup && (
+        <Modal title="Quitar grupo de productos" onClose={() => setDeletingGroup(null)}>
+          <p className="text-sm mb-4" style={{ color: C.ink }}>
+            ¿Quitar <strong>{deletingGroup.name}</strong>? Deja de venderse como producto unificado; los productos que agrupaba siguen en el catálogo, cada uno por su cuenta.
+          </p>
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeletingGroup(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteGroup(deletingGroup.id)}>Quitar</Btn></div>
+        </Modal>
       )}
 
       {editando && (
@@ -13345,6 +13637,128 @@ function LiquidacionModal({ initial, preselectedProductId, clearances, products,
       )}
 
       <Btn full onClick={submit} icon={Check} disabled={!productId || !(priceNum > 0) || (belowCost && !confirmedLoss)}>Guardar</Btn>
+    </Modal>
+  );
+}
+
+/* "Producto unificado" (migración 0033): varias marcas o proveedores que se
+   reciben y cuestan cada uno por separado, pero se venden todos bajo un
+   solo nombre y a un solo precio — ver comentario de la migración y
+   resolverLineasDeGrupo más abajo (ahí se decide de qué marca se descuenta
+   stock al vender). Solo se pueden agrupar productos del mismo tipo de
+   unidad: mezclar kilos y unidades en un mismo grupo no tendría cómo
+   sumarse en un solo "stock combinado". */
+function ProductGroupModal({ initial, productGroups, products, onClose, onSave }) {
+  const [form, setForm] = useState({
+    id: initial?.id || uid("grupo"),
+    name: initial?.name || "",
+    price: initial?.price ?? "",
+    unitType: initial?.unitType || "peso",
+    memberIds: initial?.memberIds || [],
+  });
+  const [productQuery, setProductQuery] = useState("");
+  function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+
+  // Qué grupo (si alguno, y no este mismo) ya tiene reclamado cada producto —
+  // un producto solo puede estar en uno a la vez, así que acá se avisa en
+  // vez de dejar que el guardado lo rechace sin explicar por qué.
+  const otroGrupoDe = useMemo(() => {
+    const mapa = new Map();
+    for (const g of productGroups || []) {
+      if (g.id === form.id) continue;
+      for (const pid of g.memberIds || []) mapa.set(pid, g.name);
+    }
+    return mapa;
+  }, [productGroups, form.id]);
+
+  const elegibles = useMemo(
+    () => products.filter(p => (p.unitType || "unidad") === form.unitType),
+    [products, form.unitType]
+  );
+  const productosFiltrados = useMemo(() => {
+    const q = normalize(productQuery);
+    if (!q) return elegibles;
+    return elegibles.filter(p => normalize(p.name).includes(q) || normalize(p.barcode || "").includes(q));
+  }, [elegibles, productQuery]);
+
+  function alternarProducto(id) {
+    setForm(f => ({
+      ...f,
+      memberIds: f.memberIds.includes(id) ? f.memberIds.filter(x => x !== id) : [...f.memberIds, id],
+    }));
+  }
+
+  const priceNum = Number(form.price);
+  const miembrosElegidos = products.filter(p => form.memberIds.includes(p.id));
+
+  function submit() {
+    if (!form.name.trim()) return;
+    if (!(priceNum > 0)) return;
+    if (form.memberIds.length < 2) return;
+    onSave({ ...form, name: form.name.trim(), price: priceNum });
+  }
+
+  return (
+    <Modal title={initial?.id ? "Editar grupo de productos" : "Nuevo grupo de productos"} onClose={onClose} wide>
+      <Field label="Nombre con que se vende">
+        <input autoFocus value={form.name} onChange={e => set("name", e.target.value)} className={inputCls} style={inputStyle()} placeholder='Ej. "Jamonada tradicional"' />
+      </Field>
+      <div className="grid sm:grid-cols-2 gap-3 mb-1">
+        <Field label={`Precio de venta${form.unitType === "peso" ? " (por kg)" : ""}`}>
+          <input type="number" value={form.price} onChange={e => set("price", e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="0" />
+        </Field>
+        <Field label="Se vende por">
+          <select value={form.unitType} onChange={e => set("unitType", e.target.value)} className={inputCls} style={inputStyle()}>
+            <option value="peso">Peso (kg/g)</option>
+            <option value="unidad">Unidad</option>
+          </select>
+        </Field>
+      </div>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Al vender, el sistema descuenta stock de las marcas agrupadas empezando por la que se recibió hace más tiempo, y sigue solo con la siguiente si una se acaba a medio pesaje — el vendedor solo ve "{form.name || "el nombre de arriba"}", nunca la marca.
+      </p>
+
+      <div className="mb-2">
+        <span className="text-sm font-semibold block mb-1" style={{ color: C.ink }}>Productos que agrupa (marcas o proveedores)</span>
+        <div className="relative mb-2">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+          <input value={productQuery} onChange={e => setProductQuery(e.target.value)} placeholder="Buscar producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
+        </div>
+        <div className="rounded-lg overflow-y-auto max-h-56" style={{ border: `1px solid ${C.paperLine}` }}>
+          {productosFiltrados.length === 0 ? (
+            <p className="text-xs p-3" style={{ color: C.gray }}>
+              Sin productos {form.unitType === "peso" ? "de peso" : "de unidad"} que calcen con la búsqueda.
+            </p>
+          ) : productosFiltrados.map(p => {
+            const yaEnOtro = otroGrupoDe.get(p.id);
+            const marcado = form.memberIds.includes(p.id);
+            return (
+              <label key={p.id} className={`flex items-center gap-2 px-3 py-2 text-sm border-b last:border-b-0 ${yaEnOtro ? "opacity-50" : ""}`} style={{ borderColor: C.paperLine, color: C.ink }}>
+                <input type="checkbox" checked={marcado} disabled={!!yaEnOtro} onChange={() => alternarProducto(p.id)} />
+                <span className="flex-1 truncate">{p.name}</span>
+                <span className="text-[11px] font-mono flex-shrink-0" style={{ color: C.gray }}>stock {p.stock}</span>
+                {yaEnOtro && <span className="text-[11px] flex-shrink-0" style={{ color: C.gray }}>en "{yaEnOtro}"</span>}
+              </label>
+            );
+          })}
+        </div>
+        {form.memberIds.length < 2 && (
+          <p className="text-xs mt-1" style={{ color: C.rust }}>Elige al menos 2 productos — con uno solo no hace falta agruparlos.</p>
+        )}
+      </div>
+
+      {miembrosElegidos.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {miembrosElegidos.map(p => (
+            <span key={p.id} className="text-xs px-2 py-1 rounded-full flex items-center gap-1" style={{ background: C.greenSoft, color: C.greenDark }}>
+              {p.name}
+              <button type="button" onClick={() => alternarProducto(p.id)} aria-label={`Quitar ${p.name}`}><X size={12} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <Btn full onClick={submit} icon={Check} disabled={!form.name.trim() || !(priceNum > 0) || form.memberIds.length < 2}>Guardar</Btn>
     </Modal>
   );
 }
@@ -17957,6 +18371,7 @@ export default function SistemaVentas() {
   const [categories, setCategories] = useState([]);
   const [offers, setOffers] = useState([]);
   const [clearances, setClearances] = useState([]);
+  const [productGroups, setProductGroups] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [customerLedger, setCustomerLedger] = useState([]);
   const [supplierLedger, setSupplierLedger] = useState([]);
@@ -18087,12 +18502,13 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        const [s, p, cat, ofr, liq, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
+        const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
           loadJSON("product-categories", []),
           loadJSON("quantity-offers", []),
           loadJSON("price-clearance", []),
+          loadJSON("product-groups", []),
           loadJSON("sales-log", []),
           loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
@@ -18117,7 +18533,7 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setSales(sl); setMovements(mv);
+        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setProductGroups(grp); setSales(sl); setMovements(mv);
         setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
         setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
         setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
@@ -18160,6 +18576,7 @@ export default function SistemaVentas() {
         loadJSONStrict("product-categories"),
         loadJSONStrict("quantity-offers"),
         loadJSONStrict("price-clearance"),
+        loadJSONStrict("product-groups"),
         loadJSONStrict("sales-log", reciente),
         loadJSONStrict("movements-log", reciente),
         loadJSONStrict("open-shifts"),
@@ -18180,7 +18597,7 @@ export default function SistemaVentas() {
       // un corte de red momentáneo), esa pieza en particular simplemente se deja
       // como estaba — nunca se reemplaza el catálogo, las ventas, etc. por una
       // lista vacía solo porque la sincronización tuvo un tropiezo puntual.
-      const [s, p, cat, ofr, liq, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
+      const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
       if (s) setSettings(s);
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
@@ -18194,6 +18611,9 @@ export default function SistemaVentas() {
       // fecha (leer() ya filtra las vencidas) y es normal que la lista baje
       // a cero sin que nadie haya tocado nada.
       if (liq !== undefined) setClearances(liq);
+      // Igual que ofertas: un grupo solo cambia si un administrador lo edita,
+      // así que una lectura vacía puntual no debe borrar lo que ya se veía.
+      if (grp !== undefined) setProductGroups(prev => (grp.length > 0 || prev.length === 0) ? grp : prev);
       if (os !== undefined) setOpenShifts(prev => (os.length > 0 || prev.length === 0) ? os : prev);
       if (sup !== undefined) setSuppliers(prev => (sup.length > 0 || prev.length === 0) ? sup : prev);
       if (cu !== undefined) setCustomers(prev => (cu.length > 0 || prev.length === 0) ? cu : prev);
@@ -18516,7 +18936,7 @@ export default function SistemaVentas() {
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
 
         <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
-        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
+        <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
@@ -18524,7 +18944,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
