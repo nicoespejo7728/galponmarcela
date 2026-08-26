@@ -8484,7 +8484,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
 // el negocio, no el cliente.
 const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado", "Crédito con el proveedor"];
 
-function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast }) {
+function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente }) {
   const [draftItems, setDraftItems] = useState([]);
   /* Cómo vienen los precios en ESTA factura. Casi siempre un proveedor es
      todo de una forma, así que se pone una vez arriba y baja a todas las
@@ -8676,6 +8676,26 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const date = chosenDate.toISOString();
     let newProducts = [...latestProducts];
 
+    // Productos nuevos que llegan sin código de barras: se les reparte uno
+    // propio (EAN-13 real, del bloque interno) en el mismo momento de
+    // recibirlos, en vez de dejarlos con el "INT-..." provisorio de antes —
+    // así la etiqueta queda lista para imprimir de inmediato, sin tener que
+    // pasar después por "Códigos internos" a asignarlos a mano.
+    const necesitanCodigo = draftItems.filter(it => it.isNew && !it.barcode.trim());
+    const codigosAsignados = new Map(); // tempId -> barcode
+    if (necesitanCodigo.length > 0) {
+      try {
+        const tomados = (await codigosInternosUsados(PREFIJO_ALMACEN)).map(c => ({ barcode: c }));
+        const nuevosCodigos = repartirCodigos([...latestProducts, ...tomados], necesitanCodigo.length);
+        necesitanCodigo.forEach((it, i) => codigosAsignados.set(it.tempId, nuevosCodigos[i]));
+      } catch (e) {
+        // Sin conexión u otro problema al repartir: no se bloquea la
+        // recepción por esto — el producto queda con el código provisorio de
+        // siempre, asignable después desde "Códigos internos".
+        console.error("[recepción] no se pudieron repartir códigos propios", e);
+      }
+    }
+
     draftItems.forEach(item => {
       const qty = Number(item.qty) || 0;
       const netCost = Number(item.netCost) || 0;
@@ -8683,7 +8703,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       if (item.isNew) {
         newProducts.push({
           id: uid("prod"),
-          barcode: item.barcode.trim() || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           name: upperField(item.name),
           category: upperField(item.category),
           // Producto nuevo: entra con el precio que puso quien lo recibió, para
@@ -8696,7 +8716,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           minStock: 5,
           supplierId: supplierId || null,
           unitType: item.unitType || "unidad",
-          quickAccess: !item.barcode.trim(),
+          // Antes quedaba en el panel de acceso rápido cualquier producto sin
+          // código escrito a mano, porque no había forma de escanearlo. Ahora
+          // que se reparte un código propio real, ya se puede escanear como
+          // cualquier otro — el panel rápido queda solo para cuando el
+          // reparto falló (sin conexión) y quedó con el provisorio "INT-...".
+          quickAccess: !item.barcode.trim() && !codigosAsignados.has(item.tempId),
           priceApproval: role === "admin" ? null : { suggestedPrice: Number(item.finalPrice ?? suggested), netCost, requestedBy: session.name, date, isNewProduct: true },
           priceHistory: [{ date, cost: netCost, price: Number(item.finalPrice ?? suggested) }],
         });
@@ -8792,10 +8817,19 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       await saveJSON(`invoice-image:${invoiceId}`, { pages: invoiceFiles.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })) });
     }
 
+    const codigosNuevosAsignados = codigosAsignados.size > 0;
     toast(
-      `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}${documentType !== "sin_documento" && invoiceFiles.length === 0 ? " · falta la foto de la factura (se puede agregar después)" : ""}`,
+      `Recepción registrada${isCredito ? ` — queda a crédito con ${supplierName}` : ""}${role !== "admin" ? " · precios a la espera de aprobación" : ""}${documentType !== "sin_documento" && invoiceFiles.length === 0 ? " · falta la foto de la factura (se puede agregar después)" : ""}${codigosNuevosAsignados ? " · yendo a Productos para imprimir el código nuevo" : ""}`,
       "success"
     );
+    // Si se repartió algún código propio, se pasa directo a Productos →
+    // "Códigos internos" — así quien recibió imprime la etiqueta mientras el
+    // producto todavía está a mano, sin tener que ir a buscar la sección.
+    // Esta pantalla ya está disponible para cualquier rol, no solo admin.
+    if (codigosNuevosAsignados && setTab && setSeccionProductosPendiente) {
+      setTab("revisar");
+      setSeccionProductosPendiente("sinCodigo");
+    }
     setDraftItems([]); setSupplier(""); setSupplierId(null); setRefNumber("");
     setInvoiceFiles([]); setPaymentMethod("Efectivo"); setDocumentType("");
     setPaymentBreakdown([{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
@@ -12523,8 +12557,20 @@ function escaparHtml(t) {
    productos con stock pero sin código de barras real, sin precio o sin
    sección. Esta pantalla los junta en un solo lugar, con la acción al lado
    del problema, en vez de hacer buscarlos entre cinco mil. */
-function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, setSettings, productGroups, setProductGroups, role, session, toast }) {
-  const [seccion, setSeccion] = useState("duplicados");
+function ReviewProductsView({ products, setProducts, categories, suppliers, setSuppliers, settings, setSettings, productGroups, setProductGroups, role, session, toast, seccionPendiente, onSeccionPendienteConsumida }) {
+  // Un vendedor entra acá solo a imprimir las etiquetas de los códigos que se
+  // van creando al recibir — duplicados, precios y grupos siguen siendo cosa
+  // de administrador, así que parte directo en "Códigos internos".
+  const [seccion, setSeccion] = useState(role === "admin" ? "duplicados" : "sinCodigo");
+  // Recepción puede dejar pedido abrir directo en una sección (por ejemplo
+  // "Códigos internos", recién asignados, listos para imprimir) — se
+  // consume una sola vez y se avisa de vuelta para no repetir el salto si
+  // la persona después elige otra sección a mano.
+  useEffect(() => {
+    if (!seccionPendiente) return;
+    setSeccion(seccionPendiente);
+    onSeccionPendienteConsumida?.();
+  }, [seccionPendiente]);
   const [elegido, setElegido] = useState({});     // clave del grupo → id que se conserva
   const [trabajando, setTrabajando] = useState(null);
   const [editando, setEditando] = useState(null);
@@ -12670,12 +12716,17 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
     }
   }
 
-  const SECCIONES = [
+  // Un vendedor solo ve "Códigos internos" — el resto (unificar duplicados,
+  // poner precio, mover de sección, armar grupos) sigue siendo de
+  // administrador.
+  const SECCIONES = role === "admin" ? [
     { id: "duplicados", label: "Duplicados", cuenta: duplicadosVisibles.length },
     { id: "sinCodigo", label: "Códigos internos", cuenta: sinCodigo.length },
     { id: "sinPrecio", label: "Sin precio", cuenta: sinPrecio.length },
     { id: "sinSeccion", label: "Sin sección", cuenta: sinSeccion.length },
     { id: "grupos", label: "Grupos", cuenta: productGroups.length },
+  ] : [
+    { id: "sinCodigo", label: "Códigos internos", cuenta: sinCodigo.length },
   ];
 
   const listaSimple = seccion === "sinCodigo" ? sinCodigo
@@ -18463,6 +18514,11 @@ const GRUPOS = {
       { id: "recepcion", label: "Recepción", icon: Truck },
       { id: "conteos", label: "Conteos", icon: ClipboardList },
       { id: "transformar", label: "Transformar", icon: Blend },
+      // Solo para imprimir las etiquetas de los códigos propios que se van
+      // creando al recibir — el resto de "Productos" (duplicados, precios,
+      // grupos) sigue siendo cosa de administrador; ReviewProductsView filtra
+      // las secciones según el rol.
+      { id: "revisar", label: "Códigos internos", icon: ClipboardCheck },
     ]},
   ],
   admin: [
@@ -18721,6 +18777,11 @@ export default function SistemaVentas() {
   useEffect(() => {
     setVisitedTabs(prev => (prev.has(tab) ? prev : new Set(prev).add(tab)));
   }, [tab]);
+  // Cuando Recepción le asigna código propio a un producto nuevo, deja acá
+  // pedido abrir Productos directo en "Códigos internos" — así quien recibió
+  // pasa de una a la otra pantalla sin tener que ir a buscarla, e imprime la
+  // etiqueta mientras el producto todavía está fresco en la cabeza.
+  const [seccionProductosPendiente, setSeccionProductosPendiente] = useState(null);
   const [toastData, setToastState] = useState(null);
 
   const toast = useCallback((msg, type = "success") => {
@@ -19253,9 +19314,9 @@ export default function SistemaVentas() {
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} /></TabPane>
+        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} /></TabPane>}
+        <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} seccionPendiente={seccionProductosPendiente} onSeccionPendienteConsumida={() => setSeccionProductosPendiente(null)} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
