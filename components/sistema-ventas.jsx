@@ -6644,7 +6644,18 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const preciosOferta = useMemo(
     () => calcularPreciosOferta(cart, offers, formaDePagoEfectiva),
     [cart, offers, formaDePagoEfectiva]);
-  const total = cart.reduce((s, i) => s + totalLinea(i, formaDePagoEfectiva, preciosOferta), 0);
+  // totalExacto ya viene en pesos enteros (cada línea se redondea en
+  // totalLinea), pero puede terminar en cualquier dígito — por ejemplo
+  // $3.146 si la mayor parte del carrito fue por peso. total es lo que de
+  // verdad se cobra: ese mismo monto redondeado a la decena más cercana
+  // (ver redondearDiezPesos), para que la boleta, el vuelto y el asiento
+  // de caja usen siempre un número que se puede pagar y dar vuelto con las
+  // monedas que existen. redondeoAjuste es la diferencia entre ambos —de
+  // -5 a +4 pesos— y queda en la boleta como su propio renglón, para que
+  // nadie mire la suma de las líneas y crea que el total está mal.
+  const totalExacto = cart.reduce((s, i) => s + totalLinea(i, formaDePagoEfectiva, preciosOferta), 0);
+  const total = redondearDiezPesos(totalExacto);
+  const redondeoAjuste = total - totalExacto;
   const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, formaDePagoEfectiva) * i.qty, 0);
   const descuentoOfertaTotal = cart.reduce((s, i) => s + descuentoPorOferta(i, preciosOferta), 0);
   // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
@@ -6771,6 +6782,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         return [{ ...base, oldPriceApplied: true, oldPrice: i.price, newPrice: i.newPrice, extraQty, extraProfit }];
       }),
       total,
+      // Solo para mostrar el renglón "Redondeo" en la boleta (ver
+      // ReceiptModal y lib/boleta.js) — no participa en ningún cálculo de
+      // stock, caja ni fiado, esos siempre usan `total`, que ya es el
+      // monto redondeado y el que de verdad se cobró.
+      ...(redondeoAjuste !== 0 ? { roundingAdjustment: redondeoAjuste } : {}),
       paymentMethod: payment,
       ...(payment === "Pago combinado" ? {
         paymentBreakdown: paymentBreakdown
@@ -7783,6 +7799,12 @@ function ReceiptModal({ sale, settings, onClose }) {
               <div className="flex justify-between text-xs" style={{ color: C.gray }}><span>IVA (19%)</span><span>{formatCLP(iva)}</span></div>
             </>
           )}
+          {!!sale.roundingAdjustment && (
+            <div className="flex justify-between text-xs" style={{ color: C.gray }}>
+              <span>Redondeo</span>
+              <span>{sale.roundingAdjustment > 0 ? "+" : ""}{formatCLP(sale.roundingAdjustment)}</span>
+            </div>
+          )}
           <div className="flex justify-between text-base font-semibold pt-1"><span>Total</span><span>{formatCLP(sale.total)}</span></div>
           <div className="text-xs pt-1" style={{ color: C.gray }}>Pago: {sale.paymentMethod}</div>
           {sale.paymentMethod === "Pago combinado" && Array.isArray(sale.paymentBreakdown) && (
@@ -8492,7 +8514,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   const [duePaymentDate, setDuePaymentDate] = useState("");
   const [refNumber, setRefNumber] = useState("");
   const [nameQuery, setNameQuery] = useState("");
-  const [showManualSearch, setShowManualSearch] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [invoiceFiles, setInvoiceFiles] = useState([]);
   const [pistolaBarcode, setPistolaBarcode] = useState("");
@@ -8942,29 +8963,29 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         <Btn variant="dark" size="sm" icon={Camera} onClick={() => setScannerOpen(true)} full>Escanear con la cámara del dispositivo</Btn>
         <p className="text-xs mt-2" style={{ color: C.gray }}>Cada código pistoleado agrega una fila abajo: si el producto ya existe, trae su nombre, su último costo y su formato (kg/gramos/unidad); si no existe, queda como producto nuevo con el código ya cargado.</p>
 
-        <button type="button" onClick={() => setShowManualSearch(v => !v)} className="text-xs underline mt-2" style={{ color: C.gray }}>
-          {showManualSearch ? "Ocultar búsqueda manual" : "¿No tienes el código a mano? Busca el producto por nombre"}
-        </button>
-        {showManualSearch && (
-          <div className="mt-2">
-            <div className="relative mb-2">
-              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
-              <input value={nameQuery} onChange={e => setNameQuery(e.target.value)} placeholder="Busca un producto existente por nombre o código…" className={`${inputCls} pl-9`} style={inputStyle()} />
-              {nameMatches.length > 0 && (
-                <div className="absolute z-10 left-0 right-0 mt-1.5 rounded-lg overflow-hidden shadow-lg max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
-                  {nameMatches.map(p => (
-                    <button key={p.id} onClick={() => addExistingDraft(p)} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-black/[.03] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                      <span style={{ color: C.ink }}>{p.name}</span>
-                      <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}</span>
-                    </button>
-                  ))}
-                  <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
-                </div>
-              )}
-            </div>
-            <Btn variant="ghost" size="sm" icon={Plus} onClick={addNewDraft}>Producto nuevo (no está en el catálogo)</Btn>
+        {/* Antes esta búsqueda quedaba escondida detrás de un enlace
+            ("¿No tienes el código a mano?") que había que tocar primero —
+            Fran pidió que el desplegable de nombres aparezca directo, sin
+            ese paso extra: se busca por nombre igual de a la vista que por
+            código, todo el tiempo. */}
+        <div className="mt-2">
+          <div className="relative mb-2">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
+            <input value={nameQuery} onChange={e => setNameQuery(e.target.value)} placeholder="Busca un producto existente por nombre o código…" className={`${inputCls} pl-9`} style={inputStyle()} />
+            {nameMatches.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1.5 rounded-lg overflow-hidden shadow-lg max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+                {nameMatches.map(p => (
+                  <button key={p.id} onClick={() => addExistingDraft(p)} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-black/[.03] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                    <span style={{ color: C.ink }}>{p.name}</span>
+                    <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}</span>
+                  </button>
+                ))}
+                <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
+              </div>
+            )}
           </div>
-        )}
+          <Btn variant="ghost" size="sm" icon={Plus} onClick={addNewDraft}>Producto nuevo (no está en el catálogo)</Btn>
+        </div>
       </div>
 
       {draftItems.length > 0 && (
@@ -10277,16 +10298,49 @@ function descuentoPorOferta(item, preciosOferta) {
   return preciosOferta.get(item?.productId)?.discount || 0;
 }
 
+/* Redondeo de pesos chilenos — desde que se retiraron de circulación las
+   monedas de $1 y $5, ningún cobro puede quedar en una fracción menor a
+   $10, y en rigor ni siquiera en una fracción de peso.
+
+   redondearPesoEntero() ataca la raíz del problema: un producto que se
+   vende por peso se cobra a precio-por-kilo × kilos pesados, y esa
+   multiplicación casi nunca da un número entero (350 g de algo a
+   $8.990/kg son $3.146,5). Se aplica en cada línea del carrito, antes de
+   sumarla al total, para que nunca se arrastre un peso fraccionado.
+
+   redondearDiezPesos() aplica además la Ley del Redondeo (Ley 20.956,
+   detallada por el SII en su Circular N°44 de 2017): el monto final a
+   pagar se redondea a la decena más cercana —terminación 1 a 5 hacia
+   abajo, terminación 6 a 9 hacia arriba— porque tampoco hay cómo
+   completar con monedas de $1 a $9. La ley solo obliga a esto en pagos en
+   efectivo; acá se aplica parejo a cualquier forma de pago (a pedido
+   explícito de Fran), para que el total sea siempre el mismo número que
+   después hay que cuadrar en la caja, sin importar cómo se pagó. */
+function redondearPesoEntero(monto) {
+  return Math.round(Number(monto) || 0);
+}
+
+function redondearDiezPesos(monto) {
+  const entero = redondearPesoEntero(monto);
+  const resto = entero % 10;
+  if (resto === 0) return entero;
+  return resto <= 5 ? entero - resto : entero + (10 - resto);
+}
+
 /* Total de la línea, con recargo de tarjeta y oferta de cantidad ya
-   incluidos — lo que de verdad corresponde cobrar por esa línea completa. */
+   incluidos — lo que de verdad corresponde cobrar por esa línea completa.
+   Siempre en pesos enteros (ver redondearPesoEntero más arriba): es la
+   única línea de este cálculo que puede dar un número con decimales,
+   porque es la única que multiplica por una cantidad que no es entera
+   (los kilos de un producto por peso). */
 function totalLinea(item, formaDePago, preciosOferta) {
   const qty = Number(item?.qty) || 0;
   const recargo = recargoPorTarjeta(item, formaDePago) * qty;
   if (!elegibleParaOferta(item)) {
-    return (Number(item?.price) || 0) * qty + recargo;
+    return redondearPesoEntero((Number(item?.price) || 0) * qty + recargo);
   }
   const info = preciosOferta.get(item?.productId);
-  return (info ? info.total : (Number(item?.price) || 0) * qty) + recargo;
+  return redondearPesoEntero((info ? info.total : (Number(item?.price) || 0) * qty) + recargo);
 }
 
 /* Buscar un producto por nombre o código, para los desplegables del mesón,
