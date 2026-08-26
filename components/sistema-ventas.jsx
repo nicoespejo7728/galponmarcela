@@ -11386,9 +11386,14 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
 
   async function registerPayment(supplier, amount, paymentMethod, note) {
     const latestLedger = await loadJSON("supplier-ledger", supplierLedger);
+    // El abono guarda el id del asiento de caja que genera (movementId): es
+    // lo que después permite editarlo o eliminarlo desde acá sin dejar un
+    // gasto huérfano en Finanzas → Egresos, cobrando algo que ya se corrigió.
+    const movementId = uid("mov");
     const abono = {
       id: uid("provmov"), supplierId: supplier.id, type: "abono",
       amount, date: new Date().toISOString(), invoiceId: null, paymentMethod, note: note || "",
+      movementId,
     };
     const newLedger = [abono, ...latestLedger];
     setSupplierLedger(newLedger);
@@ -11399,7 +11404,7 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
     // acá se refleja como gasto en el libro de caja general.
     const latestMovements = await loadJSON("movements-log", movements);
     const asiento = {
-      id: uid("mov"), date: abono.date, type: "egreso",
+      id: movementId, date: abono.date, type: "egreso",
       concept: `Pago a proveedor — ${supplier.name}`,
       amount, category: "Pago a proveedor", auto: true,
       supplierId: supplier.id,
@@ -11408,6 +11413,66 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
     setMovements(newMovements);
     await saveJSON("movements-log", newMovements);
     toast("Pago registrado", "success");
+  }
+
+  // Deuda manual (sin recepción de por medio): misma forma que el cargo que
+  // nace solo al recibir a crédito, pero sin invoiceId, para distinguirla en
+  // el historial.
+  async function addCharge(supplier, amount, note) {
+    const latestLedger = await loadJSON("supplier-ledger", supplierLedger);
+    const cargo = {
+      id: uid("provmov"), supplierId: supplier.id, type: "cargo",
+      amount, date: new Date().toISOString(), invoiceId: null, paymentMethod: null, note: note || "",
+    };
+    const newLedger = [cargo, ...latestLedger];
+    setSupplierLedger(newLedger);
+    await saveJSON("supplier-ledger", newLedger);
+    toast("Monto pendiente agregado", "success");
+  }
+
+  // Corrige un cargo o abono ya guardado — para los errores de tipeo del
+  // día a día (un monto, una fecha, la nota) sin tener que borrar y volver a
+  // crear todo. Si el abono tiene un asiento de caja vinculado (movementId),
+  // el monto y la fecha se corrigen ahí también: la caja y la deuda del
+  // proveedor no pueden quedar contando dos historias distintas del mismo
+  // pago. Los abonos de antes de este cambio no tienen movementId — ahí la
+  // edición corrige solo el libro de crédito, como ya hacía.
+  async function editLedgerEntry(supplier, entry, changes) {
+    const latestLedger = await loadJSON("supplier-ledger", supplierLedger);
+    const newLedger = latestLedger.map(m => m.id === entry.id ? { ...m, ...changes } : m);
+    setSupplierLedger(newLedger);
+    await saveJSON("supplier-ledger", newLedger);
+
+    if (entry.type === "abono" && entry.movementId) {
+      const latestMovements = await loadJSON("movements-log", movements);
+      const newMovements = latestMovements.map(m => m.id === entry.movementId
+        ? { ...m, amount: changes.amount, date: changes.date }
+        : m);
+      setMovements(newMovements);
+      await saveJSON("movements-log", newMovements);
+    }
+    toast("Movimiento actualizado", "success");
+  }
+
+  // Elimina un cargo o abono mal ingresado. Borrar un abono deshace también
+  // su asiento de caja (si lo tiene): un pago que se anotó dos veces por
+  // error, por ejemplo, no puede seguir contando como gasto en Egresos una
+  // vez que se borra de acá. Borrar un cargo de una recepción a crédito NO
+  // toca el stock ni la recepción misma — solo la deuda pendiente, que es
+  // justo lo que a veces queda mal anotado.
+  async function deleteLedgerEntry(supplier, entry) {
+    const latestLedger = await loadJSON("supplier-ledger", supplierLedger);
+    const newLedger = latestLedger.filter(m => m.id !== entry.id);
+    setSupplierLedger(newLedger);
+    await saveJSON("supplier-ledger", newLedger);
+
+    if (entry.type === "abono" && entry.movementId) {
+      const latestMovements = await loadJSON("movements-log", movements);
+      const newMovements = latestMovements.filter(m => m.id !== entry.movementId);
+      setMovements(newMovements);
+      await saveJSON("movements-log", newMovements);
+    }
+    toast("Movimiento eliminado", "success");
   }
 
   return (
@@ -11461,6 +11526,9 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
           ledger={supplierLedger}
           toast={toast}
           onRegisterPayment={registerPayment}
+          onAddCharge={addCharge}
+          onEditEntry={editLedgerEntry}
+          onDeleteEntry={deleteLedgerEntry}
           onClose={() => setViewingLedger(null)}
         />
       )}
@@ -13937,11 +14005,83 @@ function CustomerLedgerModal({ customer, ledger, onRegisterPayment, toast, onClo
    acá el cargo nace de recibir mercadería "a crédito" en Recepción, y el
    abono es un pago que EL GALPÓN le hizo al proveedor.
 --------------------------------------------------------- */
-function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, toast, onClose }) {
+/* Cambia solo la fecha (año-mes-día) de un ISO, conservando la hora que ya
+   tenía — igual criterio que receptionDate en Recepción: la hora exacta no
+   importa para nada, pero conservarla evita que dos ediciones del mismo día
+   queden con el mismo instante exacto. */
+function conFechaNueva(iso, fecha) {
+  const original = new Date(iso);
+  const [a, m, d] = fecha.split("-").map(Number);
+  const nueva = new Date(original);
+  nueva.setFullYear(a, m - 1, d);
+  return nueva.toISOString();
+}
+
+/* Fila de edición de un movimiento del libro (cargo o abono). Aparece en vez
+   de la fila normal cuando se toca "Editar" — mismos campos que al crearlo,
+   más la fecha, que al crearlo se pone sola pero acá sí puede hacer falta
+   corregirla (un pago que se anotó el día después de hacerlo, por ejemplo). */
+function EditableLedgerRow({ entry, onCancel, onSave, toast }) {
+  const [amount, setAmount] = useState(String(entry.amount));
+  const [method, setMethod] = useState(entry.paymentMethod || "Efectivo");
+  const [note, setNote] = useState(entry.note || "");
+  const [date, setDate] = useState(entry.date.slice(0, 10));
+  const [saving, setSaving] = useState(false);
+
+  async function guardar() {
+    const n = Number(amount);
+    if (!n || n <= 0) return toast("Ingresa un monto válido", "error");
+    setSaving(true);
+    try {
+      await onSave({
+        amount: n,
+        note: note.trim(),
+        date: conFechaNueva(entry.date, date),
+        ...(entry.type === "abono" ? { paymentMethod: method } : {}),
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="px-3 py-2.5" style={{ background: C.brassSoft }}>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <input type="number" autoFocus value={amount} onChange={e => setAmount(e.target.value)} placeholder="Monto" className={`${inputCls} font-mono text-xs py-1.5`} style={inputStyle()} />
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} className={`${inputCls} text-xs py-1.5`} style={inputStyle()} />
+      </div>
+      {entry.type === "abono" && (
+        <select value={method} onChange={e => setMethod(e.target.value)} className={`${inputCls} text-xs py-1.5 mb-2`} style={inputStyle()}>
+          {["Efectivo", "Transferencia"].map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+      )}
+      <input value={note} onChange={e => setNote(e.target.value)} placeholder="Nota (opcional)" className={`${inputCls} text-xs py-1.5 mb-2`} style={inputStyle()} />
+      <div className="flex gap-1.5">
+        <Btn variant="ghost" size="sm" full onClick={onCancel} disabled={saving}>Cancelar</Btn>
+        <Btn size="sm" full icon={saving ? Loader2 : Check} disabled={saving} onClick={guardar}>{saving ? "Guardando…" : "Guardar"}</Btn>
+      </div>
+    </div>
+  );
+}
+
+function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, onAddCharge, onEditEntry, onDeleteEntry, toast, onClose }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("Efectivo");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // Deuda manual: para dejar un monto pendiente sin que haya pasado por
+  // Recepción — una factura de servicio, o para corregir algo que se saltó
+  // en su momento. El cargo que nace de una recepción a crédito sigue
+  // creándose solo, como siempre; esto es solo la puerta de atrás para los
+  // casos que esa puerta principal no cubre.
+  const [chargeOpen, setChargeOpen] = useState(false);
+  const [chargeAmount, setChargeAmount] = useState("");
+  const [chargeNote, setChargeNote] = useState("");
+  const [savingCharge, setSavingCharge] = useState(false);
+
+  const [editingId, setEditingId] = useState(null);
+  const [deletingEntry, setDeletingEntry] = useState(null);
 
   const entries = useMemo(() => {
     return ledger
@@ -13964,6 +14104,29 @@ function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, toast, onClo
     }
   }
 
+  async function submitCharge() {
+    const n = Number(chargeAmount);
+    if (!n || n <= 0) return toast("Ingresa un monto válido", "error");
+    setSavingCharge(true);
+    try {
+      await onAddCharge(supplier, n, chargeNote.trim());
+      setChargeAmount(""); setChargeNote(""); setChargeOpen(false);
+    } finally {
+      setSavingCharge(false);
+    }
+  }
+
+  async function saveEdit(entry, changes) {
+    await onEditEntry(supplier, entry, changes);
+    setEditingId(null);
+  }
+
+  async function confirmDelete() {
+    const entry = deletingEntry;
+    setDeletingEntry(null);
+    await onDeleteEntry(supplier, entry);
+  }
+
   return (
     <Modal title={`Crédito — ${supplier.name}`} onClose={onClose} wide>
       <div className="rounded-lg p-3 mb-3 flex items-center justify-between" style={{ background: C.ink }}>
@@ -13983,6 +14146,22 @@ function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, toast, onClo
         <Btn full size="sm" icon={saving ? Loader2 : Check} disabled={saving} onClick={submit}>{saving ? "Guardando…" : "Registrar abono"}</Btn>
       </div>
 
+      {chargeOpen ? (
+        <div className="rounded-lg p-3 mb-3" style={{ background: C.rustSoft, border: `1.5px solid ${C.rust}` }}>
+          <div className="text-xs font-semibold mb-2" style={{ color: C.ink }}>Agregar monto pendiente (sin recepción)</div>
+          <input type="number" value={chargeAmount} onChange={e => setChargeAmount(e.target.value)} placeholder="Monto" className={`${inputCls} font-mono mb-2`} style={inputStyle()} />
+          <input value={chargeNote} onChange={e => setChargeNote(e.target.value)} placeholder="Qué es (ej. factura N° 123, servicio de…)" className={`${inputCls} mb-2`} style={inputStyle()} />
+          <div className="flex gap-1.5">
+            <Btn variant="ghost" size="sm" full onClick={() => setChargeOpen(false)} disabled={savingCharge}>Cancelar</Btn>
+            <Btn size="sm" full icon={savingCharge ? Loader2 : Check} disabled={savingCharge} onClick={submitCharge}>{savingCharge ? "Guardando…" : "Agregar"}</Btn>
+          </div>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setChargeOpen(true)} className="text-xs underline mb-3" style={{ color: C.gray }}>
+          + Agregar monto pendiente que no vino de una recepción
+        </button>
+      )}
+
       <div className="text-xs font-semibold mb-1.5" style={{ color: C.ink }}>Historial</div>
       {entries.length === 0 ? (
         <p className="text-xs" style={{ color: C.gray }}>Sin movimientos todavía.</p>
@@ -13990,21 +14169,48 @@ function SupplierLedgerModal({ supplier, ledger, onRegisterPayment, toast, onClo
         <div className="rounded-lg overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
           <div className="max-h-72 overflow-y-auto divide-y" style={{ borderColor: C.paperLine }}>
             {entries.map(m => (
-              <div key={m.id} className="flex items-center justify-between px-3 py-2 text-xs">
-                <div>
-                  <div style={{ color: C.ink }}>{m.type === "cargo" ? "Recepción a crédito" : `Abono${m.paymentMethod ? ` (${m.paymentMethod})` : ""}`}</div>
-                  <div style={{ color: C.gray }}>{formatDate(m.date)}{m.note ? ` · ${m.note}` : ""}</div>
+              editingId === m.id ? (
+                <EditableLedgerRow key={m.id} entry={m} toast={toast} onCancel={() => setEditingId(null)} onSave={changes => saveEdit(m, changes)} />
+              ) : (
+                <div key={m.id} className="flex items-center justify-between px-3 py-2 text-xs gap-2">
+                  <div className="min-w-0">
+                    <div style={{ color: C.ink }}>{m.type === "cargo" ? (m.invoiceId ? "Recepción a crédito" : "Deuda manual") : `Abono${m.paymentMethod ? ` (${m.paymentMethod})` : ""}`}</div>
+                    <div style={{ color: C.gray }} className="truncate">{formatDate(m.date)}{m.note ? ` · ${m.note}` : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="font-mono font-semibold" style={{ color: m.type === "cargo" ? C.rust : C.greenDark }}>
+                      {m.type === "cargo" ? "+" : "−"}{formatCLP(m.amount)}
+                    </span>
+                    <button onClick={() => setEditingId(m.id)} aria-label="Editar" style={{ color: C.gray }}><Pencil size={13} /></button>
+                    <button onClick={() => setDeletingEntry(m)} aria-label="Eliminar" style={{ color: C.rust }}><Trash2 size={13} /></button>
+                  </div>
                 </div>
-                <span className="font-mono font-semibold" style={{ color: m.type === "cargo" ? C.rust : C.greenDark }}>
-                  {m.type === "cargo" ? "+" : "−"}{formatCLP(m.amount)}
-                </span>
-              </div>
+              )
             ))}
           </div>
         </div>
       )}
 
       <div className="mt-3"><Btn variant="ghost" full onClick={onClose}>Cerrar</Btn></div>
+
+      {deletingEntry && (
+        <Modal title="Eliminar movimiento" onClose={() => setDeletingEntry(null)}>
+          <p className="text-sm mb-2" style={{ color: C.ink }}>
+            ¿Eliminar este {deletingEntry.type === "cargo" ? "cargo" : "abono"} de <strong>{formatCLP(deletingEntry.amount)}</strong> del {formatDate(deletingEntry.date)}?
+          </p>
+          {deletingEntry.type === "abono" && (
+            <p className="text-xs mb-4" style={{ color: C.gray }}>
+              Si este pago tiene un gasto asociado en Finanzas → Egresos, se elimina también, para que la caja no quede con un pago que ya no existe acá.
+            </p>
+          )}
+          {deletingEntry.type === "cargo" && deletingEntry.invoiceId && (
+            <p className="text-xs mb-4" style={{ color: C.gray }}>
+              Esto solo borra la deuda pendiente — la recepción y el stock que ya entró no se tocan.
+            </p>
+          )}
+          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeletingEntry(null)}>Cancelar</Btn><Btn variant="rust" full onClick={confirmDelete}>Eliminar</Btn></div>
+        </Modal>
+      )}
     </Modal>
   );
 }
