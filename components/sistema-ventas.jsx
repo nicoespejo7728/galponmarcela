@@ -15871,7 +15871,7 @@ function FinanceView({ sales, movements, products }) {
    como estadística del negocio y esta sea la pantalla donde de verdad se
    registran pagos y gastos día a día.
 --------------------------------------------------------- */
-function ExpensesView({ movements, setMovements, toast }) {
+function ExpensesView({ movements, setMovements, invoicesIndex, setInvoicesIndex, toast }) {
   const [range, setRange] = useState("mes");
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -15891,19 +15891,35 @@ function ExpensesView({ movements, setMovements, toast }) {
 
   async function saveMovement(m) {
     const latest = await loadJSON("movements-log", movements);
-    const existe = latest.some(x => x.id === m.id);
+    const anterior = latest.find(x => x.id === m.id);
+    const existe = !!anterior;
     const nm = existe ? latest.map(x => x.id === m.id ? m : x) : [m, ...latest];
     setMovements(nm); await saveJSON("movements-log", nm);
+
+    // Este egreso puede venir de una recepción de mercadería (invoiceId): si
+    // se corrige el monto acá, la factura catalogada en Proveedores/Recepción
+    // tiene que quedar con el mismo número — si no, "Ver facturas catalogadas"
+    // seguiría mostrando el monto viejo aunque acá ya se arregló.
+    if (existe && m.invoiceId && Number(anterior.amount) !== Number(m.amount)) {
+      const latestInvoices = await loadJSON("invoices-index", invoicesIndex);
+      const newInvoices = latestInvoices.map(inv => inv.id === m.invoiceId
+        ? { ...inv, totalGross: m.amount, totalNet: m.amount / 1.19 }
+        : inv);
+      setInvoicesIndex(newInvoices);
+      await saveJSON("invoices-index", newInvoices);
+    }
+
     setAdding(false); setEditing(null);
     toast(existe ? "Pago corregido" : "Pago registrado", "success");
   }
 
-  // Solo se puede borrar (o editar, ver más abajo en el render) un pago
-  // manual — uno con "Nuevo pago" en esta misma pantalla, category
-  // "Pago a proveedor" incluida. Uno automático (una venta, una recepción,
-  // un abono del libro de crédito de Proveedores) nace de otro registro que
-  // vive en otra pantalla; borrarlo solo acá los dejaría contando historias
-  // distintas del mismo movimiento, así que esos se corrigen donde nacieron.
+  // Cualquier egreso se puede corregir o borrar acá — se anotó a mano con
+  // "Nuevo pago" o lo generó el sistema solo (una recepción de mercadería,
+  // un abono a proveedor desde Proveedores, una merma, etc.): un error de
+  // tipeo es un error de tipeo, no importa de dónde salió el número. Borrar
+  // uno que viene de una recepción o de un abono a proveedor NO deshace esa
+  // recepción ni ese abono — solo saca este egreso de Finanzas; si hace
+  // falta corregir el monto y no solo borrarlo, mejor editarlo.
   async function deleteMovement(m) {
     const latest = await loadJSON("movements-log", movements);
     const nm = latest.filter(x => x.id !== m.id);
@@ -15941,14 +15957,8 @@ function ExpensesView({ movements, setMovements, toast }) {
                     <button onClick={() => setViewingReceipt(m)} aria-label="Ver boleta o factura adjunta" className="flex items-center justify-center" style={{ color: C.gray }}><Receipt size={16} /></button>
                   )}
                   <span className="font-mono font-semibold text-sm" style={{ color: C.rust }}>−{formatCLP(m.amount)}</span>
-                  {/* Solo los pagos manuales (los de "Nuevo pago", acá mismo) se
-                      pueden editar o borrar — ver por qué en deleteMovement. */}
-                  {!m.auto && (
-                    <>
-                      <button onClick={() => setEditing(m)} aria-label="Editar" style={{ color: C.gray }}><Pencil size={14} /></button>
-                      <button onClick={() => setDeleting(m)} aria-label="Eliminar" style={{ color: C.rust }}><Trash2 size={14} /></button>
-                    </>
-                  )}
+                  <button onClick={() => setEditing(m)} aria-label="Editar" style={{ color: C.gray }}><Pencil size={14} /></button>
+                  <button onClick={() => setDeleting(m)} aria-label="Eliminar" style={{ color: C.rust }}><Trash2 size={14} /></button>
                 </div>
               </div>
             ))}
@@ -15960,7 +15970,10 @@ function ExpensesView({ movements, setMovements, toast }) {
       {editing && <MovementModal initial={editing} onClose={() => setEditing(null)} onSave={saveMovement} />}
       {deleting && (
         <Modal title="Eliminar pago" onClose={() => setDeleting(null)}>
-          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar el pago <strong>{deleting.concept}</strong> por <strong>{formatCLP(deleting.amount)}</strong>?</p>
+          <p className="text-sm mb-2" style={{ color: C.ink }}>¿Eliminar el pago <strong>{deleting.concept}</strong> por <strong>{formatCLP(deleting.amount)}</strong>?</p>
+          {deleting.invoiceId && (
+            <p className="text-xs mb-4" style={{ color: C.gray }}>Esto solo borra el egreso — la recepción y el stock que ya entró no se tocan. Si el número está mal pero la compra sí pasó, mejor corrígelo con el lápiz en vez de borrarlo.</p>
+          )}
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteMovement(deleting)}>Eliminar</Btn></div>
         </Modal>
       )}
@@ -19247,7 +19260,7 @@ export default function SistemaVentas() {
         {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "sueldos"} visited={visitedTabs.has("sueldos")}><PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "finanzas"} visited={visitedTabs.has("finanzas")}><FinanceView sales={sales} movements={movements} products={products} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "analisis"} visited={visitedTabs.has("analisis")}><AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} /></TabPane>}
