@@ -8314,7 +8314,7 @@ function enKilos(unidades, porKilo) {
   return kg === 0 ? "" : String(Number(kg.toFixed(3)));
 }
 
-function DraftRow({ item, onChange, onRemove, role, products, categories = [] }) {
+function DraftRow({ item, onChange, onRemove, role, products, categories = [], conflictoCodigo }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
   const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
   const porKilo = unidadesPorKilo(currentProduct);
@@ -8398,8 +8398,21 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [] })
                   <option value="__new__">+ Nueva categoría…</option>
                 </select>
               )}
-              <input value={item.barcode} onChange={e => onChange({ ...item, barcode: e.target.value })} placeholder="Código de barras (opcional)" className={`${inputCls} text-xs font-mono`} style={inputStyle()} />
+              {/* En blanco, al confirmar el sistema reparte uno propio solo —
+                  se puede escribir acá el que se prefiera en su lugar, y se
+                  revisa que no choque con ningún otro antes de guardar. */}
+              <input value={item.barcode} onChange={e => onChange({ ...item, barcode: e.target.value })} placeholder="Código de barras (o déjalo así y se crea uno solo)" className={`${inputCls} text-xs font-mono`} style={conflictoCodigo ? { ...inputStyle(), borderColor: C.rust } : inputStyle()} />
             </div>
+            {/* Aviso al tiro, mientras se escribe — no hay que esperar a
+                tocar "Confirmar recepción" para enterarse de que el código
+                ya está en uso. La comprobación de verdad, la que bloquea el
+                guardado, va en confirmReception contra el catálogo recién
+                releído; esto es solo para avisar temprano. */}
+            {conflictoCodigo && (
+              <div className="flex items-center gap-1 text-[10px] font-medium" style={{ color: C.rust }}>
+                <AlertTriangle size={11} /> {conflictoCodigo}
+              </div>
+            )}
             <div className="flex gap-1">
               <button type="button" onClick={() => onChange({ ...item, unitType: "unidad" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType !== "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Unidad</button>
               <button type="button" onClick={() => onChange({ ...item, unitType: "peso" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (gramos)</button>
@@ -8526,6 +8539,39 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const q = normalize(supplierQuery);
     return suppliers.filter(s => normalize(s.name).includes(q)).slice(0, 6);
   }, [supplierQuery, suppliers]);
+
+  // Aviso en vivo, mientras se escribe un código a mano: si ya lo tiene otro
+  // producto del catálogo, o se repite con otro producto nuevo de esta misma
+  // recepción. La comprobación que de verdad bloquea el guardado va en
+  // confirmReception, contra el catálogo recién releído de la base — esto es
+  // solo para que se note el problema antes de llegar a "Confirmar".
+  const conflictosCodigo = useMemo(() => {
+    const porCodigo = new Map(); // código → producto del catálogo
+    for (const p of products) {
+      const c = String(p.barcode || "").trim();
+      if (c) porCodigo.set(c, p);
+    }
+    const vistos = new Map(); // código → tempId del primero que lo usó acá
+    const conflictos = new Map(); // tempId → mensaje
+    for (const it of draftItems) {
+      if (!it.isNew) continue;
+      const codigo = it.barcode.trim();
+      if (!codigo) continue;
+      const enCatalogo = porCodigo.get(codigo);
+      if (enCatalogo) {
+        conflictos.set(it.tempId, `Ya lo tiene "${enCatalogo.name}"`);
+        continue;
+      }
+      const otroTempId = vistos.get(codigo);
+      if (otroTempId) {
+        conflictos.set(it.tempId, "Repetido en esta recepción");
+        conflictos.set(otroTempId, "Repetido en esta recepción");
+      } else {
+        vistos.set(codigo, it.tempId);
+      }
+    }
+    return conflictos;
+  }, [draftItems, products]);
 
   function pickSupplier(s) {
     setSupplier(s.name); setSupplierId(s.id); setSupplierQuery("");
@@ -8676,6 +8722,31 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const date = chosenDate.toISOString();
     let newProducts = [...latestProducts];
 
+    // Quien recibe también puede escribir a mano el código de un producto
+    // nuevo (por ejemplo si ya le puso una etiqueta propia antes, o si el
+    // envase trae uno que la pistola no leyó solo). Antes de seguir, se
+    // revisa que ese código no choque con ninguno: ni con uno que ya esté en
+    // el catálogo —activo o de baja, la base tiene un índice único sobre el
+    // código— ni con el de otro producto nuevo de esta misma recepción.
+    const catalogoPorCodigo = new Map(
+      latestProducts.map(p => [String(p.barcode || "").trim(), p]).filter(([c]) => c)
+    );
+    const codigosEscritosEnEstaRecepcion = new Map(); // código → nombre del primero que lo usó
+    for (const it of draftItems) {
+      if (!it.isNew) continue;
+      const codigo = it.barcode.trim();
+      if (!codigo) continue;
+      const enCatalogo = catalogoPorCodigo.get(codigo);
+      if (enCatalogo) {
+        return toast(`El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`, "error");
+      }
+      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigo);
+      if (yaEscrito) {
+        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
+      }
+      codigosEscritosEnEstaRecepcion.set(codigo, it.name.trim() || "un producto");
+    }
+
     // Productos nuevos que llegan sin código de barras: se les reparte uno
     // propio (EAN-13 real, del bloque interno) en el mismo momento de
     // recibirlos, en vez de dejarlos con el "INT-..." provisorio de antes —
@@ -8686,7 +8757,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     if (necesitanCodigo.length > 0) {
       try {
         const tomados = (await codigosInternosUsados(PREFIJO_ALMACEN)).map(c => ({ barcode: c }));
-        const nuevosCodigos = repartirCodigos([...latestProducts, ...tomados], necesitanCodigo.length);
+        // Los códigos que alguien ya escribió a mano en esta misma recepción
+        // también cuentan como ocupados — si no, el reparto automático podría
+        // entregarle a otro producto justo el mismo número que ya se escribió
+        // a mano un par de líneas más arriba, en la misma lista.
+        const escritosAMano = draftItems
+          .filter(it => it.isNew && it.barcode.trim())
+          .map(it => ({ barcode: it.barcode.trim() }));
+        const nuevosCodigos = repartirCodigos([...latestProducts, ...tomados, ...escritosAMano], necesitanCodigo.length);
         necesitanCodigo.forEach((it, i) => codigosAsignados.set(it.tempId, nuevosCodigos[i]));
       } catch (e) {
         // Sin conexión u otro problema al repartir: no se bloquea la
@@ -9053,14 +9131,20 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </div>
           <div>
             {draftItems.map(item => (
-              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} />
+              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} conflictoCodigo={conflictosCodigo.get(item.tempId)} />
             ))}
           </div>
         </div>
       )}
 
+      {conflictosCodigo.size > 0 && (
+        <div className="rounded-lg p-3 mb-3 flex items-center gap-2 text-xs font-medium" style={{ background: "#fdece9", color: C.rust }}>
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          Hay códigos repetidos en la lista — corrígelos antes de confirmar.
+        </div>
+      )}
       {draftItems.length > 0 && (
-        <Btn full variant="primary" icon={Truck} onClick={confirmReception}>
+        <Btn full variant="primary" icon={Truck} onClick={confirmReception} disabled={conflictosCodigo.size > 0}>
           Confirmar recepción de {draftItems.length} producto(s)
         </Btn>
       )}
