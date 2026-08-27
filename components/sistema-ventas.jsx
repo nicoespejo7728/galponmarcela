@@ -16028,17 +16028,23 @@ function ExpensesView({ movements, setMovements, invoicesIndex, setInvoicesIndex
     const latest = await loadJSON("movements-log", movements);
     const anterior = latest.find(x => x.id === m.id);
     const existe = !!anterior;
-    const nm = existe ? latest.map(x => x.id === m.id ? m : x) : [m, ...latest];
+    // El formulario de "Editar pago" solo trae concepto/monto/categoría/forma
+    // de pago — se combina con lo que ya había en vez de reemplazarlo entero,
+    // porque si no, corregir un pago automático (el de una recepción, por
+    // ejemplo) le borraba el vínculo a su factura y a su proveedor, y de paso
+    // "invoiceId" quedaba vacío justo cuando el chequeo de abajo lo necesita.
+    const guardado = existe ? { ...anterior, ...m } : m;
+    const nm = existe ? latest.map(x => x.id === m.id ? guardado : x) : [guardado, ...latest];
     setMovements(nm); await saveJSON("movements-log", nm);
 
     // Este egreso puede venir de una recepción de mercadería (invoiceId): si
     // se corrige el monto acá, la factura catalogada en Proveedores/Recepción
     // tiene que quedar con el mismo número — si no, "Ver facturas catalogadas"
     // seguiría mostrando el monto viejo aunque acá ya se arregló.
-    if (existe && m.invoiceId && Number(anterior.amount) !== Number(m.amount)) {
+    if (existe && guardado.invoiceId && Number(anterior.amount) !== Number(guardado.amount)) {
       const latestInvoices = await loadJSON("invoices-index", invoicesIndex);
-      const newInvoices = latestInvoices.map(inv => inv.id === m.invoiceId
-        ? { ...inv, totalGross: m.amount, totalNet: m.amount / 1.19 }
+      const newInvoices = latestInvoices.map(inv => inv.id === guardado.invoiceId
+        ? { ...inv, totalGross: guardado.amount, totalNet: guardado.amount / 1.19 }
         : inv);
       setInvoicesIndex(newInvoices);
       await saveJSON("invoices-index", newInvoices);
