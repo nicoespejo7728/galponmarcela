@@ -7939,14 +7939,26 @@ function ProductModal({ initial, onClose, onSave, products, suppliers = [], setS
     if (!form.name.trim()) return;
     if (quickMode && !form.category.trim()) return;
     if (showMarginWarning && !confirmedLoss) return;
-    if (!form.barcode.trim()) set("barcode", `INT-${Date.now()}`);
+    const barcodeFinal = form.barcode.trim() || `INT-${Date.now()}`;
+    // Si se escribe (o se corrige) un código a mano —por ejemplo, arreglando
+    // uno que la cámara del teléfono leyó mal el día del inventario general—
+    // que no choque con el de otro producto. Sin este aviso, corregirlo acá
+    // topaba con el índice único de la base y la corrección no quedaba
+    // guardada, sin ninguna pista de por qué.
+    if (form.barcode.trim()) {
+      const chocaCon = products.find(p => p.id !== form.id && String(p.barcode || "").trim() === barcodeFinal);
+      if (chocaCon) {
+        if (toast) toast(`Ese código ya lo tiene "${chocaCon.name}" — usa otro, o si es el mismo producto, únelos desde Productos → Duplicados`, "error");
+        return;
+      }
+    }
     const netCost = useTotalPaidMode ? computedCostPerKg : (Number(form.cost) || 0);
     const finalPrice = needsApproval ? suggestPrice(netCost) : (Number(form.price) || 0);
     onSave({
       ...form,
       name: upperField(form.name),
       category: upperField(form.category),
-      barcode: form.barcode.trim() || `INT-${Date.now()}`,
+      barcode: barcodeFinal,
       price: finalPrice,
       cost: netCost,
       stock: Number(form.stock) || 0,
@@ -14776,19 +14788,28 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
     return [];
   }, [products, selectedSection]);
 
-  async function persist(np) { setProducts(np); await saveJSON("products-catalog", np); }
+  // Se guarda primero en la base y recién ahí se actualiza lo que se ve en
+  // pantalla — al revés de antes. Si el guardado fallaba (por ejemplo, dos
+  // productos terminando con el mismo código de barras, que el índice único
+  // de la base rechaza), la pantalla ya había cambiado igual, como si hubiera
+  // funcionado, y el error quedaba solo en la consola sin que nadie lo viera.
+  async function persist(np) { await saveJSON("products-catalog", np); setProducts(np); }
 
   // Relee lo más reciente justo antes de fusionar el cambio, para no partir de
   // una copia local que otro dispositivo ya haya dejado atrás.
   async function saveProduct(p) {
-    const latest = await loadJSON("products-catalog", products);
-    const prev = latest.find(x => x.id === p.id);
-    const exists = !!prev;
-    const withZero = { ...p, stockZeroSince: nextStockZeroSince(prev?.stock, prev?.stockZeroSince, p.stock) };
-    const np = exists ? latest.map(x => x.id === p.id ? withZero : x) : [...latest, withZero];
-    await persist(np);
-    setEditing(null);
-    toast(exists ? "Producto actualizado" : "Producto creado", "success");
+    try {
+      const latest = await loadJSON("products-catalog", products);
+      const prev = latest.find(x => x.id === p.id);
+      const exists = !!prev;
+      const withZero = { ...p, stockZeroSince: nextStockZeroSince(prev?.stock, prev?.stockZeroSince, p.stock) };
+      const np = exists ? latest.map(x => x.id === p.id ? withZero : x) : [...latest, withZero];
+      await persist(np);
+      setEditing(null);
+      toast(exists ? "Producto actualizado" : "Producto creado", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar el producto — puede que el código de barras ya lo use otro"), "error");
+    }
   }
 
   async function assignCategory(product, newCategory) {
