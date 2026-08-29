@@ -47,6 +47,8 @@ import {
   cuerpoBoleta, estilosBoleta, estilosSoloImpresion, reglaDePagina, ID_IMPRESION, ID_ESTILOS,
   leerAjustesBoleta, guardarAjustesBoleta, AJUSTES_POR_OMISION, ventaDePrueba,
 } from "@/lib/boleta";
+import { generarImagenOferta } from "@/lib/promo-oferta";
+import { guardarImagenOferta, quitarImagenOferta } from "@/lib/datos/imagenes";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
   precioSugerido, explicarPrecio, redondearBonito, IVA,
@@ -13362,7 +13364,7 @@ function CategoryModal({ initial, onClose, onSave }) {
    liquidación. */
 const UMBRAL_DIAS_SIN_VENTA = 60;
 
-function OfertasView({ offers, setOffers, clearances, setClearances, products, sales, toast }) {
+function OfertasView({ offers, setOffers, clearances, setClearances, products, sales, settings, toast }) {
   const [subTab, setSubTab] = useState("ofertas");
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
@@ -13390,16 +13392,36 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
   async function persist(ns) { setOffers(ns); await saveJSON("quantity-offers", ns); }
 
   async function saveOferta(o) {
+    // La imagen promocional (si se generó o se pidió quitar) viaja aparte en
+    // el mismo objeto —_imagenGenerada/_quitarImagen— pero no es un campo de
+    // la oferta: no se manda a la colección "quantity-offers", y se procesa
+    // DESPUÉS de guardar la carpeta, porque oferta_imagen exige que la fila
+    // de la oferta ya exista (clave foránea). Si esta parte falla, la oferta
+    // ya quedó guardada igual — no tiene sentido deshacerla por eso.
+    const { _imagenGenerada, _quitarImagen, ...campos } = o;
     try {
       const latest = await loadJSON("quantity-offers", offers);
-      const exists = latest.some(x => x.id === o.id);
-      const ns = exists ? latest.map(x => x.id === o.id ? o : x) : [...latest, o];
+      const exists = latest.some(x => x.id === campos.id);
+      const ns = exists ? latest.map(x => x.id === campos.id ? campos : x) : [...latest, campos];
       await persist(ns);
       setEditing(null);
       toast(exists ? "Oferta actualizada" : "Oferta creada", "success");
     } catch (e) {
       console.error("[ofertas] no se pudo guardar", e);
       toast(friendlyError(e, "No se pudo guardar la oferta"), "error");
+      return;
+    }
+    try {
+      if (_imagenGenerada) {
+        const url = await guardarImagenOferta(campos.id, _imagenGenerada.dataUrl, _imagenGenerada.mediaType);
+        setOffers(prev => prev.map(x => x.id === campos.id ? { ...x, imageUrl: url } : x));
+      } else if (_quitarImagen) {
+        await quitarImagenOferta(campos.id);
+        setOffers(prev => prev.map(x => x.id === campos.id ? { ...x, imageUrl: null } : x));
+      }
+    } catch (e) {
+      console.error("[ofertas] no se pudo guardar la imagen promocional", e);
+      toast(friendlyError(e, "La oferta quedó guardada, pero la imagen promocional no se pudo guardar"), "error");
     }
   }
 
@@ -13517,7 +13539,16 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
               <div className="divide-y" style={{ borderColor: C.paperLine }}>
                 {filtered.map(o => (
                   <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-2">
-                    <div className="min-w-0">
+                    {/* Miniatura de la imagen promocional, si ya se armó una
+                        (migración 0034). Es un enlace directo al archivo
+                        público: sirve tal cual para verla grande, guardarla
+                        o compartirla, sin visor aparte que mantener. */}
+                    {o.imageUrl && (
+                      <a href={o.imageUrl} target="_blank" rel="noopener noreferrer" title="Ver imagen promocional" className="flex-shrink-0 rounded-lg overflow-hidden" style={{ width: 40, height: 71, border: `1px solid ${C.paperLine}` }}>
+                        <img src={o.imageUrl} alt="" className="w-full h-full object-cover" />
+                      </a>
+                    )}
+                    <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium" style={{ color: C.ink }}>{o.name}</div>
                       <div className="text-xs" style={{ color: C.gray }}>
                         {(o.productIds || []).length} producto(s) · {(o.tiers || []).length === 0
@@ -13615,6 +13646,8 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
           initial={editing.id ? editing : null}
           offers={offers}
           products={products}
+          settings={settings}
+          toast={toast}
           onClose={() => setEditing(null)}
           onSave={saveOferta}
         />
@@ -13650,7 +13683,7 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
   );
 }
 
-function OfertaModal({ initial, offers, products, onClose, onSave }) {
+function OfertaModal({ initial, offers, products, settings, toast, onClose, onSave }) {
   const [form, setForm] = useState({
     id: initial?.id || uid("ofr"),
     name: initial?.name || "",
@@ -13659,6 +13692,84 @@ function OfertaModal({ initial, offers, products, onClose, onSave }) {
   });
   const [productQuery, setProductQuery] = useState("");
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+
+  /* ---- Imagen promocional (opcional) ----
+     No se guardan las fotos sueltas que se adjuntan acá: solo el cartel ya
+     armado (ver generarImagenOferta). Por eso, al EDITAR una oferta que ya
+     tenía una imagen, no hay con qué reconstruir el collage de fotos si
+     solo se cambia el nombre o el precio — regenerarla sola en ese caso
+     terminaría reemplazando un cartel con fotos por uno sin ellas, que es
+     peor que no tocarla. Entonces: en una oferta NUEVA se arma sola apenas
+     hay nombre; en una que ya existía, solo se vuelve a armar si esta vez
+     se tocó al menos una foto (fotosTocadas) — un cambio de solo texto deja
+     la imagen guardada tal cual está. */
+  const esNueva = !initial?.id;
+  const [fotos, setFotos] = useState({});           // productId -> dataUrl
+  const [fotosTocadas, setFotosTocadas] = useState(false);
+  const [quitarPedido, setQuitarPedido] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState(initial?.imageUrl || null);
+  const [generando, setGenerando] = useState(false);
+  const fileInputRef = useRef(null);
+  const [pendingProductId, setPendingProductId] = useState(null);
+
+  function pedirFoto(productId) {
+    setPendingProductId(productId);
+    fileInputRef.current?.click();
+  }
+  async function onFotoSeleccionada(e) {
+    const file = e.target.files?.[0];
+    const productId = pendingProductId;
+    e.target.value = "";
+    if (!file || !productId) return;
+    try {
+      const att = await fileToAttachment(file);
+      setFotos(f => ({ ...f, [productId]: att.dataUrl }));
+      setFotosTocadas(true);
+      setQuitarPedido(false);
+    } catch (err) {
+      if (toast) toast(err.message || "No se pudo leer esa foto", "error");
+    }
+  }
+  function quitarFoto(productId) {
+    setFotos(f => { const n = { ...f }; delete n[productId]; return n; });
+    setFotosTocadas(true);
+  }
+  function quitarImagenCompleta() {
+    setPreviewUrl(null);
+    setFotos({});
+    setQuitarPedido(true);
+  }
+
+  useEffect(() => {
+    if (quitarPedido) return;
+    if (!form.name.trim()) return;
+    if (!esNueva && !fotosTocadas) return;
+    const fotosActivas = form.productIds.map(id => fotos[id]).filter(Boolean);
+    const nombresProductos = form.productIds
+      .map(id => products.find(p => p.id === id)?.name)
+      .filter(Boolean);
+    const tiersValidos = form.tiers.filter(t => Number(t.quantity) >= 2 && Number(t.price) > 0);
+    let cancelado = false;
+    setGenerando(true);
+    // Con debounce: arma sola la imagen, pero no en cada tecla — solo
+    // cuando la persona deja de escribir un instante.
+    const espera = setTimeout(async () => {
+      try {
+        const dataUrl = await generarImagenOferta({
+          oferta: { name: form.name, tiers: tiersValidos, productNames: nombresProductos },
+          fotos: fotosActivas,
+          settings,
+          colores: C,
+        });
+        if (!cancelado) setPreviewUrl(dataUrl);
+      } catch (e) {
+        console.error("[oferta] no se pudo armar la imagen promocional", e);
+      } finally {
+        if (!cancelado) setGenerando(false);
+      }
+    }, 500);
+    return () => { cancelado = true; clearTimeout(espera); setGenerando(false); };
+  }, [form.name, form.tiers, fotos, form.productIds, products, settings, esNueva, fotosTocadas, quitarPedido]);
 
   // Qué carpeta (si alguna, y no esta misma) ya tiene reclamado cada producto —
   // un producto solo puede estar en una a la vez, así que acá se avisa en vez
@@ -13702,13 +13813,22 @@ function OfertaModal({ initial, offers, products, onClose, onSave }) {
   function submit() {
     if (!form.name.trim()) return;
     if (form.productIds.length === 0) return;
-    onSave({
+    const payload = {
       ...form,
       name: form.name.trim(),
       // Igual que antes: un tramo a medio llenar (se agregó la fila y no se
       // alcanzó a poner el precio) se descarta acá, no queda guardado a medias.
       tiers: form.tiers.filter(t => Number(t.quantity) >= 2 && Number(t.price) > 0),
-    });
+    };
+    // La imagen viaja aparte del resto de los campos de la oferta —ver el
+    // comentario en saveOferta (OfertasView)—: acá solo se decide SI hay
+    // algo que guardar o quitar, no cómo se guarda.
+    if (quitarPedido) {
+      payload._quitarImagen = true;
+    } else if (previewUrl && (esNueva || fotosTocadas)) {
+      payload._imagenGenerada = { dataUrl: previewUrl, mediaType: "image/jpeg" };
+    }
+    onSave(payload);
   }
 
   return (
@@ -13797,7 +13917,59 @@ function OfertaModal({ initial, offers, products, onClose, onSave }) {
         )}
       </div>
 
-      <Btn full onClick={submit} icon={Check} disabled={!form.name.trim() || form.productIds.length === 0}>Guardar</Btn>
+      <div className="mb-4">
+        <span className="text-sm font-semibold block mb-1" style={{ color: C.ink }}>Imagen promocional (opcional)</span>
+        <p className="text-xs mb-2" style={{ color: C.gray }}>
+          Adjunta una foto de los productos que quieras mostrar y se arma sola una imagen lista para compartir por WhatsApp o redes, con el nombre y el precio de la oferta — funciona igual aunque no adjuntes ninguna foto.
+        </p>
+        {form.productIds.length === 0 ? (
+          <p className="text-xs" style={{ color: C.gray }}>Elige primero los productos de la carpeta.</p>
+        ) : (
+          <div className="space-y-1.5 mb-3">
+            {form.productIds.map(id => {
+              const p = products.find(x => x.id === id);
+              if (!p) return null;
+              const foto = fotos[id];
+              return (
+                <div key={id} className="flex items-center gap-2">
+                  {foto ? (
+                    <img src={foto} alt="" className="w-10 h-10 rounded-md object-cover flex-shrink-0" style={{ border: `1px solid ${C.paperLine}` }} />
+                  ) : (
+                    <div className="w-10 h-10 rounded-md flex items-center justify-center flex-shrink-0" style={{ background: C.paperDark }}>
+                      <Camera size={15} style={{ color: C.gray }} />
+                    </div>
+                  )}
+                  <span className="flex-1 text-sm truncate" style={{ color: C.ink }}>{p.name}</span>
+                  {foto ? (
+                    <button type="button" onClick={() => quitarFoto(id)} className="text-xs underline flex-shrink-0" style={{ color: C.rust }}>Quitar foto</button>
+                  ) : (
+                    <button type="button" onClick={() => pedirFoto(id)} className="text-xs underline flex-shrink-0" style={{ color: C.green }}>+ Foto</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={onFotoSeleccionada} className="hidden" />
+
+        {(generando || previewUrl) && (
+          <div className="rounded-lg p-2.5" style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}>
+            {previewUrl ? (
+              <div>
+                <img src={previewUrl} alt="Vista previa de la imagen promocional" className="mx-auto rounded-md block" style={{ maxHeight: 320, opacity: generando ? 0.6 : 1 }} />
+                <div className="flex items-center justify-center gap-3 mt-2">
+                  {generando && <span className="text-xs" style={{ color: C.gray }}>Actualizando…</span>}
+                  <button type="button" onClick={quitarImagenCompleta} className="text-xs underline" style={{ color: C.rust }}>Quitar imagen promocional</button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-center" style={{ color: C.gray }}>Armando la imagen…</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      <Btn full onClick={submit} icon={Check} disabled={!form.name.trim() || form.productIds.length === 0 || generando}>Guardar</Btn>
     </Modal>
   );
 }
@@ -19474,7 +19646,7 @@ export default function SistemaVentas() {
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
         <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} seccionPendiente={seccionProductosPendiente} onSeccionPendienteConsumida={() => setSeccionProductosPendiente(null)} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} settings={settings} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} toast={toast} /></TabPane>}
