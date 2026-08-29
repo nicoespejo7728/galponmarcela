@@ -7116,8 +7116,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       {/* Dos zonas de trabajo y nada más: a la izquierda de dónde saco los
           productos, a la derecha la boleta que se está armando con su cobro.
           En el teléfono la boleta va primero, porque es lo que hay que ver
-          mientras se carga la venta. */}
-      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px] lg:grid-cols-[minmax(0,1fr)_400px] items-start">
+          mientras se carga la venta.
+
+          El ancho fijo de la derecha se agrandó (era 340/400px): en un
+          monitor de mesón, angosto la hacía ver chica al lado de todo el
+          espacio libre que dejaba el resto de la pantalla. */}
+      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_420px] lg:grid-cols-[minmax(0,1fr)_520px] items-start">
         <div className="order-2 md:order-1 min-w-0">
           <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
             onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
@@ -19454,7 +19458,12 @@ export default function SistemaVentas() {
             hace perder plata. */}
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
 
-        <main className="p-4 sm:p-6 max-w-6xl mx-auto pb-24 lg:pb-6">
+        {/* En Vender el ancho tope es mayor: es la pantalla del mesón, la que
+            se usa todo el día, y en un monitor ancho el tope normal (max-w-6xl)
+            dejaba franjas vacías a los costados con la venta en curso chica
+            en el medio. El resto de las pestañas se queda con el ancho de
+            siempre. */}
+        <main className={`p-4 sm:p-6 mx-auto pb-24 lg:pb-6 ${tab === "pos" ? "max-w-[1600px]" : "max-w-6xl"}`}>
         <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
