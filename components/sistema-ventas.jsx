@@ -14556,10 +14556,22 @@ function CorregirNombreModal({ product, onClose, onSave }) {
   );
 }
 
-function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename, puedeAjustar }) {
+function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename, puedeAjustar, resetKey }) {
   const [page, setPage] = useState(0);
   const pageSize = 40;
-  useEffect(() => { setPage(0); }, [items]);
+  // Se vuelve a la primera página solo cuando cambia DE QUÉ LISTA se trata
+  // (otra sección, otra búsqueda) — antes se reiniciaba cada vez que la
+  // lista de productos cambiaba de referencia, y eso incluía editar un solo
+  // producto de la misma sección: corregir uno en la página 3 mandaba de
+  // vuelta a la página 1 en vez de dejar a quien edita donde estaba.
+  useEffect(() => { setPage(0); }, [resetKey]);
+  // Si la lista se achica —por ejemplo, se eliminaron varios productos— y la
+  // página en la que se estaba ya no existe, se acomoda a la última que sí
+  // tiene algo, en vez de quedar mirando una página vacía.
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(items.length / pageSize) - 1);
+    setPage(p => Math.min(p, maxPage));
+  }, [items.length]);
   const pageItems = items.slice(page * pageSize, page * pageSize + pageSize);
 
   if (items.length === 0) {
@@ -14795,11 +14807,22 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   // funcionado, y el error quedaba solo en la consola sin que nadie lo viera.
   async function persist(np) { await saveJSON("products-catalog", np); setProducts(np); }
 
-  // Relee lo más reciente justo antes de fusionar el cambio, para no partir de
-  // una copia local que otro dispositivo ya haya dejado atrás.
+  // Antes, para no partir de una copia que otro dispositivo ya había dejado
+  // atrás, cada guardado desde esta pantalla releía el catálogo COMPLETO —más
+  // años de historial de precios de miles de productos— antes de poder
+  // escribir un solo cambio. Eso era la demora real al modificar cualquier
+  // dato de un producto acá. Ahora se pide solo lo que cambió desde el último
+  // ciclo de sincronización (igual que hace esa sincronización cada 15
+  // segundos) y se combina con lo que ya está en pantalla: igual de al día,
+  // sin bajar de nuevo todo el catálogo entero cada vez.
+  async function productosAlDia() {
+    const llegados = await loadJSON("products-catalog", products, { reciente: true });
+    return fusionarProductos(products, llegados);
+  }
+
   async function saveProduct(p) {
     try {
-      const latest = await loadJSON("products-catalog", products);
+      const latest = await productosAlDia();
       const prev = latest.find(x => x.id === p.id);
       const exists = !!prev;
       const withZero = { ...p, stockZeroSince: nextStockZeroSince(prev?.stock, prev?.stockZeroSince, p.stock) };
@@ -14814,21 +14837,21 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
 
   async function assignCategory(product, newCategory) {
     const upperCat = upperField(newCategory);
-    const latest = await loadJSON("products-catalog", products);
+    const latest = await productosAlDia();
     const np = latest.map(p => p.id === product.id ? { ...p, category: upperCat } : p);
     await persist(np);
     toast(`"${product.name}" movido a "${upperCat}"`, "success");
   }
 
   async function deleteProduct(id) {
-    const latest = await loadJSON("products-catalog", products);
+    const latest = await productosAlDia();
     await persist(latest.filter(p => p.id !== id));
     setDeleting(null);
     toast("Producto eliminado", "success");
   }
 
   async function confirmRestock(qty, cost) {
-    const latestProducts = await loadJSON("products-catalog", products);
+    const latestProducts = await productosAlDia();
     const np = latestProducts.map(p => p.id === restocking.id ? { ...p, stock: p.stock + qty, cost: cost || p.cost, priceHistory: pushPriceHistory(p.priceHistory, cost || p.cost, p.price), stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + qty) } : p);
     const latestMovements = await loadJSON("movements-log", movements);
     const nm = [{ id: uid("mov"), date: new Date().toISOString(), type: "egreso", concept: `Reposición: ${restocking.name}`, amount: qty * cost, category: "Compra de mercadería", auto: true }, ...latestMovements];
@@ -14847,7 +14870,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
 
   async function confirmShrinkage({ qty, reason, note, authorizedBy }) {
     const product = shrinking;
-    const latestProducts = await loadJSON("products-catalog", products);
+    const latestProducts = await productosAlDia();
     const np = latestProducts.map(p => {
       if (p.id !== product.id) return p;
       const nextStock = Math.max(0, p.stock - qty);
@@ -14869,7 +14892,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   }
 
   async function handleImport(rows) {
-    const latest = await loadJSON("products-catalog", products);
+    const latest = await productosAlDia();
     const byBarcode = new Map(latest.map(p => [p.barcode, p]));
     rows.forEach(r => {
       const bc = r.barcode || `INT-${uid()}`;
@@ -14942,7 +14965,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
             <span>{searchResults.length} resultado(s) para "{query}"</span>
             <button onClick={() => setQuery("")} className="underline">Limpiar búsqueda</button>
           </div>
-          <ProductTable items={searchResults} {...tableHandlers} />
+          <ProductTable items={searchResults} resetKey={query} {...tableHandlers} />
         </div>
       ) : selectedSection === "__unclassified__" ? (
         <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -14970,7 +14993,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
             </button>
             <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{selectedSection} ({sectionItems.length})</span>
           </div>
-          <ProductTable items={sectionItems} {...tableHandlers} />
+          <ProductTable items={sectionItems} resetKey={selectedSection} {...tableHandlers} />
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
