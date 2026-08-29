@@ -7831,8 +7831,13 @@ function ReceiptModal({ sale, settings, onClose }) {
    PRODUCTO — MODAL CREAR / EDITAR
 --------------------------------------------------------- */
 function ProductModal({ initial, onClose, onSave, products, suppliers = [], setSuppliers, categories = [], role, session, toast }) {
+  // En orden alfabético: acá se elige de una lista para no repetir la
+  // categoría por un error de tipeo, y en una lista para elegir (a diferencia
+  // de la vista Categorías, donde sí importa el orden de estantería) lo que
+  // importa es encontrarla rápido — por eso no se usa el campo "order" de
+  // cada categoría, que es para otra cosa (ver CategoriesView).
   const sortedCategories = useMemo(
-    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    () => [...categories].sort((a, b) => a.name.localeCompare(b.name)),
     [categories]
   );
   // Igual que en DraftRow (Recepción): elegir de una lista evita secciones
@@ -8370,8 +8375,9 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
       costoEscrito: escritoPorUnidad,
     });
   }
+  // En orden alfabético — ver el mismo comentario en ProductModal.
   const sortedCategories = useMemo(
-    () => [...categories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name)),
+    () => [...categories].sort((a, b) => a.name.localeCompare(b.name)),
     [categories]
   );
   // Igual que en ProductModal: elegir de la lista evita categorías duplicadas
@@ -14811,13 +14817,20 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   // atrás, cada guardado desde esta pantalla releía el catálogo COMPLETO —más
   // años de historial de precios de miles de productos— antes de poder
   // escribir un solo cambio. Eso era la demora real al modificar cualquier
-  // dato de un producto acá. Ahora se pide solo lo que cambió desde el último
-  // ciclo de sincronización (igual que hace esa sincronización cada 15
-  // segundos) y se combina con lo que ya está en pantalla: igual de al día,
-  // sin bajar de nuevo todo el catálogo entero cada vez.
+  // dato de un producto acá.
+  // Se probó luego pedir solo lo que cambió desde el último ciclo de
+  // sincronización y combinarlo con lo que ya había en pantalla, pero ese
+  // camino comparte estado con la sincronización automática de fondo (cada
+  // 15s) y en la práctica seguía trabando la edición — sobre todo al
+  // cambiar de categoría, que además crea la categoría si es nueva: a
+  // veces no cargaba, no guardaba, o se demoraba mucho más de lo normal.
+  // Ahora se usa directamente lo que ya está en pantalla (products), que
+  // esa misma sincronización de fondo ya mantiene al día. No pide nada por
+  // red en este paso — es más simple y más rápido — y sigue siendo seguro:
+  // lo que realmente se guarda en el servidor se compara contra su propia
+  // copia interna, no contra lo que devuelva esta función.
   async function productosAlDia() {
-    const llegados = await loadJSON("products-catalog", products, { reciente: true });
-    return fusionarProductos(products, llegados);
+    return products;
   }
 
   async function saveProduct(p) {
