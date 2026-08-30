@@ -121,6 +121,7 @@ export async function POST(request) {
     return Response.json({ error: detalle }, { status: respuestaMP.status });
   }
 
+  console.log("[mercadopago cobrar] Mercado Pago aceptó la orden", datosMP.id);
   const sb = clienteServicio();
   const { data: fila, error } = await sb.from("pago_point").insert({
     terminal_id: terminalId,
@@ -134,6 +135,7 @@ export async function POST(request) {
   if (error) {
     // La orden ya está en la máquina aunque esto falle — se avisa tal cual,
     // no se le puede decir a la vendedora que no se mandó nada.
+    console.error("[mercadopago cobrar] la orden se creó pero no se pudo guardar el seguimiento", JSON.stringify(error), "mpOrderId:", datosMP.id);
     return Response.json(
       { error: `La orden se creó en Mercado Pago pero no se pudo guardar el seguimiento: ${error.message}`, mpOrderId: datosMP.id },
       { status: 500 }
