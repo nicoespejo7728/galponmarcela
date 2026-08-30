@@ -72,11 +72,17 @@ export async function POST(request) {
   }
 
   const referenciaExterna = randomUUID();
+  // El peso chileno no tiene decimales (a diferencia de la mayoría de las
+  // monedas con las que trabaja Mercado Pago) y su API de Órdenes valida el
+  // monto contra un patrón que depende de la moneda de la cuenta: mandar
+  // "100.00" para CLP lo rechaza con "does not match pattern" (confirmado
+  // probando en vivo) — hay que mandar el entero sin punto decimal.
+  const montoOrden = String(Math.round(montoNum));
   const cuerpoOrden = {
     type: "point",
     external_reference: referenciaExterna,
     expiration_time: EXPIRACION_ORDEN,
-    transactions: { payments: [{ amount: montoNum.toFixed(2) }] },
+    transactions: { payments: [{ amount: montoOrden }] },
     config: {
       point: {
         terminal_id: terminalId,
