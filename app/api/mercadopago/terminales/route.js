@@ -47,12 +47,15 @@ export async function GET(request) {
   const guardia = await exigirAdministrador(request);
   if (guardia.error) return Response.json({ error: guardia.error }, { status: guardia.estado });
 
-  // De prueba mientras se valida el flujo completo con tarjetas ficticias.
-  // Cuando se pase a cobros reales, esto cambia a MERCADOPAGO_ACCESS_TOKEN.
-  const token = process.env.MERCADOPAGO_ACCESS_TOKEN_TEST;
+  // Esto SÍ necesita el token de producción, aunque el resto de la
+  // integración se esté probando con el de prueba: las máquinas físicas
+  // están asociadas a la cuenta real, no a un usuario de prueba (que no
+  // tiene ninguna tienda ni caja propia). Es una simple lectura — no cobra
+  // nada — así que no hay riesgo en usarlo acá.
+  const token = process.env.MERCADOPAGO_ACCESS_TOKEN;
   if (!token) {
     return Response.json(
-      { error: "Falta configurar MERCADOPAGO_ACCESS_TOKEN_TEST en Vercel." },
+      { error: "Falta configurar MERCADOPAGO_ACCESS_TOKEN en Vercel." },
       { status: 503 }
     );
   }
