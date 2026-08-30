@@ -86,9 +86,10 @@ export async function POST(request) {
     config: {
       point: {
         terminal_id: terminalId,
-        // La boleta la imprime el sistema (ver lib/boleta.js) — que la
-        // máquina no saque un ticket propio además.
-        print_on_terminal: "no_ticket",
+        // OJO: "print_on_terminal" se sacó a propósito para descartarlo como
+        // causa de "Algo salió mal" en la máquina después de que la orden ya
+        // llega en estado at_terminal (probando en vivo, 30-ago). Si esto
+        // no cambia nada, no era el campo — se puede volver a poner.
       },
     },
   };
