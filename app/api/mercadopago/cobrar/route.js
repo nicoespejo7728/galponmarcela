@@ -204,8 +204,34 @@ export async function GET(request) {
   if (!token) return Response.json({ error: "Falta MERCADOPAGO_ACCESS_TOKEN." }, { status: 503 });
 
   const url = new URL(request.url);
+
+  // ?listar=1 — ver el operating_mode actual de cada máquina (STANDALONE =
+  // la máquina cobra por su cuenta con su propio teclado; PDV = recibe las
+  // órdenes que manda este sistema). Es lo primero que hay que revisar si
+  // la máquina no muestra el monto que se le mandó.
+  if (url.searchParams.get("listar")) {
+    const resp = await fetch("https://api.mercadopago.com/terminals/v1/list", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const datos = await resp.json().catch(() => null);
+    return Response.json(datos, { status: resp.status });
+  }
+
+  // ?ponerPdv=<terminal_id> — cambia esa máquina a modo PDV (integrado),
+  // que es el que necesita esta integración para funcionar.
+  const ponerPdv = url.searchParams.get("ponerPdv");
+  if (ponerPdv) {
+    const resp = await fetch("https://api.mercadopago.com/terminals/v1/setup", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ terminals: [{ id: ponerPdv, operating_mode: "PDV" }] }),
+    });
+    const datos = await resp.json().catch(() => null);
+    return Response.json(datos, { status: resp.status });
+  }
+
   const mpOrderId = url.searchParams.get("mpOrderId");
-  if (!mpOrderId) return Response.json({ error: "Falta ?mpOrderId=" }, { status: 400 });
+  if (!mpOrderId) return Response.json({ error: "Falta ?mpOrderId=, ?listar=1 o ?ponerPdv=" }, { status: 400 });
 
   const resp = await fetch(`https://api.mercadopago.com/v1/orders/${mpOrderId}`, {
     headers: { Authorization: `Bearer ${token}` },
