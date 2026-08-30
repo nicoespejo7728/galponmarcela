@@ -245,6 +245,20 @@ export async function GET(request) {
     return Response.json(datos, { status: resp.status });
   }
 
+  // ?ponerStandalone=<terminal_id> — la vuelve a su modo manual de siempre
+  // (para cuando se pausa esta integración y la máquina debe volver a
+  // cobrar por su cuenta, como antes).
+  const ponerStandalone = url.searchParams.get("ponerStandalone");
+  if (ponerStandalone) {
+    const resp = await fetch("https://api.mercadopago.com/terminals/v1/setup", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ terminals: [{ id: ponerStandalone, operating_mode: "STANDALONE" }] }),
+    });
+    const datos = await resp.json().catch(() => null);
+    return Response.json(datos, { status: resp.status });
+  }
+
   const mpOrderId = url.searchParams.get("mpOrderId");
   if (!mpOrderId) return Response.json({ error: "Falta ?mpOrderId=, ?listar=1 o ?ponerPdv=" }, { status: 400 });
 
