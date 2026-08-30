@@ -16586,8 +16586,23 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
 
   async function persist(nc) { setCounts(nc); await saveJSON("inventory-counts", nc); }
 
+  // Antes, programar o resolver un conteo releía la tabla ENTERA de conteos
+  // por red antes de poder escribir un solo cambio — con detalle y excepción
+  // de cada uno. Desde que el Inventario General (agosto 2026) empezó a dejar
+  // un conteo por cada producto contado suelto, esa tabla pasó de un puñado
+  // de filas a más de mil, y esa relectura completa era justo lo que dejaba
+  // pegada la pantalla al apretar "Programar". Igual que se resolvió antes en
+  // Inventario (ver productosAlDia): ahora se usa directamente lo que ya está
+  // en pantalla (counts), que la sincronización de fondo cada 15s mantiene al
+  // día. No pide nada por red en este paso, y sigue siendo seguro: lo que
+  // realmente se guarda se compara contra la copia interna del servidor, no
+  // contra lo que devuelva esta función.
+  async function conteosAlDia() {
+    return counts;
+  }
+
   async function scheduleNew(record) {
-    const latest = await loadJSON("inventory-counts", counts);
+    const latest = await conteosAlDia();
     await persist([record, ...latest]);
     setScheduling(false);
     toast("Inventario programado", "success");
@@ -16614,7 +16629,7 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
       };
     });
     const newMovements = [...diffMovements, ...latestMovements];
-    const latestCounts = await loadJSON("inventory-counts", counts);
+    const latestCounts = await conteosAlDia();
     const newCounts = latestCounts.map(r => r.id === executing.id ? { ...r, status: "completado", completedAt: date, completedBy: session.name, items } : r);
 
     setProducts(newProducts); setMovements(newMovements); setCounts(newCounts);
@@ -16629,7 +16644,7 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
   }
 
   async function submitException(reason) {
-    const latest = await loadJSON("inventory-counts", counts);
+    const latest = await conteosAlDia();
     const nc = latest.map(r => r.id === requestingException.id
       ? { ...r, status: "excepcion_solicitada", exception: { reason, requestedBy: session.name, requestedAt: new Date().toISOString(), approvedBy: null, approvedAt: null, previousDueDate: r.dueDate } }
       : r);
@@ -16639,7 +16654,7 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
   }
 
   async function approveException(newDate) {
-    const latest = await loadJSON("inventory-counts", counts);
+    const latest = await conteosAlDia();
     const nc = latest.map(r => r.id === approvingException.id
       ? { ...r, status: "pendiente", dueDate: newDate, exception: { ...r.exception, approvedBy: session.name, approvedAt: new Date().toISOString() } }
       : r);
@@ -18352,7 +18367,11 @@ function MarcelitaChat({ products, session, role, users, counts, setCounts, toas
   }, [messages, sending]);
 
   async function confirmCount(data, idx) {
-    const latest = await loadJSON("inventory-counts", counts);
+    // Mismo motivo que en InventoryCountsView (ver conteosAlDia ahí): releer
+    // la tabla completa de conteos por red antes de programar uno nuevo es lo
+    // que dejaba esto pegado — ahora se usa directamente "counts", que ya
+    // está al día por la sincronización de fondo.
+    const latest = counts;
     const record = {
       id: uid("inv-count"), dueDate: data.dueDate, category: data.category,
       assignedToId: data.userId, assignedToName: data.userName,
