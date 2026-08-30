@@ -42,6 +42,10 @@ import {
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
 import { hojaCartaDeCodigos, SIN_SECCION } from "@/lib/hoja-carta";
+import {
+  terminalPointDeEsteEquipo, guardarTerminalPointDeEsteEquipo,
+  crearCobroPoint, cancelarCobroPoint, leerEstadoCobroPoint,
+} from "@/lib/datos/mercadopago-point";
 import { valorDelConsumo, explicarBase } from "@/lib/consumo";
 import {
   cuerpoBoleta, estilosBoleta, estilosSoloImpresion, reglaDePagina, ID_IMPRESION, ID_ESTILOS,
@@ -6340,6 +6344,32 @@ function IdentifySellerModal({ onClose, onConfirm }) {
   );
 }
 
+/* Se muestra mientras el cobro con Débito/Crédito está en la máquina Point —
+   ver cobroPoint en POSView. "creando" es el instante entre apretar Cobrar y
+   que Mercado Pago confirme que la orden llegó a la máquina (normalmente
+   menos de un segundo); "esperando" es mientras la clienta paga. Cancelar
+   solo tiene efecto en "esperando" — antes de eso todavía no existe un cobro
+   que cancelar (ver cancelarCobroActual). */
+function CobroPointModal({ cobro, onCancel }) {
+  const esperando = cobro.estado === "esperando";
+  return (
+    <Modal title={esperando ? "Esperando el pago en la máquina…" : "Mandando el cobro a la máquina…"} onClose={onCancel}>
+      <div className="flex flex-col items-center gap-4 py-4">
+        <Loader2 className="animate-spin" size={36} style={{ color: C.brass }} />
+        <p className="text-2xl font-bold font-mono" style={{ color: C.ink }}>{formatCLP(cobro.monto)}</p>
+        <p className="text-sm text-center" style={{ color: C.gray }}>
+          {esperando
+            ? "Que la clienta pase o acerque la tarjeta en la máquina. Esta pantalla se cierra sola apenas confirme el pago."
+            : "Un momento…"}
+        </p>
+      </div>
+      <Btn full variant="ghostClaro" onClick={onCancel} disabled={!esperando}>
+        {esperando ? "Cancelar cobro" : "Un momento…"}
+      </Btn>
+    </Modal>
+  );
+}
+
 /* Producto temporal: pedido como parche de corto plazo (agosto 2026) para
    cobrar algo que no tiene código ni ficha —y no vale la pena crearle una—
    con un precio editable en el momento. A propósito NO crea un producto en
@@ -6395,6 +6425,45 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   // venta para el desglose del cierre de caja. No hace falta recordar a la
   // última persona: cada quien escribe su propio PIN en cada venta.
   const [identifyOpen, setIdentifyOpen] = useState(false);
+
+  // Cobro con la máquina Point: null mientras no hay ningún cobro en curso.
+  // { estado: "creando" | "esperando", id?, seller, monto } — ver checkout()
+  // y cobrarConMaquina más abajo.
+  const [cobroPoint, setCobroPoint] = useState(null);
+
+  // Mientras se espera la confirmación de la máquina, se consulta cada dos
+  // segundos — no hay push desde el servidor hacia el navegador acá, así que
+  // sondear es lo más simple que de verdad funciona. Se detiene solo si el
+  // cobro deja de estar "esperando" (se resolvió, o se canceló a mano).
+  useEffect(() => {
+    if (cobroPoint?.estado !== "esperando") return;
+    let vigente = true;
+    const intervalo = setInterval(async () => {
+      let r;
+      try {
+        r = await leerEstadoCobroPoint(cobroPoint.id);
+      } catch (e) {
+        console.error("[point] no se pudo consultar el cobro", e);
+        return; // un fallo de red no corta la espera — el próximo intento puede funcionar
+      }
+      if (!vigente || !r) return;
+      if (r.estado === "aprobado") {
+        setCobroPoint(null);
+        procederConVenta(cobroPoint.seller);
+      } else if (["rechazado", "cancelado", "expirado"].includes(r.estado)) {
+        setCobroPoint(null);
+        toast(
+          r.estado === "rechazado" ? "La tarjeta fue rechazada"
+          : r.estado === "expirado" ? "Se acabó el tiempo de espera en la máquina"
+          : "El cobro se canceló",
+          "error"
+        );
+      }
+      // "esperando" o "action_required" (ej. la máquina pide elegir cuotas):
+      // se sigue esperando sin hacer nada.
+    }, 2000);
+    return () => { vigente = false; clearInterval(intervalo); };
+  }, [cobroPoint?.estado, cobroPoint?.id]);
 
   // Fiado: solo se pide un cliente cuando la forma de pago es "Fiado" — el
   // resto de las ventas sigue exactamente igual que siempre.
@@ -6682,6 +6751,44 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     // acá, antes de cobrar, en vez de dejar pasar una línea gratis.
     const sinPrecio = cart.find(i => i.isTemporal && !(i.price > 0));
     if (sinPrecio) { toast(`Falta poner el precio de "${sinPrecio.name}"`, "error"); return; }
+
+    // Débito o Crédito puros (no un pago combinado, ahí no hay un solo monto
+    // que mandar) con una máquina Point asignada a esta caja: el cobro se
+    // manda primero a la máquina y la venta recién se registra si Mercado
+    // Pago confirma el pago — ver cobrarConMaquina más abajo.
+    const terminalId = (payment === "Débito" || payment === "Crédito")
+      ? terminalPointDeEsteEquipo() : null;
+    if (terminalId) return cobrarConMaquina(seller, terminalId);
+
+    await procederConVenta(seller);
+  }
+
+  async function cobrarConMaquina(seller, terminalId) {
+    setCobroPoint({ estado: "creando", seller, monto: total });
+    try {
+      const cobro = await crearCobroPoint({ monto: total, terminalId });
+      setCobroPoint({ estado: "esperando", id: cobro.id, seller, monto: total });
+    } catch (e) {
+      setCobroPoint(null);
+      toast(friendlyError(e, "No se pudo mandar el cobro a la máquina"), "error");
+    }
+  }
+
+  async function cancelarCobroActual() {
+    if (!cobroPoint || cobroPoint.estado !== "esperando") return;
+    const id = cobroPoint.id;
+    setCobroPoint(null);
+    try {
+      await cancelarCobroPoint(id);
+    } catch (e) {
+      // Ya se cerró la ventana en pantalla — si la máquina ya estaba
+      // mostrando la tarjeta, Mercado Pago no deja cancelar y el cobro
+      // sigue su curso solo; no hay nada más que hacer acá que avisar.
+      toast(friendlyError(e, "No se pudo cancelar el cobro en la máquina"), "error");
+    }
+  }
+
+  async function procederConVenta(seller) {
     // Se relee todo desde el almacenamiento justo antes de confirmar (en vez de
     // confiar en el estado local, que puede tener hasta unos segundos de rezago
     // por la sincronización entre dispositivos). Esto reduce al mínimo la ventana
@@ -7452,6 +7559,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           onConfirm={(seller) => { setIdentifyOpen(false); checkout(seller); }}
         />
       )}
+      {cobroPoint && <CobroPointModal cobro={cobroPoint} onCancel={cancelarCobroActual} />}
       {ventaNueva && (
         <ProductoNuevoEnVentaModal
           barcode={ventaNueva.barcode}
@@ -17951,6 +18059,10 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
   const [mpDevices, setMpDevices] = useState(null);
   const [mpLoading, setMpLoading] = useState(false);
   const [mpError, setMpError] = useState("");
+  // Cuál máquina Point le corresponde a ESTE computador — se guarda en este
+  // mismo navegador (ver mercadopago-point.js), no en la base: la caja de al
+  // lado puede tener asignada la otra.
+  const [terminalEsteEquipo, setTerminalEsteEquipo] = useState(() => terminalPointDeEsteEquipo());
 
   /* La fecha se guarda al tiro: es una decisión de una sola vez y no tiene
      sentido esconderla detrás de un "Guardar" compartido con el nombre del
@@ -18127,9 +18239,9 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Mercado Pago Point (en pruebas)</h3>
+        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Mercado Pago Point</h3>
         <p className="text-sm mb-3" style={{ color: C.gray }}>
-          Paso de configuración: busca el identificador que usa Mercado Pago para cada máquina Point, para poder mandarle un cobro directo más adelante.
+          Al cobrar con Débito o Crédito en Vender, el monto se manda directo a la máquina — no hace falta teclearlo de nuevo ahí.
         </p>
         <Btn size="sm" icon={mpLoading ? Loader2 : Search} disabled={mpLoading} onClick={buscarTerminalesMP}>
           {mpLoading ? "Buscando…" : "Buscar máquinas Point"}
@@ -18139,13 +18251,28 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           mpDevices.length === 0 ? (
             <p className="text-xs mt-2" style={{ color: C.gray }}>Mercado Pago no devolvió ninguna máquina para esta cuenta.</p>
           ) : (
-            <div className="mt-3 space-y-2">
-              {mpDevices.map(d => (
-                <div key={d.id} className="text-xs rounded-lg p-2 font-mono" style={{ background: C.paperDark, color: C.ink }}>
-                  <div>id: {d.id}</div>
-                  <div style={{ color: C.gray }}>pos_id: {d.pos_id} · store_id: {d.store_id} · caja: {d.external_pos_id || "—"}</div>
-                </div>
-              ))}
+            <div className="mt-3 space-y-3">
+              <div className="space-y-2">
+                {mpDevices.map(d => (
+                  <div key={d.id} className="text-xs rounded-lg p-2 font-mono" style={{ background: C.paperDark, color: C.ink }}>
+                    <div>id: {d.id}</div>
+                    <div style={{ color: C.gray }}>pos_id: {d.pos_id} · store_id: {d.store_id} · caja: {d.external_pos_id || "—"}</div>
+                  </div>
+                ))}
+              </div>
+              <Field label="¿Cuál de estas máquinas está junto a ESTE computador?">
+                <select
+                  value={terminalEsteEquipo || ""}
+                  onChange={e => { const v = e.target.value || null; setTerminalEsteEquipo(v); guardarTerminalPointDeEsteEquipo(v); }}
+                  className={inputCls} style={inputStyle()}
+                >
+                  <option value="">Ninguna — cobrar aquí sin máquina</option>
+                  {mpDevices.map(d => <option key={d.id} value={d.id}>{d.id}</option>)}
+                </select>
+                <p className="text-[11px] mt-1" style={{ color: C.grayLight }}>
+                  Esto se guarda en este navegador, no en el sistema: la otra caja elige la suya por separado.
+                </p>
+              </Field>
             </div>
           )
         )}
