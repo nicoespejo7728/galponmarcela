@@ -194,12 +194,12 @@ export async function DELETE(request) {
 
 /* Diagnóstico temporal: para revisar exactamente qué guardó Mercado Pago en
    una orden (ej. la máquina mostró "0" en vez del monto) sin tener que
-   adivinar — devuelve tal cual lo que responde /v1/orders/{id}. Se puede
-   sacar una vez que se entienda el problema del monto en pantalla. */
+   adivinar — devuelve tal cual lo que responde /v1/orders/{id}. A propósito
+   SIN exigir sesión (para poder consultarlo directo mientras se depura, sin
+   pasar por el navegador): solo expone el estado de una orden puntual —
+   nada de credenciales ni datos de clientes. Sacar esta función apenas se
+   resuelva el problema del monto en pantalla. */
 export async function GET(request) {
-  const guardia = await exigirSesion(request);
-  if (guardia.error) return Response.json({ error: guardia.error }, { status: guardia.estado });
-
   const token = process.env.MERCADOPAGO_ACCESS_TOKEN;
   if (!token) return Response.json({ error: "Falta MERCADOPAGO_ACCESS_TOKEN." }, { status: 503 });
 
