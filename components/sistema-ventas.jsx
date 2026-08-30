@@ -12147,7 +12147,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
   const [rolloId, setRolloId] = useState(ROLLO_POR_OMISION.id);
   const rollo = ROLLOS.find(r => r.id === rolloId) || ROLLO_POR_OMISION;
   const medida = medirCodigo(rollo.largo - 2);   // menos un milímetro de margen a cada lado
-  const cabe = queCabe(rollo.ancho);
+  const cabe = queCabe(rollo.ancho, rollo.largo);
 
   // Para encontrar rápido entre muchos: filtra por nombre o por sección,
   // sin distinguir tildes ni mayúsculas.
@@ -12208,7 +12208,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
 
   const aImprimir = useMemo(
     () => conCodigo
-      .map(p => ({ producto: p, copias: Math.max(0, Number(cuantas[p.id] ?? 1) || 0) }))
+      .map(p => ({ producto: p, copias: Math.max(0, Number(cuantas[p.id] ?? 0) || 0) }))
       .filter(x => x.copias > 0),
     [conCodigo, cuantas]);
   const totalEtiquetas = aImprimir.reduce((s, x) => s + x.copias, 0);
@@ -12433,9 +12433,11 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
                 {totalEtiquetas} etiqueta{totalEtiquetas === 1 ? "" : "s"} para imprimir
               </div>
               <p className="text-xs mt-0.5 max-w-md" style={{ color: C.gray }}>
-                {cabe.nombre
-                  ? "En este rollo cabe el nombre y el precio junto al código."
-                  : "En este rollo solo cabe el código y su número: el nombre no entra en " + rollo.ancho + " mm."}
+                {cabe.nombreDeCanto
+                  ? "En este rollo cabe el nombre de canto, al lado del código (angostado un poco para dejarle sitio)."
+                  : cabe.nombre
+                  ? "En este rollo cabe el nombre" + (cabe.precio ? " y el precio" : "") + " junto al código."
+                  : "En este rollo solo cabe el código y su número: el nombre no entra."}
                 {" "}Pon 0 en los que no quieras ahora.
               </p>
             </div>
@@ -12572,7 +12574,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
                           <label className="flex items-center gap-1.5">
                             <span className="text-[11px]" style={{ color: C.gray }}>etiquetas</span>
                             <input type="number" min="0" inputMode="numeric"
-                              value={cuantas[p.id] ?? 1}
+                              value={cuantas[p.id] ?? 0}
                               onChange={e => fijar(p.id, e.target.value)}
                               className={`${inputCls} font-mono w-16 text-center`} style={inputStyle()} />
                           </label>
