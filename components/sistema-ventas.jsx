@@ -17946,6 +17946,9 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
   const [restoring, setRestoring] = useState(false);
   const logoInputRef = useRef(null);
   const restoreInputRef = useRef(null);
+  const [mpDevices, setMpDevices] = useState(null);
+  const [mpLoading, setMpLoading] = useState(false);
+  const [mpError, setMpError] = useState("");
 
   /* La fecha se guarda al tiro: es una decisión de una sola vez y no tiene
      sentido esconderla detrás de un "Guardar" compartido con el nombre del
@@ -18017,6 +18020,29 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
     await quitarLogo();
     setSettings({ ...settings, businessLogo: null });
     toast("Logo quitado", "success");
+  }
+
+  /* Herramienta temporal para configurar el cobro con las máquinas Point:
+     el "terminal_id" que pide Mercado Pago para mandarle un cobro no es el
+     número de serie que se ve en la app de Mercado Pago, solo se puede ver
+     por API. Este botón lo consulta una sola vez por caja, mientras se deja
+     todo listo (ver app/api/mercadopago/terminales). */
+  async function buscarTerminalesMP() {
+    setMpLoading(true); setMpError(""); setMpDevices(null);
+    try {
+      const sb = obtenerCliente();
+      const { data: { session } } = await sb.auth.getSession();
+      const resp = await fetch("/api/mercadopago/terminales", {
+        headers: { Authorization: `Bearer ${session?.access_token || ""}` },
+      });
+      const datos = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(datos?.error || `Mercado Pago respondió ${resp.status}`);
+      setMpDevices(datos.devices || []);
+    } catch (e) {
+      setMpError(friendlyError(e, "No se pudo consultar Mercado Pago"));
+    } finally {
+      setMpLoading(false);
+    }
   }
 
   function downloadBackup() {
@@ -18096,6 +18122,31 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
           Los precios incluyen IVA (19%) — se desglosa en la factura
         </label>
         <Btn onClick={saveGeneral} icon={Check}>Guardar</Btn>
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Mercado Pago Point (en pruebas)</h3>
+        <p className="text-sm mb-3" style={{ color: C.gray }}>
+          Paso de configuración: busca el identificador que usa Mercado Pago para cada máquina Point, para poder mandarle un cobro directo más adelante.
+        </p>
+        <Btn size="sm" icon={mpLoading ? Loader2 : Search} disabled={mpLoading} onClick={buscarTerminalesMP}>
+          {mpLoading ? "Buscando…" : "Buscar máquinas Point"}
+        </Btn>
+        {mpError && <p className="text-xs mt-2" style={{ color: C.rust }}>{mpError}</p>}
+        {mpDevices && (
+          mpDevices.length === 0 ? (
+            <p className="text-xs mt-2" style={{ color: C.gray }}>Mercado Pago no devolvió ninguna máquina para esta cuenta.</p>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {mpDevices.map(d => (
+                <div key={d.id} className="text-xs rounded-lg p-2 font-mono" style={{ background: C.paperDark, color: C.ink }}>
+                  <div>id: {d.id}</div>
+                  <div style={{ color: C.gray }}>pos_id: {d.pos_id} · store_id: {d.store_id} · caja: {d.external_pos_id || "—"}</div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
