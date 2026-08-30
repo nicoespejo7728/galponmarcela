@@ -54,6 +54,15 @@ export async function POST(request) {
   const guardia = await exigirSesion(request);
   if (guardia.error) return Response.json({ error: guardia.error }, { status: guardia.estado });
 
+  // El botón "Cancelar cobro" mandaba esto como DELETE, pero algo entre el
+  // navegador y el servidor (todavía sin identificar — no es el código de
+  // esta ruta, que sí define DELETE) lo estaba devolviendo con 405 antes de
+  // siquiera llegar acá. Mientras se investiga esa parte, cancelar también
+  // se puede pedir por POST con {accion:"cancelar"} — un verbo que sí está
+  // llegando bien — para que el botón funcione mientras tanto.
+  const cuerpo = await request.json().catch(() => ({}));
+  if (cuerpo?.accion === "cancelar") return cancelarOrden(cuerpo.id, guardia);
+
   const token = process.env.MERCADOPAGO_ACCESS_TOKEN;
   if (!token) {
     return Response.json({ error: "Falta configurar MERCADOPAGO_ACCESS_TOKEN en el servidor." }, { status: 503 });
@@ -62,7 +71,7 @@ export async function POST(request) {
     return Response.json({ error: "Falta configurar SUPABASE_SERVICE_ROLE_KEY en el servidor." }, { status: 503 });
   }
 
-  const { monto, terminalId } = await request.json().catch(() => ({}));
+  const { monto, terminalId } = cuerpo;
   const montoNum = Number(monto);
   if (!Number.isFinite(montoNum) || montoNum <= 0) {
     return Response.json({ error: "El monto no es válido." }, { status: 400 });
@@ -148,17 +157,16 @@ export async function POST(request) {
 
 /* Cancela un cobro en curso — la vendedora se arrepintió, o se demoró
    demasiado y hay que cortar. Mercado Pago solo deja cancelar una orden
-   mientras siga en estado "created" (todavía no se le mostró tarjeta). */
-export async function DELETE(request) {
-  const guardia = await exigirSesion(request);
+   mientras siga en estado "created" (todavía no se le mostró tarjeta).
+   Compartida entre DELETE (la forma correcta) y el atajo por POST de más
+   arriba (mientras se investiga por qué DELETE a veces vuelve con 405). */
+async function cancelarOrden(id, guardia) {
   if (guardia.error) return Response.json({ error: guardia.error }, { status: guardia.estado });
 
   const token = process.env.MERCADOPAGO_ACCESS_TOKEN;
   if (!token) {
     return Response.json({ error: "Falta configurar MERCADOPAGO_ACCESS_TOKEN en el servidor." }, { status: 503 });
   }
-
-  const { id } = await request.json().catch(() => ({}));
   if (!id) return Response.json({ error: "Falta indicar el cobro." }, { status: 400 });
 
   const sb = clienteServicio();
@@ -191,6 +199,12 @@ export async function DELETE(request) {
 
   await sb.from("pago_point").update({ estado: "cancelado" }).eq("id", id);
   return Response.json({ ok: true });
+}
+
+export async function DELETE(request) {
+  const guardia = await exigirSesion(request);
+  const { id } = await request.json().catch(() => ({}));
+  return cancelarOrden(id, guardia);
 }
 
 /* Diagnóstico temporal: para revisar exactamente qué guardó Mercado Pago en
