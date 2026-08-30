@@ -72,6 +72,21 @@ export async function POST(request) {
   }
 
   const referenciaExterna = randomUUID();
+  const cuerpoOrden = {
+    type: "point",
+    external_reference: referenciaExterna,
+    expiration_time: EXPIRACION_ORDEN,
+    transactions: { payments: [{ amount: montoNum.toFixed(2) }] },
+    config: {
+      point: {
+        terminal_id: terminalId,
+        // La boleta la imprime el sistema (ver lib/boleta.js) — que la
+        // máquina no saque un ticket propio además.
+        print_on_terminal: "no_ticket",
+      },
+    },
+  };
+  console.log("[mercadopago cobrar] creando orden", JSON.stringify(cuerpoOrden));
   let respuestaMP;
   try {
     respuestaMP = await fetch("https://api.mercadopago.com/v1/orders", {
@@ -81,20 +96,7 @@ export async function POST(request) {
         "Content-Type": "application/json",
         "X-Idempotency-Key": referenciaExterna,
       },
-      body: JSON.stringify({
-        type: "point",
-        external_reference: referenciaExterna,
-        expiration_time: EXPIRACION_ORDEN,
-        transactions: { payments: [{ amount: montoNum.toFixed(2) }] },
-        config: {
-          point: {
-            terminal_id: terminalId,
-            // La boleta la imprime el sistema (ver lib/boleta.js) — que la
-            // máquina no saque un ticket propio además.
-            print_on_terminal: "no_ticket",
-          },
-        },
-      }),
+      body: JSON.stringify(cuerpoOrden),
     });
   } catch (e) {
     return Response.json({ error: `No se pudo contactar a Mercado Pago: ${e.message}` }, { status: 502 });
@@ -102,10 +104,15 @@ export async function POST(request) {
 
   const datosMP = await respuestaMP.json().catch(() => null);
   if (!respuestaMP.ok) {
-    return Response.json(
-      { error: datosMP?.message || `Mercado Pago respondió ${respuestaMP.status}` },
-      { status: respuestaMP.status }
-    );
+    // Se deja el cuerpo completo en los logs del servidor (no solo
+    // datosMP.message, que a veces viene vacío y no dice nada útil) para
+    // poder diagnosticar sin tener que adivinar qué rechazó Mercado Pago.
+    console.error("[mercadopago cobrar] Mercado Pago rechazó la orden", respuestaMP.status, JSON.stringify(datosMP));
+    const detalle = datosMP?.message
+      || (Array.isArray(datosMP?.errors) ? datosMP.errors.map(e => e.message || e.code).join("; ") : null)
+      || datosMP?.error
+      || `Mercado Pago respondió ${respuestaMP.status}`;
+    return Response.json({ error: detalle }, { status: respuestaMP.status });
   }
 
   const sb = clienteServicio();
