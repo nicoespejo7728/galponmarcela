@@ -191,3 +191,25 @@ export async function DELETE(request) {
   await sb.from("pago_point").update({ estado: "cancelado" }).eq("id", id);
   return Response.json({ ok: true });
 }
+
+/* Diagnóstico temporal: para revisar exactamente qué guardó Mercado Pago en
+   una orden (ej. la máquina mostró "0" en vez del monto) sin tener que
+   adivinar — devuelve tal cual lo que responde /v1/orders/{id}. Se puede
+   sacar una vez que se entienda el problema del monto en pantalla. */
+export async function GET(request) {
+  const guardia = await exigirSesion(request);
+  if (guardia.error) return Response.json({ error: guardia.error }, { status: guardia.estado });
+
+  const token = process.env.MERCADOPAGO_ACCESS_TOKEN;
+  if (!token) return Response.json({ error: "Falta MERCADOPAGO_ACCESS_TOKEN." }, { status: 503 });
+
+  const url = new URL(request.url);
+  const mpOrderId = url.searchParams.get("mpOrderId");
+  if (!mpOrderId) return Response.json({ error: "Falta ?mpOrderId=" }, { status: 400 });
+
+  const resp = await fetch(`https://api.mercadopago.com/v1/orders/${mpOrderId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const datos = await resp.json().catch(() => null);
+  return Response.json(datos, { status: resp.status });
+}
