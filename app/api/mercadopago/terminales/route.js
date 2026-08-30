@@ -60,9 +60,12 @@ export async function GET(request) {
     );
   }
 
+  // OJO: el endpoint viejo (/point/integration-api/devices) está
+  // descontinuado — daba "site id is not valid" para esta cuenta aunque la
+  // credencial fuera la correcta. El vigente es este.
   let respuesta;
   try {
-    respuesta = await fetch("https://api.mercadopago.com/point/integration-api/devices", {
+    respuesta = await fetch("https://api.mercadopago.com/terminals/v1/list", {
       headers: { Authorization: `Bearer ${token}` },
     });
   } catch (e) {
@@ -77,5 +80,9 @@ export async function GET(request) {
     );
   }
 
-  return Response.json(datos);
+  // La forma exacta de la respuesta ("data.terminals", o "terminals" a
+  // secas según la cuenta) no está firme en la documentación — se prueban
+  // las variantes conocidas en vez de asumir una sola.
+  const devices = datos?.data?.terminals || datos?.terminals || datos?.devices || [];
+  return Response.json({ devices });
 }
