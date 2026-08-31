@@ -6162,11 +6162,12 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
   // Antes las categorías eran una fila de pestañas angostas para tocar con
   // el dedo y encima había que desplazarla al lado para encontrar la que
   // hacía falta — muy incómodo, sobre todo ahora que este panel quedó
-  // angosto (pedido de Fran, 31-ago-2026). Ahora son un acordeón: cada
-  // sección es una fila entera, fácil de tocar sin apuntar, y al abrirla
-  // aparecen ahí mismo sus productos de acceso rápido — sin pestaña "Todos"
-  // (cada producto ya tiene su categoría) y con una sola sección abierta a
-  // la vez, para que la lista no crezca sin control.
+  // angosto. Un acordeón (todo junto, una sección abajo de otra) tampoco
+  // sirvió: Fran pidió botones derecho — se toca la sección y ESA pantalla
+  // se reemplaza entera por los productos de acceso rápido de esa sección;
+  // al agregar uno al carrito, vuelve sola a mostrar las secciones, lista
+  // para la siguiente venta (pedido de Fran, 31-ago-2026). Sin pestaña
+  // "Todos": cada producto ya tiene su categoría.
   const [expandedCategory, setExpandedCategory] = useState(null);
   // Muestra los productos marcados explícitamente como "acceso rápido"; también
   // incluye, por compatibilidad, los productos antiguos sin código de barras
@@ -6227,13 +6228,17 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
   );
 
   // Las fichas de producto son iguales estén donde estén — se arma una vez y
-  // se reutiliza sección por sección.
+  // se reutiliza sección por sección. Tocarla agrega el producto Y vuelve a
+  // mostrar las secciones (ver comentario de expandedCategory más arriba) —
+  // incluida la de peso, que en realidad abre el cuadro para escribir el
+  // peso (ver WeightPromptModal en POSView): como es una ventana encima de
+  // todo, da lo mismo que la pantalla de abajo ya haya vuelto a secciones.
   function fichaProducto(p) {
     const outOfStock = p.stock <= 0;
     const clearance = liquidacionDeProducto(p.id, clearances);
     return (
       <button
-        key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
+        key={p.id} onClick={() => { onAdd(p); setExpandedCategory(null); }} disabled={outOfStock}
         className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
         style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
       >
@@ -6266,10 +6271,20 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
   return (
     <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
       <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
-        <Tags size={17} style={{ color: C.green }} />
-        <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Catálogo rápido</h2>
+        {expandedCategory ? (
+          <button onClick={() => setExpandedCategory(null)} className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: C.green }}>
+            <ChevronLeft size={16} /> Secciones
+          </button>
+        ) : (
+          <>
+            <Tags size={17} style={{ color: C.green }} />
+            <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Catálogo rápido</h2>
+          </>
+        )}
         <span className="ml-auto text-xs" style={{ color: C.gray }}>
-          {uncoded.length > 0 && `${uncoded.length} producto${uncoded.length === 1 ? "" : "s"}`}
+          {expandedCategory
+            ? `${(porCategoria.get(expandedCategory) || []).length} producto${(porCategoria.get(expandedCategory) || []).length === 1 ? "" : "s"}`
+            : uncoded.length > 0 && `${uncoded.length} producto${uncoded.length === 1 ? "" : "s"}`}
         </span>
       </header>
       {uncoded.length === 0 ? (
@@ -6281,44 +6296,40 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
         ) : (
           <p className="text-sm p-6 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
         )
+      ) : expandedCategory ? (
+        // Pantalla de productos de UNA sección: reemplaza por completo a la
+        // lista de secciones (no se muestran las dos juntas) — se vuelve a
+        // ella tocando "Secciones" arriba, o sola al agregar un producto.
+        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
+          {(porCategoria.get(expandedCategory) || []).map(fichaProducto)}
+          {(porCategoria.get(expandedCategory) || []).length === 0 && (
+            <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta sección.</p>
+          )}
+        </div>
       ) : (
+        // Pantalla de secciones: un botón por sección, ancho y fácil de
+        // tocar sin apuntar — nada de pestañas angostas ni acordeón.
         <div className="overflow-y-auto md:max-h-[66vh]">
           {fichaProductoTemporal && (
             <div className="grid grid-cols-2 gap-2.5 p-4 pb-2">{fichaProductoTemporal}</div>
           )}
-          {/* Una sección por fila, ancha, fácil de tocar sin apuntar — al
-              abrirla se despliegan ahí mismo sus productos de acceso rápido.
-              Tocar la misma sección otra vez la cierra; abrir otra cierra la
-              anterior, para que la lista no crezca sin control. */}
           <div className="divide-y" style={{ borderColor: C.paperLine }}>
             {categories.map(cat => {
               const productosCat = porCategoria.get(cat) || [];
-              const abierta = expandedCategory === cat;
               return (
-                <div key={cat}>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedCategory(abierta ? null : cat)}
-                    className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left transition"
-                    style={abierta
-                      ? { background: C.green, color: "#fff" }
-                      : { background: C.paperDark, color: C.ink }}
-                  >
-                    <span className="text-sm font-semibold truncate">{cat}</span>
-                    <span className="flex items-center gap-1.5 flex-shrink-0">
-                      <span className="text-xs" style={{ opacity: 0.8 }}>{productosCat.length}</span>
-                      <ChevronDown size={16} style={{ transform: abierta ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-                    </span>
-                  </button>
-                  {abierta && (
-                    <div className="grid grid-cols-2 gap-2.5 p-3">
-                      {productosCat.map(fichaProducto)}
-                      {productosCat.length === 0 && (
-                        <p className="col-span-full text-sm text-center py-4" style={{ color: C.gray }}>Sin productos en esta sección.</p>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setExpandedCategory(cat)}
+                  className="w-full px-4 py-3.5 flex items-center justify-between gap-2 text-left transition hover:bg-black/[.03]"
+                  style={{ background: "#fff", color: C.ink }}
+                >
+                  <span className="text-sm font-semibold truncate">{cat}</span>
+                  <span className="flex items-center gap-1.5 flex-shrink-0">
+                    <span className="text-xs" style={{ color: C.gray }}>{productosCat.length}</span>
+                    <ChevronRight size={16} style={{ color: C.gray }} />
+                  </span>
+                </button>
               );
             })}
           </div>
