@@ -6307,32 +6307,30 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
           )}
         </div>
       ) : (
-        // Pantalla de secciones: un botón por sección, ancho y fácil de
-        // tocar sin apuntar — nada de pestañas angostas ni acordeón.
-        <div className="overflow-y-auto md:max-h-[66vh]">
-          {fichaProductoTemporal && (
-            <div className="grid grid-cols-2 gap-2.5 p-4 pb-2">{fichaProductoTemporal}</div>
-          )}
-          <div className="divide-y" style={{ borderColor: C.paperLine }}>
-            {categories.map(cat => {
-              const productosCat = porCategoria.get(cat) || [];
-              return (
-                <button
-                  key={cat}
-                  type="button"
-                  onClick={() => setExpandedCategory(cat)}
-                  className="w-full px-4 py-3.5 flex items-center justify-between gap-2 text-left transition hover:bg-black/[.03]"
-                  style={{ background: "#fff", color: C.ink }}
-                >
-                  <span className="text-sm font-semibold truncate">{cat}</span>
-                  <span className="flex items-center gap-1.5 flex-shrink-0">
-                    <span className="text-xs" style={{ color: C.gray }}>{productosCat.length}</span>
-                    <ChevronRight size={16} style={{ color: C.gray }} />
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+        // Pantalla de secciones: mismas fichas grandes que un producto —
+        // ficha de "Producto temporal" incluida en la misma cuadrícula, no
+        // aparte — para que se toquen igual de fácil (pedido de Fran,
+        // 31-ago-2026: antes eran filas angostas de lista, no botones).
+        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
+          {fichaProductoTemporal}
+          {categories.map(cat => {
+            const productosCat = porCategoria.get(cat) || [];
+            return (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setExpandedCategory(cat)}
+                className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] active:scale-[.97] transition hover:shadow-md"
+                style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}
+              >
+                <span className="text-sm font-semibold leading-snug" style={{ color: C.ink }}>{cat}</span>
+                <span className="flex items-center justify-between gap-1">
+                  <span className="text-xs" style={{ color: C.gray }}>{productosCat.length} producto{productosCat.length === 1 ? "" : "s"}</span>
+                  <ChevronRight size={16} style={{ color: C.gray }} />
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
     </section>
