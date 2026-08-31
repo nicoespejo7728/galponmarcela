@@ -6159,10 +6159,15 @@ function WeightPromptModal({ product, onClose, onConfirm }) {
 }
 
 function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) {
-  // Sin pestaña "Todos" a propósito (pedido de Fran, 31-ago-2026): cada
-  // producto de acceso rápido ya tiene su categoría propia, así que esa
-  // pestaña solo repetía lo que las demás ya mostraban juntas.
-  const [activeCategory, setActiveCategory] = useState(null);
+  // Antes las categorías eran una fila de pestañas angostas para tocar con
+  // el dedo y encima había que desplazarla al lado para encontrar la que
+  // hacía falta — muy incómodo, sobre todo ahora que este panel quedó
+  // angosto (pedido de Fran, 31-ago-2026). Ahora son un acordeón: cada
+  // sección es una fila entera, fácil de tocar sin apuntar, y al abrirla
+  // aparecen ahí mismo sus productos de acceso rápido — sin pestaña "Todos"
+  // (cada producto ya tiene su categoría) y con una sola sección abierta a
+  // la vez, para que la lista no crezca sin control.
+  const [expandedCategory, setExpandedCategory] = useState(null);
   // Muestra los productos marcados explícitamente como "acceso rápido"; también
   // incluye, por compatibilidad, los productos antiguos sin código de barras
   // real (creados antes de que existiera esta casilla, con código interno INT-).
@@ -6180,27 +6185,27 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
     presentes.sort((a, b) => puesto(a) - puesto(b) || String(a).localeCompare(String(b), "es"));
     return presentes;
   }, [uncoded]);
-  // La categoría activa de verdad: la elegida si sigue existiendo, o si no
-  // (recién abierto, o la que estaba elegida quedó sin productos) la primera
-  // de la lista — nunca "ninguna", porque ya no hay pestaña "Todos" que
-  // muestre el conjunto completo.
-  const categoriaActiva = activeCategory && categories.includes(activeCategory) ? activeCategory : categories[0];
-  /* Lo que no hay se va al final. La ficha sin stock no se puede tocar —está
-     deshabilitada— así que mezclada entre las demás solo hace estorbo: obliga
-     a saltársela con la vista en la mitad del tablero, mientras el cliente
-     espera. Dentro de cada mitad se conserva el orden alfabético con que llega
-     el catálogo, para que las fichas no bailen de lugar entre una venta y la
-     siguiente. */
-  const filtered = useMemo(() => {
-    const enCategoria = categoriaActiva ? uncoded.filter(p => p.category === categoriaActiva) : uncoded;
-    const hay = [], noHay = [];
-    for (const p of enCategoria) ((p.stock > 0) ? hay : noHay).push(p);
-    return [...hay, ...noHay];
-  }, [uncoded, categoriaActiva]);
+  /* Lo que no hay se va al final dentro de cada sección. La ficha sin stock
+     no se puede tocar —está deshabilitada— así que mezclada entre las demás
+     solo hace estorbo. Dentro de cada mitad se conserva el orden alfabético
+     con que llega el catálogo, para que las fichas no bailen de lugar entre
+     una venta y la siguiente. */
+  const porCategoria = useMemo(() => {
+    const m = new Map();
+    for (const cat of categories) {
+      const hay = [], noHay = [];
+      for (const p of uncoded) {
+        if (p.category !== cat) continue;
+        (p.stock > 0 ? hay : noHay).push(p);
+      }
+      m.set(cat, [...hay, ...noHay]);
+    }
+    return m;
+  }, [uncoded, categories]);
 
   /* La ficha de "producto temporal" —precio editable, sin producto real
-     detrás— va SIEMPRE primera en el tablero, sin importar la categoría
-     elegida: no es un producto más, es un atajo aparte. Al tocarla se carga
+     detrás— va SIEMPRE arriba de todo, sin importar qué sección esté
+     abierta: no es un producto más, es un atajo aparte. Al tocarla se carga
      directo al carrito con precio en 0 y ahí mismo se edita — no abre
      ninguna ventana, así se pueden agregar varias, cada una con su propio
      precio, sin que una tape a la otra. Función temporal (ver
@@ -6221,13 +6226,50 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
     </button>
   );
 
+  // Las fichas de producto son iguales estén donde estén — se arma una vez y
+  // se reutiliza sección por sección.
+  function fichaProducto(p) {
+    const outOfStock = p.stock <= 0;
+    const clearance = liquidacionDeProducto(p.id, clearances);
+    return (
+      <button
+        key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
+        className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
+        style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
+      >
+        <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>
+          {p.name}
+          {clearance && !outOfStock && (
+            <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
+          )}
+          {p.isGrupo && (
+            <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
+          )}
+        </span>
+        <span className="flex items-end justify-between gap-1">
+          {outOfStock ? (
+            <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
+          ) : (
+            <span className="flex items-baseline gap-1.5">
+              {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+              <span className="text-base font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
+                {formatCLP(clearance ? clearance.price : p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+              </span>
+            </span>
+          )}
+          {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
+        </span>
+      </button>
+    );
+  }
+
   return (
     <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
       <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
         <Tags size={17} style={{ color: C.green }} />
         <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Catálogo rápido</h2>
         <span className="ml-auto text-xs" style={{ color: C.gray }}>
-          {uncoded.length > 0 && `${filtered.length} producto${filtered.length === 1 ? "" : "s"}`}
+          {uncoded.length > 0 && `${uncoded.length} producto${uncoded.length === 1 ? "" : "s"}`}
         </span>
       </header>
       {uncoded.length === 0 ? (
@@ -6240,68 +6282,47 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
           <p className="text-sm p-6 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
         )
       ) : (
-        <>
-          {/* Las categorías van arriba, en una fila propia: es el filtro del
-              tablero, no un elemento más entre los productos. */}
-          <div className="flex gap-2 overflow-x-auto px-4 py-3 flex-shrink-0" style={{ background: C.paperDark, borderBottom: `1px solid ${C.paperLine}` }}>
-            {categories.map(cat => (
-              <button
-                key={cat}
-                onClick={() => setActiveCategory(cat)}
-                className="px-4 rounded-lg text-sm font-semibold whitespace-nowrap flex-shrink-0 transition"
-                style={categoriaActiva === cat
-                  ? { background: C.green, color: "#fff" }
-                  : { background: "#fff", color: C.inkSoft, border: `1.5px solid ${C.paperLine}` }}
-              >{cat}</button>
-            ))}
-          </div>
-          {/* Botonera de productos. Las fichas son grandes a propósito: se usan
-              con el dedo o de un vistazo, mientras el cliente espera. */}
-          {/* Antes iban hasta 4 columnas: eran para el ancho flexible que
-              tenía este panel cuando era la zona grande. Ahora que quedó en
-              la columna angosta (ver el grid de más abajo, invertido a
-              pedido de Fran), 2 columnas fijas son las que caben sin
-              apretar las fichas. La altura se subió de 46vh: se veía
-              demasiado achatada apenas se probó (pedido de Fran, 31-ago-2026). */}
-          <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
-            {fichaProductoTemporal}
-            {filtered.map(p => {
-              const outOfStock = p.stock <= 0;
-              const clearance = liquidacionDeProducto(p.id, clearances);
+        <div className="overflow-y-auto md:max-h-[66vh]">
+          {fichaProductoTemporal && (
+            <div className="grid grid-cols-2 gap-2.5 p-4 pb-2">{fichaProductoTemporal}</div>
+          )}
+          {/* Una sección por fila, ancha, fácil de tocar sin apuntar — al
+              abrirla se despliegan ahí mismo sus productos de acceso rápido.
+              Tocar la misma sección otra vez la cierra; abrir otra cierra la
+              anterior, para que la lista no crezca sin control. */}
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {categories.map(cat => {
+              const productosCat = porCategoria.get(cat) || [];
+              const abierta = expandedCategory === cat;
               return (
-              <button
-                key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
-                className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
-                style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
-              >
-                <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>
-                  {p.name}
-                  {clearance && !outOfStock && (
-                    <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
-                  )}
-                  {p.isGrupo && (
-                    <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
-                  )}
-                </span>
-                <span className="flex items-end justify-between gap-1">
-                  {outOfStock ? (
-                    <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
-                  ) : (
-                    <span className="flex items-baseline gap-1.5">
-                      {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
-                      <span className="text-base font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
-                        {formatCLP(clearance ? clearance.price : p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
-                      </span>
+                <div key={cat}>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedCategory(abierta ? null : cat)}
+                    className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left transition"
+                    style={abierta
+                      ? { background: C.green, color: "#fff" }
+                      : { background: C.paperDark, color: C.ink }}
+                  >
+                    <span className="text-sm font-semibold truncate">{cat}</span>
+                    <span className="flex items-center gap-1.5 flex-shrink-0">
+                      <span className="text-xs" style={{ opacity: 0.8 }}>{productosCat.length}</span>
+                      <ChevronDown size={16} style={{ transform: abierta ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
                     </span>
+                  </button>
+                  {abierta && (
+                    <div className="grid grid-cols-2 gap-2.5 p-3">
+                      {productosCat.map(fichaProducto)}
+                      {productosCat.length === 0 && (
+                        <p className="col-span-full text-sm text-center py-4" style={{ color: C.gray }}>Sin productos en esta sección.</p>
+                      )}
+                    </div>
                   )}
-                  {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
-                </span>
-              </button>
+                </div>
               );
             })}
-            {filtered.length === 0 && !fichaProductoTemporal && <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta categoría.</p>}
           </div>
-        </>
+        </div>
       )}
     </section>
   );
