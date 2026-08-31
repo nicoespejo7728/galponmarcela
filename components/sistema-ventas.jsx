@@ -6261,8 +6261,9 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
               tenía este panel cuando era la zona grande. Ahora que quedó en
               la columna angosta (ver el grid de más abajo, invertido a
               pedido de Fran), 2 columnas fijas son las que caben sin
-              apretar las fichas. */}
-          <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[46vh]">
+              apretar las fichas. La altura se subió de 46vh: se veía
+              demasiado achatada apenas se probó (pedido de Fran, 31-ago-2026). */}
+          <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
             {fichaProductoTemporal}
             {filtered.map(p => {
               const outOfStock = p.stock <= 0;
@@ -7243,17 +7244,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
       {/* Dos zonas de trabajo y nada más: a la izquierda la boleta que se
           está armando con su cobro —grande y clara, es lo que más se mira
-          mientras se vende (pedido de Fran, 31-ago-2026)—, a la derecha, más
-          angosto, de dónde saco los productos. En el teléfono la boleta
-          sigue yendo primero, porque es lo que hay que ver mientras se carga
-          la venta. */}
-      <div className="grid gap-4 md:grid-cols-[420px_minmax(0,1fr)] lg:grid-cols-[520px_minmax(0,1fr)] items-start">
-        <div className="order-2 md:order-1 min-w-0">
-          <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
-            onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
-        </div>
-
-        <section className="order-1 md:order-2 lg:sticky lg:top-4 min-w-0 rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          mientras se vende (pedido de Fran, 31-ago-2026: antes era al revés,
+          el catálogo grande a la izquierda y la boleta angosta a la
+          derecha)—, a la derecha, más angosto, de dónde saco los productos.
+          En el teléfono la boleta sigue yendo primero, porque es lo que hay
+          que ver mientras se carga la venta. */}
+      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_420px] lg:grid-cols-[minmax(0,1fr)_520px] items-start">
+        <section className="order-1 lg:sticky lg:top-4 min-w-0 rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
           <header className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
             <ShoppingCart size={17} style={{ color: C.green }} />
             <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Venta en curso</h2>
@@ -7273,7 +7270,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             )}
           </header>
 
-          <div className="divide-y overflow-y-auto md:max-h-[calc(100vh-21rem)]" style={{ borderColor: C.paperLine }}>
+          {/* Se estira más que antes (era calc(100vh-21rem)): siendo ahora el
+              panel grande, se veía corta y apretada apenas se probó (pedido
+              de Fran, 31-ago-2026). */}
+          <div className="divide-y overflow-y-auto md:max-h-[calc(100vh-14rem)]" style={{ borderColor: C.paperLine }}>
             {cart.length === 0 ? (
               <div className="flex flex-col items-center text-center px-6 py-10">
                 <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ background: C.paperDark }}>
@@ -7566,6 +7566,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             </div>
           </div>
         </section>
+
+        <div className="order-2 min-w-0">
+          <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
+            onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
+        </div>
       </div>
 
       {weightPromptProduct && <WeightPromptModal product={weightPromptProduct} onClose={() => setWeightPromptProduct(null)} onConfirm={confirmWeight} />}
