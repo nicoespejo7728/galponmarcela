@@ -8922,9 +8922,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     if (isCredito && !supplierId) {
       return toast("Para recibir a crédito, el proveedor debe estar registrado — elígelo de la lista o regístralo primero", "error");
     }
-    if (isCredito && !duePaymentDate) {
-      return toast("Indica para cuándo queda la fecha de pago de este crédito", "error");
-    }
+    // La fecha de pago del crédito es opcional a propósito (pedido de Fran,
+    // 31-ago-2026): con algunos proveedores se sabe que se les debe pero no
+    // hay una fecha fija todavía, y obligarla no dejaba guardar la recepción.
     const esCombinado = paymentMethod === "Pago combinado";
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
@@ -9170,9 +9170,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     if (isCredito !== editContext.isCredito) {
       return toast("No se puede cambiar entre \"a crédito\" y \"pagada\" corrigiendo acá — la forma de pago se queda en la misma categoría. Si de verdad cambió, avisa para corregirlo a mano.", "error");
     }
-    if (isCredito && !duePaymentDate) {
-      return toast("Indica para cuándo queda la fecha de pago de este crédito", "error");
-    }
+    // La fecha de pago del crédito es opcional a propósito (pedido de Fran,
+    // 31-ago-2026): con algunos proveedores se sabe que se les debe pero no
+    // hay una fecha fija todavía, y obligarla no dejaba guardar la recepción.
     const esCombinado = paymentMethod === "Pago combinado";
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
@@ -9475,12 +9475,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             </select>
           </Field>
           {paymentMethod === "Crédito con el proveedor" && (
-            <Field label="Fecha de pago"><input type="date" value={duePaymentDate} onChange={e => setDuePaymentDate(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
+            <Field label="Fecha de pago (opcional)"><input type="date" value={duePaymentDate} onChange={e => setDuePaymentDate(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
           )}
         </div>
         {paymentMethod === "Crédito con el proveedor" && (
           <p className="text-[11px] -mt-2 mb-3" style={{ color: C.brassText }}>
-            La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"} hasta esa fecha — ver Proveedores.
+            La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"}{duePaymentDate ? " hasta esa fecha" : " sin fecha límite todavía"} — ver Proveedores.
           </p>
         )}
         {paymentMethod === "Pago combinado" && (
