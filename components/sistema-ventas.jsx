@@ -8666,6 +8666,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   const fileInputRef = useRef(null);
   const pistolaInputRef = useRef(null);
 
+  // Editar una recepción ya guardada (pedido de Fran, agosto 2026): cada línea
+  // cargada guarda además el id real de compra_detalle (lineaId) — es lo que
+  // permite CORREGIR o QUITAR una línea en vez de sumarla de nuevo al stock.
+  // editContext guarda todo lo necesario para calcular el AJUSTE (nunca el
+  // reemplazo completo) del stock y del pago/cargo asociados a esa recepción.
+  const [editingInvoiceId, setEditingInvoiceId] = useState(null);
+  const [editContext, setEditContext] = useState(null);
+
   const supplierMatches = useMemo(() => {
     if (supplierQuery.trim().length < 1) return [];
     const q = normalize(supplierQuery);
@@ -8704,6 +8712,24 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     }
     return conflictos;
   }, [draftItems, products]);
+
+  // Si el número que se está escribiendo ya pertenece a una recepción
+  // guardada, se ofrece cargarla para editar en vez de dejar que choque más
+  // adelante contra el índice único de la base (proveedor + número). Esa
+  // unicidad es POR PROVEEDOR: si ya se eligió uno, se busca ese calce
+  // exacto; si todavía no, se busca en cualquiera — y si hay más de uno con
+  // ese número entre proveedores distintos, se espera a que elija proveedor
+  // para no adivinar cuál de los dos es.
+  const matchingInvoice = useMemo(() => {
+    if (editingInvoiceId) return null;
+    const numero = refNumber.trim();
+    if (!numero) return null;
+    const norm = normalize(numero);
+    const candidatos = invoicesIndex.filter(inv => !inv.noDocument && inv.refNumber && normalize(inv.refNumber) === norm);
+    if (candidatos.length === 0) return null;
+    if (supplierId) return candidatos.find(inv => inv.supplierId === supplierId) || null;
+    return candidatos.length === 1 ? candidatos[0] : null;
+  }, [refNumber, supplierId, invoicesIndex, editingInvoiceId]);
 
   function pickSupplier(s) {
     setSupplier(s.name); setSupplierId(s.id); setSupplierQuery("");
@@ -8807,8 +8833,78 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     return { qty: acc.qty + qty, net: acc.net + qty * cost };
   }, { qty: 0, net: 0 });
 
+  // Carga una recepción ya guardada al formulario para corregirla. Se pide
+  // admin porque las políticas de la base solo dejan editar factura_compra y
+  // compra_detalle a un administrador — pedirlo también acá evita que alguien
+  // toque todo el formulario para terminar con un error recién al confirmar.
+  function loadInvoiceForEdit(inv) {
+    const lineas = purchaseItems.filter(pi => pi.invoiceId === inv.id);
+    if (lineas.length === 0) {
+      toast("Esta recepción no tiene productos guardados — no se puede cargar para editar.", "error");
+      return;
+    }
+    const items = lineas.map(pi => {
+      const prod = products.find(p => p.id === pi.productId);
+      // No queda guardado CÓMO venía escrito en la boleta (con IVA o neto),
+      // solo el costo neto ya calculado — se asume la forma actual del
+      // encabezado y se puede corregir línea por línea si no calza.
+      const costoEscrito = redondearBonito(comoEnLaFactura(pi.netCost, formaFactura));
+      return {
+        tempId: uid("draft"), isNew: false, lineaId: pi.id,
+        productId: pi.productId,
+        barcode: prod?.barcode || "",
+        name: pi.productName || prod?.name || "(producto ya no está en el catálogo)",
+        category: prod?.category || "",
+        qty: pi.qty, netCost: pi.netCost,
+        formaCosto: formaFactura, costoEscrito,
+        unitType: prod?.unitType === "peso" ? "peso" : "unidad",
+        finalPrice: prod?.price,
+      };
+    });
+    const movRelacionado = movements.find(m => m.invoiceId === inv.id);
+    const ledgerRelacionado = supplierLedger.find(l => l.invoiceId === inv.id && l.type === "cargo");
+    setEditContext({
+      invoiceId: inv.id,
+      originalInvoice: inv,
+      originalLines: lineas.map(pi => ({ id: pi.id, productId: pi.productId, qty: Number(pi.qty) || 0 })),
+      isCredito: inv.paymentMethod === "Crédito con el proveedor",
+      movementId: movRelacionado?.id || null,
+      ledgerEntryId: ledgerRelacionado?.id || null,
+    });
+    setEditingInvoiceId(inv.id);
+    setDraftItems(items);
+    setSupplier(inv.supplierName || "");
+    setSupplierId(inv.supplierId || null);
+    setSupplierQuery("");
+    setReceptionDate((inv.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10));
+    setDocumentType(inv.noDocument ? "sin_documento" : (inv.documentType || ""));
+    setNoDocumentReason(inv.reason || "");
+    setStatedTotal(inv.statedTotal != null ? String(inv.statedTotal) : "");
+    setPaymentMethod(inv.paymentMethod || "Efectivo");
+    setPaymentBreakdown(Array.isArray(inv.paymentBreakdown) && inv.paymentBreakdown.length > 0
+      ? inv.paymentBreakdown.map(d => ({ method: d.method, amount: String(d.amount) }))
+      : [{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
+    setDuePaymentDate(inv.duePaymentDate || "");
+    setRefNumber(inv.refNumber || "");
+    setInvoiceFiles([]);
+    setNameQuery(""); setPistolaBarcode("");
+    toast(`Recepción de ${inv.supplierName || "proveedor"} cargada — corrige lo que haga falta y confirma.`, "success");
+  }
+
+  function cancelEditReception() {
+    setEditingInvoiceId(null); setEditContext(null);
+    setDraftItems([]); setSupplier(""); setSupplierId(null); setSupplierQuery(""); setRefNumber("");
+    setInvoiceFiles([]); setPaymentMethod("Efectivo"); setDocumentType("");
+    setPaymentBreakdown([{ method: "Efectivo", amount: "" }, { method: "Transferencia", amount: "" }]);
+    setNoDocumentReason(""); setStatedTotal(""); setDuePaymentDate("");
+    setReceptionDate(new Date().toISOString().slice(0, 10));
+  }
+
   async function confirmReception() {
     if (draftItems.length === 0) return;
+    if (matchingInvoice) {
+      return toast(`Ya existe una recepción con el documento "${refNumber.trim()}" para ${matchingInvoice.supplierName} — cárgala para editarla en vez de crear otra.`, "error");
+    }
     if (!documentType) return toast("Indica si es factura, boleta, o sin documento", "error");
     // Sin boleta ni factura (ej. pan fresco de un proveedor que no las da):
     // no se puede dejar sin ningún rastro de por qué — el motivo es lo que
@@ -9047,6 +9143,240 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     setStatedTotal(""); setDuePaymentDate(""); setReceptionDate(new Date().toISOString().slice(0, 10));
   }
 
+  // Guarda las correcciones de una recepción ya guardada (ver
+  // loadInvoiceForEdit). A diferencia de confirmReception, acá nunca se suma
+  // stock de nuevo: se calcula el AJUSTE entre lo que esta misma recepción
+  // ya había aportado y lo que aporta ahora, y el pago/cargo asociado se
+  // corrige en vez de crear uno nuevo al lado.
+  async function confirmEditReception() {
+    if (!editContext) return;
+    if (draftItems.length === 0) {
+      return toast("Esta recepción se queda con al menos un producto — para sacarlos todos, corrígelos uno por uno o pide que se anule a mano.", "error");
+    }
+    if (!documentType) return toast("Indica si es factura, boleta, o sin documento", "error");
+    if (documentType === "sin_documento" && !noDocumentReason.trim()) {
+      return toast("Indica el motivo de por qué no hay boleta ni factura", "error");
+    }
+    for (const it of draftItems) {
+      if (!it.name.trim()) return toast("Todos los productos necesitan un nombre", "error");
+      if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
+    }
+    const isCredito = paymentMethod === "Crédito con el proveedor";
+    // Pasar de pagada a crédito (o al revés) mueve la plata de un libro a
+    // otro —de Egresos al libro de crédito del proveedor, o viceversa— y eso
+    // puede chocar con abonos que ya se hayan registrado sobre ese cargo. Es
+    // una corrección de fondo, no una corrección de recepción: se deja fuera
+    // de este formulario a propósito.
+    if (isCredito !== editContext.isCredito) {
+      return toast("No se puede cambiar entre \"a crédito\" y \"pagada\" corrigiendo acá — la forma de pago se queda en la misma categoría. Si de verdad cambió, avisa para corregirlo a mano.", "error");
+    }
+    if (isCredito && !duePaymentDate) {
+      return toast("Indica para cuándo queda la fecha de pago de este crédito", "error");
+    }
+    const esCombinado = paymentMethod === "Pago combinado";
+    const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
+    const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
+    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
+      return toast("El desglose del pago combinado debe sumar exactamente el total de la recepción", "error");
+    }
+
+    const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems, latestSupplierLedger] = await Promise.all([
+      loadJSON("products-catalog", products),
+      loadJSON("movements-log", movements),
+      loadJSON("invoices-index", invoicesIndex),
+      loadJSON("purchase-items-log", purchaseItems),
+      loadJSON("supplier-ledger", supplierLedger),
+    ]);
+
+    const chosenDate = new Date(`${receptionDate}T00:00:00`);
+    const now = new Date();
+    chosenDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    const date = chosenDate.toISOString();
+
+    // Mismo chequeo de códigos que en una recepción nueva, para las líneas
+    // nuevas que se hayan agregado durante esta edición.
+    const catalogoPorCodigo = new Map(
+      latestProducts.map(p => [String(p.barcode || "").trim(), p]).filter(([c]) => c)
+    );
+    const codigosEscritosEnEstaRecepcion = new Map();
+    for (const it of draftItems) {
+      if (!it.isNew) continue;
+      const codigo = it.barcode.trim();
+      if (!codigo) continue;
+      const enCatalogo = catalogoPorCodigo.get(codigo);
+      if (enCatalogo) {
+        return toast(`El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`, "error");
+      }
+      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigo);
+      if (yaEscrito) {
+        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
+      }
+      codigosEscritosEnEstaRecepcion.set(codigo, it.name.trim() || "un producto");
+    }
+
+    const necesitanCodigo = draftItems.filter(it => it.isNew && !it.barcode.trim());
+    const codigosAsignados = new Map();
+    if (necesitanCodigo.length > 0) {
+      try {
+        const tomados = (await codigosInternosUsados(PREFIJO_ALMACEN)).map(c => ({ barcode: c }));
+        const escritosAMano = draftItems
+          .filter(it => it.isNew && it.barcode.trim())
+          .map(it => ({ barcode: it.barcode.trim() }));
+        const nuevosCodigos = repartirCodigos([...latestProducts, ...tomados, ...escritosAMano], necesitanCodigo.length);
+        necesitanCodigo.forEach((it, i) => codigosAsignados.set(it.tempId, nuevosCodigos[i]));
+      } catch (e) {
+        console.error("[recepción] no se pudieron repartir códigos propios", e);
+      }
+    }
+
+    let newProducts = [...latestProducts];
+    const supplierName = editContext.originalInvoice.supplierName;
+
+    // Productos que no existían en el catálogo y se agregaron recién en esta
+    // edición: se crean igual que en una recepción nueva.
+    draftItems.filter(it => it.isNew).forEach(item => {
+      const qty = Number(item.qty) || 0;
+      const netCost = Number(item.netCost) || 0;
+      const suggested = suggestPrice(netCost);
+      newProducts.push({
+        id: uid("prod"),
+        barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        name: upperField(item.name),
+        category: upperField(item.category),
+        price: Number(item.finalPrice ?? suggested),
+        cost: netCost,
+        stock: qty,
+        stockZeroSince: qty > 0 ? null : new Date().toISOString(),
+        minStock: 5,
+        supplierId: editContext.originalInvoice.supplierId || null,
+        unitType: item.unitType || "unidad",
+        quickAccess: !item.barcode.trim() && !codigosAsignados.has(item.tempId),
+        priceApproval: role === "admin" ? null : { suggestedPrice: Number(item.finalPrice ?? suggested), netCost, requestedBy: session.name, date, isNewProduct: true },
+        priceHistory: [{ date, cost: netCost, price: Number(item.finalPrice ?? suggested) }],
+      });
+    });
+
+    // Productos existentes: se calcula la DIFERENCIA entre lo que esta misma
+    // recepción ya había sumado al stock y lo que aporta ahora — nunca se
+    // vuelve a sumar la cantidad completa. Cubre además una línea que se
+    // sacó del todo (cantidad nueva 0) y una que se agregó recién a la
+    // edición (cantidad anterior 0), con el mismo cálculo.
+    const oldQtyByProduct = new Map();
+    for (const l of editContext.originalLines) {
+      if (!l.productId) continue;
+      oldQtyByProduct.set(l.productId, (oldQtyByProduct.get(l.productId) || 0) + l.qty);
+    }
+    const newQtyByProduct = new Map();
+    const ultimoDatoPorProducto = new Map();
+    for (const it of draftItems) {
+      if (it.isNew || !it.productId) continue;
+      newQtyByProduct.set(it.productId, (newQtyByProduct.get(it.productId) || 0) + (Number(it.qty) || 0));
+      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice });
+    }
+    const productosTocados = new Set([...oldQtyByProduct.keys(), ...newQtyByProduct.keys()]);
+    for (const productId of productosTocados) {
+      const oldQty = oldQtyByProduct.get(productId) || 0;
+      const newQty = newQtyByProduct.get(productId) || 0;
+      const delta = newQty - oldQty;
+      const datos = ultimoDatoPorProducto.get(productId); // undefined si la línea se sacó del todo
+      newProducts = newProducts.map(p => {
+        if (p.id !== productId) return p;
+        const nuevoStock = p.stock + delta;
+        const updated = { ...p, stock: nuevoStock, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, nuevoStock) };
+        if (datos) {
+          const suggested = suggestPrice(datos.netCost);
+          updated.cost = datos.netCost;
+          if (role === "admin") {
+            updated.price = Number(datos.finalPrice ?? suggested);
+            updated.priceApproval = null;
+          } else {
+            updated.priceApproval = { suggestedPrice: Number(datos.finalPrice ?? suggested), netCost: datos.netCost, requestedBy: session.name, date };
+          }
+          updated.priceHistory = pushPriceHistory(p.priceHistory, datos.netCost, updated.price);
+        }
+        return updated;
+      });
+    }
+
+    const totalGross = totals.net * 1.19;
+    const updatedInvoice = {
+      ...editContext.originalInvoice,
+      refNumber: refNumber.trim() || null,
+      itemCount: draftItems.length,
+      totalNet: totals.net,
+      totalGross,
+      date,
+      noDocument: documentType === "sin_documento",
+      reason: documentType === "sin_documento" ? noDocumentReason.trim() : null,
+      paymentMethod,
+      documentType: documentType === "sin_documento" ? null : documentType,
+      statedTotal: statedTotal !== "" ? Number(statedTotal) : null,
+      duePaymentDate: isCredito ? duePaymentDate : null,
+    };
+    if (esCombinado) updatedInvoice.paymentBreakdown = filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) }));
+    else delete updatedInvoice.paymentBreakdown;
+    const newInvoicesIndex = latestInvoicesIndex.map(inv => inv.id === editContext.invoiceId ? updatedInvoice : inv);
+
+    const idsOriginales = new Set(editContext.originalLines.map(l => l.id));
+    const lineasActualizadas = draftItems.map(item => ({
+      id: item.lineaId || uid("pi"),
+      date, invoiceId: editContext.invoiceId,
+      supplierId: editContext.originalInvoice.supplierId || null, supplierName,
+      productId: item.productId,
+      productName: item.name.trim(),
+      qty: Number(item.qty) || 0, netCost: Number(item.netCost) || 0,
+    }));
+    const newPurchaseItems = [
+      ...lineasActualizadas,
+      ...latestPurchaseItems.filter(pi => !idsOriginales.has(pi.id)),
+    ];
+
+    setProducts(newProducts);
+    setInvoicesIndex(newInvoicesIndex);
+    setPurchaseItems(newPurchaseItems);
+
+    // Mismo orden que al confirmar una recepción nueva: primero el
+    // documento, después el catálogo y las líneas, y al final el pago/cargo.
+    await saveJSON("invoices-index", newInvoicesIndex);
+    await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
+    await saveJSON("purchase-items-log", newPurchaseItems);
+
+    // --- Pago o cargo asociado: se corrige el monto (y, si no es a crédito,
+    //     la forma de pago) para que quede igual al total recalculado —
+    //     nunca se crea uno nuevo al lado del que ya había.
+    if (isCredito) {
+      if (editContext.ledgerEntryId) {
+        const newSupplierLedger = latestSupplierLedger.map(l =>
+          l.id === editContext.ledgerEntryId ? { ...l, amount: totalGross, date } : l);
+        setSupplierLedger(newSupplierLedger);
+        await saveJSON("supplier-ledger", newSupplierLedger);
+      }
+    } else if (editContext.movementId) {
+      const anteriorMov = latestMovements.find(m => m.id === editContext.movementId);
+      if (anteriorMov) {
+        const actualizado = {
+          ...anteriorMov,
+          concept: `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
+          amount: totalGross,
+          paymentMethod: esCombinado ? "Pago combinado" : paymentMethod,
+        };
+        if (esCombinado) actualizado.paymentBreakdown = filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) }));
+        else delete actualizado.paymentBreakdown;
+        const newMovements = latestMovements.map(m => m.id === editContext.movementId ? actualizado : m);
+        setMovements(newMovements);
+        await saveJSON("movements-log", newMovements);
+      }
+    }
+
+    const codigosNuevosAsignados = codigosAsignados.size > 0;
+    toast(`Recepción corregida${codigosNuevosAsignados ? " · yendo a Productos para imprimir el código nuevo" : ""}`, "success");
+    if (codigosNuevosAsignados && setTab && setSeccionProductosPendiente) {
+      setTab("revisar");
+      setSeccionProductosPendiente("sinCodigo");
+    }
+    cancelEditReception();
+  }
+
 
   const [viewingInvoice, setViewingInvoice] = useState(null);
   const recentInvoices = useMemo(() => invoicesIndex.slice(0, 15), [invoicesIndex]);
@@ -9055,12 +9385,26 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     <div>
       {role === "admin" && <ApprovalsPanel products={products} setProducts={setProducts} toast={toast} />}
 
+      {editingInvoiceId && (
+        <div className="rounded-xl p-4 mb-4 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.brassSoft, border: `1.5px solid ${C.brass}` }}>
+          <div className="min-w-0">
+            <span className="text-sm font-semibold flex items-center gap-1.5" style={{ color: C.brassText }}>
+              <Truck size={15} /> Editando la recepción de {editContext?.originalInvoice?.supplierName} — {formatDate(editContext?.originalInvoice?.date)}
+            </span>
+            <p className="text-xs mt-0.5" style={{ color: C.brassText, opacity: 0.9 }}>
+              Corrige lo que haga falta y confirma abajo. El proveedor de esta recepción no se puede cambiar acá — si está mal, avisa para corregirlo a mano.
+            </p>
+          </div>
+          <Btn variant="ghostClaro" size="sm" onClick={cancelEditReception}>Cancelar edición</Btn>
+        </div>
+      )}
+
       <div className="rounded-xl p-4 mb-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <div className="relative">
-            <Field label="Proveedor"><input value={supplier} onChange={e => typeSupplier(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Busca o escribe el nombre del proveedor" /></Field>
+            <Field label="Proveedor"><input value={supplier} onChange={e => typeSupplier(e.target.value)} disabled={!!editingInvoiceId} className={inputCls} style={inputStyle()} placeholder="Busca o escribe el nombre del proveedor" /></Field>
             {supplierId && <span className="absolute right-2 top-[30px]"><Badge tone="green">registrado</Badge></span>}
-            {supplierMatches.length > 0 && (
+            {!editingInvoiceId && supplierMatches.length > 0 && (
               <div className="absolute z-10 left-0 right-0 -mt-2 rounded-lg overflow-hidden shadow-lg" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
                 {supplierMatches.map(s => (
                   <button key={s.id} onClick={() => pickSupplier(s)} className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-black/[.03] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
@@ -9081,8 +9425,24 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <Field label="Fecha de recepción"><input type="date" value={receptionDate} onChange={e => setReceptionDate(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
-          <Field label="N° de factura o boleta (opcional)"><input value={refNumber} onChange={e => setRefNumber(e.target.value)} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. 001234" /></Field>
+          <Field label="N° de factura o boleta (opcional)"><input value={refNumber} onChange={e => setRefNumber(e.target.value)} disabled={!!editingInvoiceId} className={`${inputCls} font-mono`} style={inputStyle()} placeholder="Ej. 001234" /></Field>
         </div>
+
+        {matchingInvoice && (
+          <div className="rounded-lg p-3 mb-3 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.rustSoft }}>
+            <div className="min-w-0 flex items-start gap-2">
+              <AlertTriangle size={15} className="flex-shrink-0 mt-0.5" style={{ color: C.rust }} />
+              <span className="text-xs font-medium" style={{ color: C.rust }}>
+                Ya existe una recepción con el documento "{matchingInvoice.refNumber}" — {matchingInvoice.supplierName}, {formatDate(matchingInvoice.date)}
+              </span>
+            </div>
+            {role === "admin" ? (
+              <Btn size="sm" variant="dark" onClick={() => loadInvoiceForEdit(matchingInvoice)}>Cargar para editar</Btn>
+            ) : (
+              <span className="text-[11px] flex-shrink-0" style={{ color: C.rust }}>Solo un administrador puede editarla.</span>
+            )}
+          </div>
+        )}
 
         <div className="mb-3">
           <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Es factura, boleta, o no dan ninguna?</div>
@@ -9161,6 +9521,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           <div className="rounded-lg p-3 mb-3 flex items-start gap-2" style={{ background: C.rustSoft }}>
             <AlertTriangle size={15} className="flex-shrink-0 mt-0.5" style={{ color: C.rust }} />
             <p className="text-xs" style={{ color: C.rust }}>Esta recepción queda marcada como "sin boleta ni factura", con el motivo que escribiste arriba — no hace falta foto.</p>
+          </div>
+        ) : editingInvoiceId ? (
+          // Agregar una foto acá pisaría las páginas ya guardadas (se
+          // ordenan por posición y no hay cómo saber cuál sigue desde este
+          // formulario) — para eso ya existe "Ver factura" en Recepciones
+          // recientes, que sí sabe cuántas páginas hay y agrega a continuación.
+          <div className="rounded-lg p-3 mb-3 text-xs" style={{ background: C.paperDark, color: C.gray }}>
+            Para agregar o revisar las fotos de esta recepción, ábrela desde "Recepciones recientes" más abajo.
           </div>
         ) : (
         <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
@@ -9276,12 +9644,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         </div>
       )}
       {draftItems.length > 0 && (
-        <Btn full variant="primary" icon={Truck} onClick={confirmReception} disabled={conflictosCodigo.size > 0}>
-          Confirmar recepción de {draftItems.length} producto(s)
+        <Btn full variant="primary" icon={Truck} onClick={editingInvoiceId ? confirmEditReception : confirmReception} disabled={conflictosCodigo.size > 0}>
+          {editingInvoiceId ? `Guardar cambios (${draftItems.length} producto(s))` : `Confirmar recepción de ${draftItems.length} producto(s)`}
         </Btn>
       )}
       {draftItems.length === 0 && (
-        <EmptyState icon={Truck} title="Sin productos por recibir" hint="Pistolea cada código para agregarlo a la lista, o búscalo por nombre si no tienes el código a mano." />
+        <EmptyState icon={Truck} title="Sin productos por recibir" hint={editingInvoiceId ? "Esta recepción se quedó sin productos — agrega al menos uno, o cancela la edición arriba." : "Pistolea cada código para agregarlo a la lista, o búscalo por nombre si no tienes el código a mano."} />
       )}
 
       {role !== "admin" && (
