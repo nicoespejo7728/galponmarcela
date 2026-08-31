@@ -6300,7 +6300,9 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
         // Pantalla de productos de UNA sección: reemplaza por completo a la
         // lista de secciones (no se muestran las dos juntas) — se vuelve a
         // ella tocando "Secciones" arriba, o sola al agregar un producto.
-        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
+        // Se sube de 66vh: pedido de Fran (31-ago-2026) de que se vean más
+        // botones sin tener que hacer scroll.
+        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[calc(100vh-14rem)]">
           {(porCategoria.get(expandedCategory) || []).map(fichaProducto)}
           {(porCategoria.get(expandedCategory) || []).length === 0 && (
             <p className="col-span-full text-sm text-center py-8" style={{ color: C.gray }}>Sin productos en esta sección.</p>
@@ -6311,7 +6313,9 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
         // ficha de "Producto temporal" incluida en la misma cuadrícula, no
         // aparte — para que se toquen igual de fácil (pedido de Fran,
         // 31-ago-2026: antes eran filas angostas de lista, no botones).
-        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[66vh]">
+        // Se sube de 66vh: pedido de Fran (31-ago-2026) de que se vean más
+        // botones sin tener que hacer scroll.
+        <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[calc(100vh-14rem)]">
           {fichaProductoTemporal}
           {categories.map(cat => {
             const productosCat = porCategoria.get(cat) || [];
