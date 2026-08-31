@@ -6159,7 +6159,10 @@ function WeightPromptModal({ product, onClose, onConfirm }) {
 }
 
 function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) {
-  const [activeCategory, setActiveCategory] = useState("Todos");
+  // Sin pestaña "Todos" a propósito (pedido de Fran, 31-ago-2026): cada
+  // producto de acceso rápido ya tiene su categoría propia, así que esa
+  // pestaña solo repetía lo que las demás ya mostraban juntas.
+  const [activeCategory, setActiveCategory] = useState(null);
   // Muestra los productos marcados explícitamente como "acceso rápido"; también
   // incluye, por compatibilidad, los productos antiguos sin código de barras
   // real (creados antes de que existiera esta casilla, con código interno INT-).
@@ -6175,8 +6178,13 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
       return i === -1 ? 99 : i;
     };
     presentes.sort((a, b) => puesto(a) - puesto(b) || String(a).localeCompare(String(b), "es"));
-    return ["Todos", ...presentes];
+    return presentes;
   }, [uncoded]);
+  // La categoría activa de verdad: la elegida si sigue existiendo, o si no
+  // (recién abierto, o la que estaba elegida quedó sin productos) la primera
+  // de la lista — nunca "ninguna", porque ya no hay pestaña "Todos" que
+  // muestre el conjunto completo.
+  const categoriaActiva = activeCategory && categories.includes(activeCategory) ? activeCategory : categories[0];
   /* Lo que no hay se va al final. La ficha sin stock no se puede tocar —está
      deshabilitada— así que mezclada entre las demás solo hace estorbo: obliga
      a saltársela con la vista en la mitad del tablero, mientras el cliente
@@ -6184,12 +6192,11 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
      el catálogo, para que las fichas no bailen de lugar entre una venta y la
      siguiente. */
   const filtered = useMemo(() => {
-    const enCategoria = activeCategory === "Todos"
-      ? uncoded : uncoded.filter(p => p.category === activeCategory);
+    const enCategoria = categoriaActiva ? uncoded.filter(p => p.category === categoriaActiva) : uncoded;
     const hay = [], noHay = [];
     for (const p of enCategoria) ((p.stock > 0) ? hay : noHay).push(p);
     return [...hay, ...noHay];
-  }, [uncoded, activeCategory]);
+  }, [uncoded, categoriaActiva]);
 
   /* La ficha de "producto temporal" —precio editable, sin producto real
      detrás— va SIEMPRE primera en el tablero, sin importar la categoría
@@ -6226,7 +6233,7 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
       {uncoded.length === 0 ? (
         fichaProductoTemporal ? (
           <div className="p-4">
-            <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5">{fichaProductoTemporal}</div>
+            <div className="grid grid-cols-2 gap-2.5">{fichaProductoTemporal}</div>
             <p className="text-sm mt-3 text-center" style={{ color: C.gray }}>Aún no hay productos de acceso rápido. Créalos desde Inventario con el botón "Nuevo sin código (acceso rápido)" — aparecerán aquí como botones grandes, agrupados por categoría (Verduras, Frutas, Útiles de aseo, Cecinas y quesos, etc.).</p>
           </div>
         ) : (
@@ -6242,7 +6249,7 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
                 key={cat}
                 onClick={() => setActiveCategory(cat)}
                 className="px-4 rounded-lg text-sm font-semibold whitespace-nowrap flex-shrink-0 transition"
-                style={activeCategory === cat
+                style={categoriaActiva === cat
                   ? { background: C.green, color: "#fff" }
                   : { background: "#fff", color: C.inkSoft, border: `1.5px solid ${C.paperLine}` }}
               >{cat}</button>
@@ -6250,7 +6257,12 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
           </div>
           {/* Botonera de productos. Las fichas son grandes a propósito: se usan
               con el dedo o de un vistazo, mientras el cliente espera. */}
-          <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-2.5 p-4 overflow-y-auto md:max-h-[calc(100vh-21rem)]">
+          {/* Antes iban hasta 4 columnas: eran para el ancho flexible que
+              tenía este panel cuando era la zona grande. Ahora que quedó en
+              la columna angosta (ver el grid de más abajo, invertido a
+              pedido de Fran), 2 columnas fijas son las que caben sin
+              apretar las fichas. */}
+          <div className="grid grid-cols-2 gap-2.5 p-4 overflow-y-auto md:max-h-[46vh]">
             {fichaProductoTemporal}
             {filtered.map(p => {
               const outOfStock = p.stock <= 0;
@@ -6543,23 +6555,27 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           if (addQty <= 0) return prev;
           const already = existing ? existing.qty : 0;
           if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
-          if (existing) return prev.map(i => i.productId === product.id ? { ...i, qty: Number((i.qty + addQty).toFixed(3)) } : i);
-          return [...prev, {
+          // El producto que se acaba de escanear/tocar sube al principio de
+          // la lista (esté agregándose recién o sumando a una línea que ya
+          // estaba) — así se confirma de un vistazo que entró bien, sin tener
+          // que ir a buscarlo con el mouse más abajo.
+          if (existing) return [{ ...existing, qty: Number((existing.qty + addQty).toFixed(3)) }, ...prev.filter(i => i.productId !== product.id)];
+          return [{
             productId: product.id, barcode: null, name: product.name,
             price: product.price, cost: product.cost, qty: addQty, stock: product.stock,
             unitType: "peso", category: null, isGrupo: true, groupId: product.groupId,
-          }];
+          }, ...prev];
         }
         if (existing) {
           if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
-          return prev.map(i => i.productId === product.id ? { ...i, qty: i.qty + 1 } : i);
+          return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
         }
         if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
-        return [...prev, {
+        return [{
           productId: product.id, barcode: null, name: product.name,
           price: product.price, cost: product.cost, qty: 1, stock: product.stock,
           unitType: "unidad", category: null, isGrupo: true, groupId: product.groupId,
-        }];
+        }, ...prev];
       });
       return;
     }
@@ -6578,17 +6594,20 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         if (addQty <= 0) return prev;
         const already = existing ? existing.qty : 0;
         if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
-        if (existing) return prev.map(i => i.productId === product.id ? { ...i, qty: Number((i.qty + addQty).toFixed(3)) } : i);
-        return [...prev, {
+        // Igual que en el grupo de arriba: la línea que se acaba de tocar
+        // sube al principio, se esté agregando recién o sumando a una que ya
+        // estaba en el carrito.
+        if (existing) return [{ ...existing, qty: Number((existing.qty + addQty).toFixed(3)) }, ...prev.filter(i => i.productId !== product.id)];
+        return [{
           productId: product.id, barcode: product.barcode, name: product.name,
           price: clearance ? clearance.price : product.price,
           cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso", category: product.category,
           isLiquidacion: !!clearance,
-        }];
+        }, ...prev];
       }
       if (existing) {
         if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
-        return prev.map(i => i.productId === product.id ? { ...i, qty: i.qty + 1 } : i);
+        return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
       }
       if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
       // Si a este producto le queda stock de antes de su última baja de precio,
@@ -6599,7 +6618,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // al precio viejo, ese excedente queda registrado en checkout() como
       // ganancia extra, no como error ni como pérdida.
       const oldPriceInfo = clearance ? null : unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts, settings);
-      return [...prev, {
+      return [{
         productId: product.id, barcode: product.barcode, name: product.name,
         price: clearance ? clearance.price : (oldPriceInfo ? oldPriceInfo.oldPrice : product.price),
         cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
@@ -6608,7 +6627,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         maxOldPriceQty: oldPriceInfo?.qty ?? 0,
         newPrice: oldPriceInfo?.newPrice ?? product.price,
         isLiquidacion: !!clearance,
-      }];
+      }, ...prev];
     });
   }
 
@@ -7069,11 +7088,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
      armar la venta (ver checkout: productId se manda null). */
   function agregarProductoTemporal() {
     const id = nuevoId();
-    setCart(prev => [...prev, {
+    setCart(prev => [{
       productId: id, barcode: null, name: "Producto temporal", price: 0,
       cost: 0, qty: 1, stock: Infinity, unitType: "unidad",
       category: "", isTemporal: true,
-    }]);
+    }, ...prev]);
     setUltimoTemporalId(id);
   }
 
@@ -7222,15 +7241,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         )}
       </div>
 
-      {/* Dos zonas de trabajo y nada más: a la izquierda de dónde saco los
-          productos, a la derecha la boleta que se está armando con su cobro.
-          En el teléfono la boleta va primero, porque es lo que hay que ver
-          mientras se carga la venta.
-
-          El ancho fijo de la derecha se agrandó (era 340/400px): en un
-          monitor de mesón, angosto la hacía ver chica al lado de todo el
-          espacio libre que dejaba el resto de la pantalla. */}
-      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_420px] lg:grid-cols-[minmax(0,1fr)_520px] items-start">
+      {/* Dos zonas de trabajo y nada más: a la izquierda la boleta que se
+          está armando con su cobro —grande y clara, es lo que más se mira
+          mientras se vende (pedido de Fran, 31-ago-2026)—, a la derecha, más
+          angosto, de dónde saco los productos. En el teléfono la boleta
+          sigue yendo primero, porque es lo que hay que ver mientras se carga
+          la venta. */}
+      <div className="grid gap-4 md:grid-cols-[420px_minmax(0,1fr)] lg:grid-cols-[520px_minmax(0,1fr)] items-start">
         <div className="order-2 md:order-1 min-w-0">
           <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
             onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
@@ -7256,7 +7273,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             )}
           </header>
 
-          <div className="divide-y overflow-y-auto md:max-h-[46vh]" style={{ borderColor: C.paperLine }}>
+          <div className="divide-y overflow-y-auto md:max-h-[calc(100vh-21rem)]" style={{ borderColor: C.paperLine }}>
             {cart.length === 0 ? (
               <div className="flex flex-col items-center text-center px-6 py-10">
                 <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ background: C.paperDark }}>
