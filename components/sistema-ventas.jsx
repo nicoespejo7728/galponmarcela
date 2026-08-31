@@ -6428,10 +6428,11 @@ function CobroPointModal({ cobro, onCancel }) {
    ventana de por medio, con el precio en 0 para editarlo ahí mismo — así se
    pueden agregar varios de una vez, cada uno con su propio precio.
 
-   Se pidió que dure solo hasta fin de mes, así que la ficha se apaga sola
+   Se pidió que dure solo un tiempo corto, así que la ficha se apaga sola
    pasada esa fecha — no hace falta acordarse de sacarla a mano. Si en algún
-   momento se necesita de nuevo, basta con mover esta fecha hacia adelante. */
-const PRODUCTO_TEMPORAL_DISPONIBLE_HASTA = "2026-08-31T23:59:59";
+   momento se necesita de nuevo, basta con mover esta fecha hacia adelante
+   (extendida una semana más el 31-ago-2026, a pedido de Fran). */
+const PRODUCTO_TEMPORAL_DISPONIBLE_HASTA = "2026-09-07T23:59:59";
 
 function POSView({ products, setProducts, settings, setSettings, sales, setSales, movements, setMovements, suppliers, setSuppliers, categories, offers, clearances, productGroups, purchaseItems, inventoryCounts, session, toast, role, customers, setCustomers, customerLedger, setCustomerLedger, openShifts, setTab, onCambioEnCola }) {
   const [barcode, setBarcode] = useState("");
