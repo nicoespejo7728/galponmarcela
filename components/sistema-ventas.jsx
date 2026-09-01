@@ -7507,24 +7507,24 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
             {/* Si el cliente además aprovecha de pagar lo que debe, se suma
                 acá — no es un producto, así que no entra al carrito. */}
             {abonoFiado ? (
-              <div className="rounded-lg p-3 flex items-center justify-between gap-2" style={{ background: C.inkSoft }}>
+              <div className="rounded-xl p-4 flex items-center justify-between gap-3" style={{ background: C.inkSoft, border: `1.5px solid ${C.brass}` }}>
                 <div className="min-w-0">
-                  <div className="text-xs" style={{ color: C.grayLight }}>Abono cuenta fiados — {abonoFiado.customerName}</div>
-                  <div className="font-mono font-bold" style={{ color: C.brass }}>{formatCLP(abonoFiado.amount)}</div>
+                  <div className="text-sm" style={{ color: C.grayLight }}>Abono cuenta fiados — {abonoFiado.customerName}</div>
+                  <div className="font-mono font-bold text-2xl" style={{ color: C.brass }}>{formatCLP(abonoFiado.amount)}</div>
                 </div>
-                <button onClick={() => setAbonoFiado(null)} aria-label="Quitar abono" className="flex-shrink-0 p-1.5" style={{ color: "#fca5a5" }}><X size={18} /></button>
+                <button onClick={() => setAbonoFiado(null)} aria-label="Quitar abono" className="flex-shrink-0 p-2" style={{ color: "#fca5a5" }}><X size={22} /></button>
               </div>
             ) : (
               <button
                 onClick={() => setAbonoFiadoOpen(true)}
-                className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold rounded-lg py-2.5 transition"
+                className="w-full flex items-center justify-center gap-2 text-base font-semibold rounded-xl py-4 transition"
                 style={{ background: C.inkSoft, color: C.brass }}
-              ><Banknote size={15} />Abonar cuenta fiados</button>
+              ><Banknote size={20} />Abonar cuenta fiados</button>
             )}
             {abonoFiado && (
               <div className="flex items-baseline justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
                 <span className="text-sm font-semibold" style={{ color: C.grayLight }}>Total a cobrar (con abono)</span>
-                <span className="text-xl font-bold font-mono" style={{ color: C.brass }}>{formatCLP(totalConAbono)}</span>
+                <span className="text-2xl font-bold font-mono" style={{ color: C.brass }}>{formatCLP(totalConAbono)}</span>
               </div>
             )}
 
@@ -7766,18 +7766,36 @@ function AbonoFiadoModal({ customers, customerLedger, onClose, onConfirm }) {
   const [selected, setSelected] = useState(null);
   const [amount, setAmount] = useState("");
 
-  const matches = useMemo(() => {
-    if (query.trim().length < 1) return [];
-    const q = normalize(query);
-    return customers.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q)).slice(0, 6);
-  }, [query, customers]);
-
+  // Un solo recorrido del libro entero, no uno por cliente — con la lista
+  // completa a la vista (ver más abajo) esto se calcula para todos a la vez,
+  // no solo para los que calzan con lo que se escribió.
+  const balances = useMemo(() => {
+    const m = new Map();
+    for (const mv of customerLedger) {
+      const delta = mv.type === "cargo" ? mv.amount : -mv.amount;
+      m.set(mv.customerId, (m.get(mv.customerId) || 0) + delta);
+    }
+    return m;
+  }, [customerLedger]);
   function balanceOf(customerId) {
-    return customerLedger.reduce((s, m) => {
-      if (m.customerId !== customerId) return s;
-      return s + (m.type === "cargo" ? m.amount : -m.amount);
-    }, 0);
+    return balances.get(customerId) || 0;
   }
+
+  // A quién se le abona se elige de una lista, no escribiendo el nombre: un
+  // typo ahí es plata mal cargada a otra cuenta. La lista sale sola, con
+  // todos los que deben algo — buscar es solo para achicarla si son muchos,
+  // nunca un paso obligatorio (pedido de Fran, 1-sep-2026).
+  const conSaldo = useMemo(
+    () => customers
+      .filter(c => balanceOf(c.id) > 0)
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [customers, balances]
+  );
+  const visibles = useMemo(() => {
+    if (query.trim().length < 1) return conSaldo;
+    const q = normalize(query);
+    return conSaldo.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q));
+  }, [query, conSaldo]);
 
   function confirmar() {
     const n = Number(amount);
@@ -7786,46 +7804,56 @@ function AbonoFiadoModal({ customers, customerLedger, onClose, onConfirm }) {
   }
 
   return (
-    <Modal title="Abonar cuenta fiados" onClose={onClose}>
+    <Modal title="Abonar cuenta fiados" onClose={onClose} wide>
       {!selected ? (
         <div>
-          <label className="text-xs block mb-1.5" style={{ color: C.gray }} htmlFor="abono-cliente">¿Quién paga su cuenta?</label>
-          <div className="relative">
-            <input
-              id="abono-cliente" value={query} onChange={e => setQuery(e.target.value)}
-              placeholder="Busca por nombre o teléfono…" autoFocus
-              className={inputCls} style={inputStyle()}
-            />
-            {matches.length > 0 && (
-              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-                {matches.map(c => (
-                  <button key={c.id} onClick={() => setSelected(c)} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
-                    <span className="truncate" style={{ color: C.ink }}>{c.name}{c.phone ? ` · ${c.phone}` : ""}</span>
-                    <span className="font-mono text-xs flex-shrink-0" style={{ color: C.gray }}>debe {formatCLP(balanceOf(c.id))}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          {customers.length === 0 && <p className="text-xs mt-2" style={{ color: C.gray }}>No hay clientes con cuenta registrados todavía — créalos desde Fiados.</p>}
+          <label className="text-base font-semibold block mb-2.5" style={{ color: C.ink }} htmlFor="abono-cliente">¿Quién paga su cuenta?</label>
+          <input
+            id="abono-cliente" value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="Escribe para achicar la lista (opcional)…"
+            className={`${inputCls} mb-3 text-base`} style={inputStyle()}
+          />
+          {visibles.length > 0 ? (
+            <div className="rounded-xl overflow-y-auto max-h-[52vh]" style={{ border: `1.5px solid ${C.paperLine}` }}>
+              {visibles.map(c => (
+                <button
+                  key={c.id} onClick={() => setSelected(c)}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-4 text-left hover:bg-black/[.04] last:border-b-0"
+                  style={{ borderBottom: `1px solid ${C.paperLine}` }}
+                >
+                  <div className="min-w-0">
+                    <div className="text-base font-semibold truncate" style={{ color: C.ink }}>{c.name}</div>
+                    {c.phone && <div className="text-sm" style={{ color: C.gray }}>{c.phone}</div>}
+                  </div>
+                  <span className="font-mono text-base font-semibold flex-shrink-0" style={{ color: C.rust }}>{formatCLP(balanceOf(c.id))}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm mt-2" style={{ color: C.gray }}>
+              {conSaldo.length === 0
+                ? "No hay clientes con saldo pendiente — la sección de Fiados debe estar en $0 para todos."
+                : "Ningún cliente con cuenta pendiente calza con esa búsqueda."}
+            </p>
+          )}
         </div>
       ) : (
         <div>
-          <div className="rounded-lg p-3 mb-3 flex items-center justify-between gap-2" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+          <div className="rounded-xl p-4 mb-4 flex items-center justify-between gap-2" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
             <div className="min-w-0">
-              <div className="text-sm font-semibold truncate" style={{ color: C.ink }}>{selected.name}</div>
-              <div className="text-xs font-mono" style={{ color: C.gray }}>Debe: {formatCLP(balanceOf(selected.id))}</div>
+              <div className="text-base font-semibold truncate" style={{ color: C.ink }}>{selected.name}</div>
+              <div className="text-sm font-mono" style={{ color: C.gray }}>Debe: {formatCLP(balanceOf(selected.id))}</div>
             </div>
-            <button onClick={() => { setSelected(null); setQuery(""); }} className="text-xs font-semibold flex-shrink-0" style={{ color: C.green }}>Cambiar</button>
+            <button onClick={() => { setSelected(null); setQuery(""); }} className="text-sm font-semibold flex-shrink-0" style={{ color: C.green }}>Cambiar</button>
           </div>
-          <label className="text-xs block mb-1.5" style={{ color: C.gray }} htmlFor="abono-monto">¿Cuánto paga ahora?</label>
-          <div className="flex items-center gap-2 mb-3">
+          <label className="text-base font-semibold block mb-2.5" style={{ color: C.ink }} htmlFor="abono-monto">¿Cuánto paga ahora?</label>
+          <div className="flex items-center gap-2 mb-4">
             <input
               id="abono-monto" type="number" value={amount} onChange={e => setAmount(e.target.value)}
               placeholder="Monto" autoFocus onKeyDown={e => { if (e.key === "Enter") confirmar(); }}
-              className={`${inputCls} font-mono`} style={inputStyle()}
+              className={`${inputCls} font-mono text-base`} style={inputStyle()}
             />
-            <button onClick={() => setAmount(String(Math.max(0, balanceOf(selected.id))))} className="text-xs font-semibold flex-shrink-0 px-2.5 py-2.5 rounded-lg whitespace-nowrap" style={{ background: C.paperDark, color: C.green }}>Todo lo que debe</button>
+            <button onClick={() => setAmount(String(Math.max(0, balanceOf(selected.id))))} className="text-sm font-semibold flex-shrink-0 px-4 py-3.5 rounded-lg whitespace-nowrap" style={{ background: C.paperDark, color: C.green }}>Todo lo que debe</button>
           </div>
           <Btn full icon={Check} disabled={!amount || Number(amount) <= 0} onClick={confirmar}>Agregar a la venta</Btn>
         </div>
