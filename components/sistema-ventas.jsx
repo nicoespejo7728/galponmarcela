@@ -6519,6 +6519,16 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [quickCustomerOpen, setQuickCustomerOpen] = useState(false);
 
+  // Abonar cuenta fiados desde Vender (agosto 2026): cuando el cliente
+  // aprovecha de pagar lo que debe mientras compra, esto se suma al cobro de
+  // esta misma venta — sin mezclarse con el carrito, que sigue siendo solo
+  // productos. Es independiente de "selectedCustomer" (el de la fila
+  // "Fiado" de arriba, que es a quién se le presta esta venta): se puede
+  // fiar una compra nueva y, en la misma boleta, abonar una deuda anterior —
+  // incluso del mismo cliente.
+  const [abonoFiado, setAbonoFiado] = useState(null); // { customerId, customerName, amount } | null
+  const [abonoFiadoOpen, setAbonoFiadoOpen] = useState(false);
+
   useEffect(() => { inputRef.current?.focus(); }, []);
 
   /* El lector de códigos se trae en segundo plano apenas se abre la caja, no
@@ -6782,6 +6792,12 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   const totalExacto = cart.reduce((s, i) => s + totalLinea(i, formaDePagoEfectiva, preciosOferta), 0);
   const total = redondearDiezPesos(totalExacto);
   const redondeoAjuste = total - totalExacto;
+  // Lo que de verdad se cobra en esta boleta si además se abona una cuenta
+  // fiada: el total de productos (sale.total, el que ve la boleta y los
+  // informes) más el abono, que no es mercadería. Todo lo que decide cuánto
+  // recibir —vuelto, desglose, cobro con tarjeta, el botón de Cobrar— usa
+  // esto; sale.total sigue siendo solo el de productos.
+  const totalConAbono = total + (abonoFiado?.amount || 0);
   const recargoTotal = cart.reduce((s, i) => s + recargoPorTarjeta(i, formaDePagoEfectiva) * i.qty, 0);
   const descuentoOfertaTotal = cart.reduce((s, i) => s + descuentoPorOferta(i, preciosOferta), 0);
   // Débito y crédito emiten boleta siempre —el vuelto de pago con tarjeta la
@@ -6790,10 +6806,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   // adentro hereda la misma obligación (ver formaDePagoEfectiva).
   const boletaAutomatica = formaDePagoEfectiva === "Débito" || formaDePagoEfectiva === "Crédito";
   const boletaEmitidaFinal = boletaAutomatica ? true : boletaEmitida;
-  // Suma declarada en el desglose de pago combinado, y si cuadra con el total.
+  // Suma declarada en el desglose de pago combinado, y si cuadra con el total
+  // (el de productos MÁS el abono, si hay uno agregado a esta venta).
   const sumaDesglose = paymentBreakdown.reduce((s, d) => s + (Number(d.amount) || 0), 0);
   const desglosePagoValido = payment !== "Pago combinado" ? true : (
-    paymentBreakdown.filter(d => d.method && Number(d.amount) > 0).length >= 2 && sumaDesglose === total
+    paymentBreakdown.filter(d => d.method && Number(d.amount) > 0).length >= 2 && sumaDesglose === totalConAbono
   );
 
   async function checkout(seller) {
@@ -6819,10 +6836,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   }
 
   async function cobrarConMaquina(seller, terminalId) {
-    setCobroPoint({ estado: "creando", seller, monto: total });
+    // Va con totalConAbono: si además se está abonando una cuenta fiada, la
+    // máquina cobra los dos juntos en una sola pasada de tarjeta — sale.total
+    // (lo que registra la venta) sigue siendo solo el de productos.
+    setCobroPoint({ estado: "creando", seller, monto: totalConAbono });
     try {
-      const cobro = await crearCobroPoint({ monto: total, terminalId });
-      setCobroPoint({ estado: "esperando", id: cobro.id, seller, monto: total });
+      const cobro = await crearCobroPoint({ monto: totalConAbono, terminalId });
+      setCobroPoint({ estado: "esperando", id: cobro.id, seller, monto: totalConAbono });
     } catch (e) {
       setCobroPoint(null);
       toast(friendlyError(e, "No se pudo mandar el cobro a la máquina"), "error");
@@ -7039,7 +7059,53 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       // para que nadie crea que la boleta ya tiene su número definitivo.
       toast("Sin internet — la venta quedó guardada y se sube sola cuando vuelva", "success");
     }
+
+    // Abono a cuenta fiada agregado a esta venta (ver abonoFiado más arriba):
+    // se aplica DESPUÉS de que la venta ya quedó adentro, nunca antes — así
+    // una falla acá nunca deja a medias la venta misma. Solo se intenta si la
+    // venta de verdad llegó al servidor: sin conexión no hay dónde escribir
+    // el abono todavía (a diferencia de la venta, esto no tiene cola propia),
+    // así que se avisa en vez de fingir que se guardó.
+    if (abonoFiado) {
+      if (!resultado.subida) {
+        toast(`Sin internet: el abono de ${formatCLP(abonoFiado.amount)} de ${abonoFiado.customerName} NO quedó guardado — regístralo a mano en Fiados cuando vuelva la conexión`, "error");
+      } else {
+        try {
+          await aplicarAbonoFiado(abonoFiado, sale);
+          toast(`Abono de ${formatCLP(abonoFiado.amount)} registrado para ${abonoFiado.customerName}`, "success");
+        } catch (e) {
+          toast(friendlyError(e, `La venta #${numeroReal} sí quedó registrada, pero el abono de ${abonoFiado.customerName} no se pudo guardar — regístralo a mano en Fiados`), "error");
+        }
+      }
+      setAbonoFiado(null);
+    }
     setTimeout(() => inputRef.current?.focus(), 50);
+  }
+
+  // Escribe el abono igual que "Registrar abono" en Fiados (ver registerPayment
+  // en ClientesView): una entrada en el libro de fiado del cliente y, porque es
+  // plata real entrando a la caja, un ingreso en el libro de caja general —
+  // separado del asiento de la venta, que solo cuenta lo que se vendió.
+  async function aplicarAbonoFiado(abono, sale) {
+    const latestLedger = await loadJSON("customer-ledger", customerLedger);
+    const entry = {
+      id: uid("cliemov"), customerId: abono.customerId, type: "abono",
+      amount: abono.amount, date: sale.date, saleId: sale.id, paymentMethod: sale.paymentMethod,
+      note: `Junto a la venta #${sale.invoiceNumber}`,
+    };
+    const newLedger = [entry, ...latestLedger];
+    setCustomerLedger(newLedger);
+    await saveJSON("customer-ledger", newLedger);
+
+    const latestMovementsAbono = await loadJSON("movements-log", movements);
+    const asientoAbono = {
+      id: uid("mov"), date: sale.date, type: "ingreso",
+      concept: `Abono de fiado — ${abono.customerName} (venta #${sale.invoiceNumber})`,
+      amount: abono.amount, category: "Abono de fiado", auto: true,
+    };
+    const newMovementsAbono = [asientoAbono, ...latestMovementsAbono];
+    setMovements(newMovementsAbono);
+    await saveJSON("movements-log", newMovementsAbono);
   }
 
   /* Alta en el mesón: el producto no está en el catálogo y el cliente está
@@ -7438,6 +7504,30 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               <span className="text-3xl font-bold font-mono leading-none" style={{ color: "#ffffff" }}>{formatCLP(total)}</span>
             </div>
 
+            {/* Si el cliente además aprovecha de pagar lo que debe, se suma
+                acá — no es un producto, así que no entra al carrito. */}
+            {abonoFiado ? (
+              <div className="rounded-lg p-3 flex items-center justify-between gap-2" style={{ background: C.inkSoft }}>
+                <div className="min-w-0">
+                  <div className="text-xs" style={{ color: C.grayLight }}>Abono cuenta fiados — {abonoFiado.customerName}</div>
+                  <div className="font-mono font-bold" style={{ color: C.brass }}>{formatCLP(abonoFiado.amount)}</div>
+                </div>
+                <button onClick={() => setAbonoFiado(null)} aria-label="Quitar abono" className="flex-shrink-0 p-1.5" style={{ color: "#fca5a5" }}><X size={18} /></button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setAbonoFiadoOpen(true)}
+                className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold rounded-lg py-2.5 transition"
+                style={{ background: C.inkSoft, color: C.brass }}
+              ><Banknote size={15} />Abonar cuenta fiados</button>
+            )}
+            {abonoFiado && (
+              <div className="flex items-baseline justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.inkSoft}` }}>
+                <span className="text-sm font-semibold" style={{ color: C.grayLight }}>Total a cobrar (con abono)</span>
+                <span className="text-xl font-bold font-mono" style={{ color: C.brass }}>{formatCLP(totalConAbono)}</span>
+              </div>
+            )}
+
             <div>
               <p className="text-xs mb-1.5" style={{ color: C.grayLight }}>Forma de pago</p>
               <div className="grid grid-cols-2 gap-2">
@@ -7478,7 +7568,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                     </select>
                     <input
                       type="number" value={d.amount} placeholder="0"
-                      onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, total))}
+                      onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totalConAbono))}
                       className={`${inputCls} font-mono`} style={inputStyle()}
                     />
                     {paymentBreakdown.length > 2 && (
@@ -7492,11 +7582,11 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 ><Plus size={13} />Agregar otro medio</button>
                 <div className="flex items-center justify-between gap-2 pt-1" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
                   <span className="text-sm font-semibold" style={{ color: C.grayLight }}>Suma declarada</span>
-                  <span className="font-mono font-bold" style={{ color: sumaDesglose === total ? C.brass : "#fca5a5" }}>{formatCLP(sumaDesglose)}</span>
+                  <span className="font-mono font-bold" style={{ color: sumaDesglose === totalConAbono ? C.brass : "#fca5a5" }}>{formatCLP(sumaDesglose)}</span>
                 </div>
-                {sumaDesglose !== total && (
+                {sumaDesglose !== totalConAbono && (
                   <p className="text-[11px]" style={{ color: "#fca5a5" }}>
-                    {sumaDesglose > total ? "La suma supera el total a pagar." : `Falta declarar ${formatCLP(total - sumaDesglose)} para completar el total.`}
+                    {sumaDesglose > totalConAbono ? "La suma supera el total a pagar." : `Falta declarar ${formatCLP(totalConAbono - sumaDesglose)} para completar el total.`}
                   </p>
                 )}
               </div>
@@ -7574,16 +7664,16 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 />
                 {cashReceived !== "" && (
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold" style={{ color: C.grayLight }}>{Number(cashReceived) - total >= 0 ? "Vuelto" : "Falta"}</span>
-                    <span className="font-mono font-bold text-lg" style={{ color: Number(cashReceived) - total >= 0 ? C.brass : "#fca5a5" }}>
-                      {formatCLP(Math.abs(Number(cashReceived) - total))}
+                    <span className="text-sm font-semibold" style={{ color: C.grayLight }}>{Number(cashReceived) - totalConAbono >= 0 ? "Vuelto" : "Falta"}</span>
+                    <span className="font-mono font-bold text-lg" style={{ color: Number(cashReceived) - totalConAbono >= 0 ? C.brass : "#fca5a5" }}>
+                      {formatCLP(Math.abs(Number(cashReceived) - totalConAbono))}
                     </span>
                   </div>
                 )}
               </div>
             )}
 
-            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - total < 0) || (payment === "Fiado" && !selectedCustomer) || (payment === "Pago combinado" && !desglosePagoValido)} icon={Check}>Cobrar y emitir</Btn>
+            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - totalConAbono < 0) || (payment === "Fiado" && !selectedCustomer) || (payment === "Pago combinado" && !desglosePagoValido)} icon={Check}>Cobrar y emitir</Btn>
 
             {/* Ya no es solo para administradores: cualquiera del equipo lo
                 registra con su PIN y queda a su nombre. El control pasó de
@@ -7653,7 +7743,94 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           }}
         />
       )}
+      {abonoFiadoOpen && (
+        <AbonoFiadoModal
+          customers={customers}
+          customerLedger={customerLedger}
+          onClose={() => setAbonoFiadoOpen(false)}
+          onConfirm={(a) => { setAbonoFiado(a); setAbonoFiadoOpen(false); }}
+        />
+      )}
     </div>
+  );
+}
+
+/* Abonar cuenta fiados desde Vender (agosto 2026): busca al cliente, muestra
+   lo que debe y pide cuánto paga ahora — el mismo par de datos que pide
+   "Registrar abono" en Fiados (ver CustomerLedgerModal/registerPayment), pero
+   sin el historial completo, porque acá el objetivo es agregarlo rápido a la
+   venta en curso, no revisar la cuenta. onConfirm solo entrega el monto: el
+   guardado de verdad ocurre recién al cobrar (ver aplicarAbonoFiado). */
+function AbonoFiadoModal({ customers, customerLedger, onClose, onConfirm }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [amount, setAmount] = useState("");
+
+  const matches = useMemo(() => {
+    if (query.trim().length < 1) return [];
+    const q = normalize(query);
+    return customers.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q)).slice(0, 6);
+  }, [query, customers]);
+
+  function balanceOf(customerId) {
+    return customerLedger.reduce((s, m) => {
+      if (m.customerId !== customerId) return s;
+      return s + (m.type === "cargo" ? m.amount : -m.amount);
+    }, 0);
+  }
+
+  function confirmar() {
+    const n = Number(amount);
+    if (!selected || !n || n <= 0) return;
+    onConfirm({ customerId: selected.id, customerName: selected.name, amount: n });
+  }
+
+  return (
+    <Modal title="Abonar cuenta fiados" onClose={onClose}>
+      {!selected ? (
+        <div>
+          <label className="text-xs block mb-1.5" style={{ color: C.gray }} htmlFor="abono-cliente">¿Quién paga su cuenta?</label>
+          <div className="relative">
+            <input
+              id="abono-cliente" value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="Busca por nombre o teléfono…" autoFocus
+              className={inputCls} style={inputStyle()}
+            />
+            {matches.length > 0 && (
+              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                {matches.map(c => (
+                  <button key={c.id} onClick={() => setSelected(c)} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                    <span className="truncate" style={{ color: C.ink }}>{c.name}{c.phone ? ` · ${c.phone}` : ""}</span>
+                    <span className="font-mono text-xs flex-shrink-0" style={{ color: C.gray }}>debe {formatCLP(balanceOf(c.id))}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {customers.length === 0 && <p className="text-xs mt-2" style={{ color: C.gray }}>No hay clientes con cuenta registrados todavía — créalos desde Fiados.</p>}
+        </div>
+      ) : (
+        <div>
+          <div className="rounded-lg p-3 mb-3 flex items-center justify-between gap-2" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold truncate" style={{ color: C.ink }}>{selected.name}</div>
+              <div className="text-xs font-mono" style={{ color: C.gray }}>Debe: {formatCLP(balanceOf(selected.id))}</div>
+            </div>
+            <button onClick={() => { setSelected(null); setQuery(""); }} className="text-xs font-semibold flex-shrink-0" style={{ color: C.green }}>Cambiar</button>
+          </div>
+          <label className="text-xs block mb-1.5" style={{ color: C.gray }} htmlFor="abono-monto">¿Cuánto paga ahora?</label>
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              id="abono-monto" type="number" value={amount} onChange={e => setAmount(e.target.value)}
+              placeholder="Monto" autoFocus onKeyDown={e => { if (e.key === "Enter") confirmar(); }}
+              className={`${inputCls} font-mono`} style={inputStyle()}
+            />
+            <button onClick={() => setAmount(String(Math.max(0, balanceOf(selected.id))))} className="text-xs font-semibold flex-shrink-0 px-2.5 py-2.5 rounded-lg whitespace-nowrap" style={{ background: C.paperDark, color: C.green }}>Todo lo que debe</button>
+          </div>
+          <Btn full icon={Check} disabled={!amount || Number(amount) <= 0} onClick={confirmar}>Agregar a la venta</Btn>
+        </div>
+      )}
+    </Modal>
   );
 }
 
