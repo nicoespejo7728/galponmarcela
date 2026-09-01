@@ -8679,10 +8679,16 @@ function enKilos(unidades, porKilo) {
   return kg === 0 ? "" : String(Number(kg.toFixed(3)));
 }
 
-function DraftRow({ item, onChange, onRemove, role, products, categories = [], conflictoCodigo }) {
+function DraftRow({ item, onChange, onRemove, role, products, categories = [], conflictoCodigo, settings }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
   const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
   const porKilo = unidadesPorKilo(currentProduct);
+  const precioNuevo = Number(item.finalPrice ?? suggested) || 0;
+  // Solo importa cuando el precio que se aplica de una es el de venta —a
+  // quien no es admin esto le queda como propuesta pendiente de aprobación,
+  // así que no tiene sentido pedirle acá una confirmación sobre un precio
+  // que todavía no rige.
+  const riesgoPrecioAnterior = role === "admin" && bajaDePrecioConStockViejo(currentProduct, precioNuevo, settings);
   // Por omisión se recibe en kilos cuando el producto lo permite: es como
   // viene la boleta. El botón queda al lado por si un día llegan sueltas.
   const [enKilo, setEnKilo] = useState(porKilo > 0);
@@ -8841,7 +8847,10 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
             sabe a cuánto conviene venderlo. Puede escribir el precio; si no es
             administrador, queda como propuesta hasta que alguien la apruebe. */}
         <span className="text-[10px]" style={{ color: C.gray }}>{role === "admin" ? "precio de venta" : "precio propuesto"}</span>
-        <input type="number" value={item.finalPrice ?? suggested} onChange={e => onChange({ ...item, finalPrice: e.target.value })} className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
+        <input
+          type="number" value={item.finalPrice ?? suggested}
+          onChange={e => onChange({ ...item, finalPrice: e.target.value, omitirProteccionAnterior: false })}
+          className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
         {/* La cuenta a la vista. Sin esto el selector es un interruptor que
             nadie sabe si dejó bien puesto: acá se lee que a $1.190 con IVA se
             le suma sólo el 30%, y a $1.000 netos el 19% y el 30%. */}
@@ -8852,6 +8861,25 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
         )}
       </div>
       <button onClick={onRemove} style={{ color: C.rust }}><Trash2 size={15} /></button>
+      {/* La regla del precio anterior existe para no perder margen sin darse
+          cuenta — pero quien está recibiendo la boleta en la mano a veces
+          sabe mejor: el proveedor bajó el precio de verdad y quiere que se
+          venda ya todo al precio nuevo, aunque eso deje sin margen el stock
+          que quedaba del anterior. Acá se lo puede confirmar a propósito
+          (migración 0037); sin confirmar, la caja va a seguir cobrando el
+          precio de antes hasta que se agote ese stock. */}
+      {riesgoPrecioAnterior && (
+        <div className="w-full rounded-lg p-2.5" style={{ background: C.rustSoft }}>
+          <p className="text-xs font-semibold mb-1.5" style={{ color: C.rust }}>
+            <AlertTriangle size={12} className="inline mr-1 -mt-0.5" />
+            Quedan {currentProduct.stock} unidades de "{currentProduct.name}" al precio anterior ({formatCLP(currentProduct.price)}). Si no confirmas, la caja va a seguir cobrando ese precio hasta agotarlas — no {formatCLP(precioNuevo)}.
+          </p>
+          <label className="flex items-center gap-2 text-xs font-medium" style={{ color: C.rust }}>
+            <input type="checkbox" checked={!!item.omitirProteccionAnterior} onChange={e => onChange({ ...item, omitirProteccionAnterior: e.target.checked })} />
+            Sé que hay stock al precio anterior y aun así quiero venderlo todo a {formatCLP(precioNuevo)} de inmediato
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -8863,7 +8891,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
 // el negocio, no el cliente.
 const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado", "Crédito con el proveedor"];
 
-function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente }) {
+function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente, settings }) {
   const [draftItems, setDraftItems] = useState([]);
   /* Cómo vienen los precios en ESTA factura. Casi siempre un proveedor es
      todo de una forma, así que se pone una vez arriba y baja a todas las
@@ -9067,6 +9095,16 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     return { qty: acc.qty + qty, net: acc.net + qty * cost };
   }, { qty: 0, net: 0 });
 
+  // Igual que el aviso de cada fila (ver DraftRow), pero para bloquear el
+  // botón de confirmar mientras quede alguna baja de precio sin que quien
+  // recibe la haya aceptado a propósito.
+  const itemsConRiesgoSinConfirmar = role !== "admin" ? [] : draftItems.filter(it => {
+    if (it.isNew || it.omitirProteccionAnterior) return false;
+    const prod = products.find(p => p.id === it.productId);
+    const precioNuevo = Number(it.finalPrice ?? suggestPrice(Number(it.netCost) || 0)) || 0;
+    return bajaDePrecioConStockViejo(prod, precioNuevo, settings);
+  });
+
   // Carga una recepción ya guardada al formulario para corregirla. Se pide
   // admin porque las políticas de la base solo dejan editar factura_compra y
   // compra_detalle a un administrador — pedirlo también acá evita que alguien
@@ -9149,6 +9187,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
+    }
+    if (itemsConRiesgoSinConfirmar.length > 0) {
+      return toast("Confirma la baja de precio marcada en rojo antes de continuar (o vuelve a subir el precio)", "error");
     }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Sin un proveedor registrado no hay a quién cargarle la deuda: el libro
@@ -9273,6 +9314,11 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           if (role === "admin") {
             updated.price = Number(item.finalPrice ?? suggested);
             updated.priceApproval = null;
+            // Confirmado a propósito en esta misma recepción (ver DraftRow):
+            // la baja de precio no debe dejar protegido el stock que quedaba
+            // del precio anterior. Campo transitorio, no se guarda tal cual —
+            // productos.escribir() lo lee y llama a marcar_precio_sin_proteccion.
+            if (item.omitirProteccionAnterior) updated.__omitirProteccionAnterior = true;
           } else {
             // Producto que ya se vendía: el precio en vitrina no cambia hasta
             // que un administrador apruebe. Lo que se guarda es la propuesta.
@@ -9395,6 +9441,9 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       if (!it.name.trim()) return toast("Todos los productos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
     }
+    if (itemsConRiesgoSinConfirmar.length > 0) {
+      return toast("Confirma la baja de precio marcada en rojo antes de continuar (o vuelve a subir el precio)", "error");
+    }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Pasar de pagada a crédito (o al revés) mueve la plata de un libro a
     // otro —de Egresos al libro de crédito del proveedor, o viceversa— y eso
@@ -9505,7 +9554,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     for (const it of draftItems) {
       if (it.isNew || !it.productId) continue;
       newQtyByProduct.set(it.productId, (newQtyByProduct.get(it.productId) || 0) + (Number(it.qty) || 0));
-      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice });
+      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice, omitirProteccionAnterior: it.omitirProteccionAnterior });
     }
     const productosTocados = new Set([...oldQtyByProduct.keys(), ...newQtyByProduct.keys()]);
     for (const productId of productosTocados) {
@@ -9523,6 +9572,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           if (role === "admin") {
             updated.price = Number(datos.finalPrice ?? suggested);
             updated.priceApproval = null;
+            if (datos.omitirProteccionAnterior) updated.__omitirProteccionAnterior = true;
           } else {
             updated.priceApproval = { suggestedPrice: Number(datos.finalPrice ?? suggested), netCost: datos.netCost, requestedBy: session.name, date };
           }
@@ -9865,7 +9915,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </div>
           <div>
             {draftItems.map(item => (
-              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} conflictoCodigo={conflictosCodigo.get(item.tempId)} />
+              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} conflictoCodigo={conflictosCodigo.get(item.tempId)} settings={settings} />
             ))}
           </div>
         </div>
@@ -9877,8 +9927,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           Hay códigos repetidos en la lista — corrígelos antes de confirmar.
         </div>
       )}
+      {itemsConRiesgoSinConfirmar.length > 0 && (
+        <div className="rounded-lg p-3 mb-3 flex items-center gap-2 text-xs font-medium" style={{ background: "#fdece9", color: C.rust }}>
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          Confirma la baja de precio marcada en rojo {itemsConRiesgoSinConfirmar.length === 1 ? "arriba" : "en cada producto"} antes de continuar.
+        </div>
+      )}
       {draftItems.length > 0 && (
-        <Btn full variant="primary" icon={Truck} onClick={editingInvoiceId ? confirmEditReception : confirmReception} disabled={conflictosCodigo.size > 0}>
+        <Btn full variant="primary" icon={Truck} onClick={editingInvoiceId ? confirmEditReception : confirmReception} disabled={conflictosCodigo.size > 0 || itemsConRiesgoSinConfirmar.length > 0}>
           {editingInvoiceId ? `Guardar cambios (${draftItems.length} producto(s))` : `Confirmar recepción de ${draftItems.length} producto(s)`}
         </Btn>
       )}
@@ -10844,6 +10900,12 @@ function findLastPriceDrop(priceHistory) {
   for (let i = priceHistory.length - 1; i > 0; i--) {
     const prev = priceHistory[i - 1], cur = priceHistory[i];
     if (Number(cur.price) < Number(prev.price)) {
+      // Quien recibió mercadería o corrigió el precio confirmó en pantalla
+      // que aceptaba a propósito vender el stock del precio anterior al
+      // precio nuevo (ver ReceivingView, migración 0037): esta baja puntual
+      // no protege nada. Se sigue buscando más atrás por si hay una baja
+      // anterior a esta que nadie haya confirmado.
+      if (cur.omitido) continue;
       return { date: cur.date, oldPrice: Number(prev.price), newPrice: Number(cur.price), oldCost: Number(prev.cost) || 0 };
     }
   }
@@ -11276,6 +11338,27 @@ function pausaDelPrecioAnterior(settings) {
   const hasta = settings?.pausaPrecioAnteriorHasta;
   if (!hasta) return false;
   return new Date(`${String(hasta).slice(0, 10)}T23:59:59`) >= new Date();
+}
+
+/* Aviso al recibir mercadería (migración 0037): si se anota un precio de
+   venta más bajo que el actual y todavía queda stock del que se compró al
+   precio de antes, la regla del precio anterior de más abajo va a seguir
+   cobrando el precio viejo hasta que ese stock se agote — quien recibe
+   puede no saberlo, y terminar cobrando de más sin querer o, al revés,
+   preguntándose por qué "no baja" en la caja.
+
+   Esta función solo decide cuándo conviene avisar y pedir una confirmación
+   a propósito; la reproducción exacta de cuándo la regla protege de verdad
+   vive en unitsStillAtOldPrice. Por eso es a propósito más simple: mejor
+   avisar una vez de más (por ejemplo, en pan, donde la regla ni aplica) que
+   dejar pasar una baja real sin que nadie la haya confirmado. */
+function bajaDePrecioConStockViejo(product, newPrice, settings) {
+  if (!product) return false;
+  if (product.unitType === "peso") return false;
+  if (!(product.stock > 0)) return false;
+  if (!(newPrice > 0) || !(newPrice < Number(product.price))) return false;
+  if (pausaDelPrecioAnterior(settings)) return false;
+  return true;
 }
 
 function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts, settings) {
@@ -20443,7 +20526,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} /></TabPane>
+        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
         <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} seccionPendiente={seccionProductosPendiente} onSeccionPendienteConsumida={() => setSeccionProductosPendiente(null)} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
