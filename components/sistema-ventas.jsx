@@ -41,6 +41,10 @@ import {
   ROLLOS, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
 } from "@/lib/etiquetas-png";
+import {
+  hayWebBluetooth, porQueNoSePuedeBluetooth, imprimirTandaNiimbot,
+  PROTOCOLOS_D110, protocoloGuardado, guardarProtocolo,
+} from "@/lib/niimbot-bluetooth";
 import { hojaCartaDeCodigos, SIN_SECCION } from "@/lib/hoja-carta";
 import {
   terminalPointDeEsteEquipo, guardarTerminalPointDeEsteEquipo,
@@ -74,7 +78,8 @@ import {
   Tags, Scale, BarChart3, PackageX, Award, Medal, PackageMinus,
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
-  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent, Layers
+  MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent, Layers,
+  Bluetooth,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -12970,6 +12975,12 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
   const medida = medirCodigo(rollo.largo - 2);   // menos un milímetro de margen a cada lado
   const cabe = queCabe(rollo.ancho, rollo.largo);
 
+  // Imprimir directo por Bluetooth (ver lib/niimbot-bluetooth.js): sin
+  // descargar imágenes ni volver a poner la cantidad en la app de Niimbot.
+  const [imprimiendoBt, setImprimiendoBt] = useState(null); // { indice, total, nombre } | null mientras imprime
+  const [protocoloBt, setProtocoloBt] = useState(() => protocoloGuardado());
+  const puedeBluetooth = hayWebBluetooth();
+
   // Para encontrar rápido entre muchos: filtra por nombre o por sección,
   // sin distinguir tildes ni mayúsculas.
   const [busqueda, setBusqueda] = useState("");
@@ -13111,6 +13122,21 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
     }
   }
 
+  // El mismo dibujo lo usan la descarga de PNG y la impresión directa por
+  // Bluetooth — se arma una sola vez acá para no mantenerlo escrito dos veces.
+  function dibujarLienzoEtiqueta(producto) {
+    const lienzo = document.createElement("canvas");
+    lienzo.width = Math.round(rollo.largo * PIXELES_POR_MM);
+    lienzo.height = Math.round(rollo.ancho * PIXELES_POR_MM);
+    dibujarEtiqueta(lienzo.getContext("2d"), {
+      modulos: modulosEan13(producto.barcode),
+      codigo: producto.barcode,
+      nombre: producto.name,
+      precio: producto.price > 0 ? formatCLP(producto.price) : "",
+    }, { anchoMm: rollo.ancho, largoMm: rollo.largo });
+    return lienzo;
+  }
+
   /* Un PNG por producto, del porte exacto de la etiqueta. La aplicación de la
      Niimbot importa imágenes y ahí se elige cuántas copias, así que se manda
      una sola por producto y no una por copia. */
@@ -13120,16 +13146,7 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
     try {
       const archivos = [];
       for (const { producto } of aImprimir) {
-        const lienzo = document.createElement("canvas");
-        lienzo.width = Math.round(rollo.largo * PIXELES_POR_MM);
-        lienzo.height = Math.round(rollo.ancho * PIXELES_POR_MM);
-        dibujarEtiqueta(lienzo.getContext("2d"), {
-          modulos: modulosEan13(producto.barcode),
-          codigo: producto.barcode,
-          nombre: producto.name,
-          precio: producto.price > 0 ? formatCLP(producto.price) : "",
-        }, { anchoMm: rollo.ancho, largoMm: rollo.largo });
-
+        const lienzo = dibujarLienzoEtiqueta(producto);
         const blob = await new Promise(listo => lienzo.toBlob(listo, "image/png"));
         archivos.push({
           nombre: nombreDeArchivo(producto.barcode, producto.name),
@@ -13154,6 +13171,31 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
       toast(friendlyError(e, "No se pudieron generar las etiquetas"), "error");
     } finally {
       setTrabajando(false);
+    }
+  }
+
+  /* Imprime directo en la Niimbot por Bluetooth (ver lib/niimbot-bluetooth.js):
+     el navegador se conecta a la impresora y las etiquetas salen con las
+     cantidades que ya están puestas arriba, sin descargar nada ni volver a
+     entrar la cantidad en otra aplicación. */
+  async function imprimirPorBluetooth() {
+    if (aImprimir.length === 0) return toast("Elige al menos un producto", "error");
+    setImprimiendoBt({ indice: 0, total: aImprimir.length, nombre: "" });
+    try {
+      const etiquetas = aImprimir.map(({ producto, copias }) => ({
+        canvas: dibujarLienzoEtiqueta(producto),
+        copias,
+        nombre: producto.name,
+      }));
+      await imprimirTandaNiimbot(etiquetas, {
+        protocolo: protocoloBt,
+        onProgreso: (p) => setImprimiendoBt(p.listo ? null : p),
+      });
+      toast(`${aImprimir.length} etiqueta${aImprimir.length === 1 ? "" : "s"} enviada${aImprimir.length === 1 ? "" : "s"} a la Niimbot`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo imprimir en la Niimbot — revisa que esté prendida y cerca"), "error");
+    } finally {
+      setImprimiendoBt(null);
     }
   }
 
@@ -13268,18 +13310,54 @@ function EtiquetasSinCodigo({ productos, todos, setProducts, settings, setSettin
               <Btn size="sm" variant="ghost"
                 onClick={() => setCuantas(Object.fromEntries(conCodigo.map(p => [p.id, 1])))}>Una de cada uno</Btn>
               <Btn size="sm" variant="ghost" icon={Printer} disabled={totalEtiquetas === 0} onClick={imprimir}>Etiquetas sueltas</Btn>
-              <Btn size="sm" icon={trabajando ? Loader2 : Download} disabled={trabajando || aImprimir.length === 0}
+              <Btn size="sm" variant="ghost" icon={trabajando ? Loader2 : Download} disabled={trabajando || aImprimir.length === 0}
                 onClick={descargarImagenes}>
-                {trabajando ? "Generando…" : "Etiquetas para la Niimbot"}
+                {trabajando ? "Generando…" : "Descargar imágenes (manual)"}
               </Btn>
             </div>
           </div>
 
+          {/* Imprimir directo por Bluetooth — el camino de todos los días.
+              El de descargar imágenes queda arriba como respaldo, por si un
+              día el Bluetooth no coopera. */}
+          <div className="rounded-lg p-3 mt-3" style={{ background: C.paperDark }}>
+            {puedeBluetooth ? (
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold" style={{ color: C.ink }}>Protocolo</span>
+                  <select value={protocoloBt} onChange={e => { setProtocoloBt(e.target.value); guardarProtocolo(e.target.value); }}
+                    disabled={!!imprimiendoBt} className={`${inputCls} text-xs`} style={{ ...inputStyle(), width: "auto" }}>
+                    {PROTOCOLOS_D110.map(p => <option key={p.id} value={p.id}>{p.etiqueta}</option>)}
+                  </select>
+                  {imprimiendoBt && (
+                    <span className="text-xs font-medium flex items-center gap-1.5" style={{ color: C.green }}>
+                      <Loader2 size={13} className="animate-spin" />
+                      {imprimiendoBt.total > 0
+                        ? `Imprimiendo ${imprimiendoBt.indice + 1} de ${imprimiendoBt.total}${imprimiendoBt.nombre ? ` — ${imprimiendoBt.nombre}` : ""}`
+                        : "Conectando con la impresora…"}
+                    </span>
+                  )}
+                </div>
+                <Btn size="sm" icon={imprimiendoBt ? Loader2 : Bluetooth} disabled={!!imprimiendoBt || totalEtiquetas === 0}
+                  onClick={imprimirPorBluetooth}>
+                  {imprimiendoBt ? "Imprimiendo…" : "Imprimir en la Niimbot"}
+                </Btn>
+              </div>
+            ) : (
+              <p className="text-xs flex items-start gap-1.5" style={{ color: C.gray }}>
+                <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+                {porQueNoSePuedeBluetooth()}
+              </p>
+            )}
+          </div>
+
           <p className="text-xs mt-3 pt-3" style={{ color: C.gray, borderTop: `1px dashed ${C.paperLine}` }}>
-            La Niimbot no aparece en el menú de imprimir del navegador: imprime por Bluetooth desde su
-            propia aplicación. "Etiquetas para la Niimbot" baja las imágenes del porte exacto del rollo
-            ({rollo.largo} × {rollo.ancho} mm) para importarlas ahí — una por producto, y las copias se
-            eligen en la aplicación. "Hoja para imprimir" es para una impresora corriente.
+            "Imprimir en la Niimbot" se conecta directo por Bluetooth y manda las etiquetas con las cantidades
+            de arriba — la primera vez el navegador va a pedir elegir la impresora de una lista. Si alguna
+            sale rara (torcida, en blanco, con los colores al revés), prueba cambiando el "Protocolo" de
+            arriba y vuelve a intentar. "Descargar imágenes (manual)" sigue disponible por si hace falta
+            importarlas a mano en la aplicación de Niimbot ({rollo.largo} × {rollo.ancho} mm cada una).
+            "Etiquetas sueltas" es para una impresora corriente, no la Niimbot.
             {rollo.ancho > 15 && " Ojo: un rollo de más de 15 mm de ancho no entra en una D110 — es de las B1, B21 o B18."}
           </p>
         </div>
