@@ -32,11 +32,12 @@ import {
   subirLoPendiente,
   cuantosPendientes,
   codigosInternosUsados,
+  todosLosCodigosDeBarra,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos, perfilVaALaCasa } from "@/lib/datos/catalogos";
 import { nuevoId, clave } from "@/lib/datos/traduccion";
-import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN } from "@/lib/codigos-barra";
+import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN, normalizarCodigoParaComparar } from "@/lib/codigos-barra";
 import {
   ROLLOS, ROLLO_POR_OMISION, dibujarEtiqueta, medirCodigo, queCabe,
   armarZip, nombreDeArchivo, PIXELES_POR_MM,
@@ -8981,16 +8982,16 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   // confirmReception, contra el catálogo recién releído de la base — esto es
   // solo para que se note el problema antes de llegar a "Confirmar".
   const conflictosCodigo = useMemo(() => {
-    const porCodigo = new Map(); // código → producto del catálogo
+    const porCodigo = new Map(); // código (normalizado) → producto del catálogo
     for (const p of products) {
-      const c = String(p.barcode || "").trim();
+      const c = normalizarCodigoParaComparar(p.barcode);
       if (c) porCodigo.set(c, p);
     }
-    const vistos = new Map(); // código → tempId del primero que lo usó acá
+    const vistos = new Map(); // código (normalizado) → tempId del primero que lo usó acá
     const conflictos = new Map(); // tempId → mensaje
     for (const it of draftItems) {
       if (!it.isNew) continue;
-      const codigo = it.barcode.trim();
+      const codigo = normalizarCodigoParaComparar(it.barcode);
       if (!codigo) continue;
       const enCatalogo = porCodigo.get(codigo);
       if (enCatalogo) {
@@ -9264,23 +9265,34 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     // revisa que ese código no choque con ninguno: ni con uno que ya esté en
     // el catálogo —activo o de baja, la base tiene un índice único sobre el
     // código— ni con el de otro producto nuevo de esta misma recepción.
+    // Se pide la lista COMPLETA de códigos aparte (todosLosCodigosDeBarra),
+    // no la de latestProducts: esa trae solo los activos, y un producto dado
+    // de baja sigue ocupando su código igual — sin este chequeo aparte, esa
+    // colisión recién se notaba cuando la base rechazaba el índice único (o,
+    // peor, no se notaba nunca si el código venía escrito con o sin un cero
+    // adelante: ver normalizarCodigoParaComparar en lib/codigos-barra.js).
+    const todosLosCodigos = await todosLosCodigosDeBarra();
     const catalogoPorCodigo = new Map(
-      latestProducts.map(p => [String(p.barcode || "").trim(), p]).filter(([c]) => c)
+      todosLosCodigos.map(p => [normalizarCodigoParaComparar(p.barcode), p]).filter(([c]) => c)
     );
-    const codigosEscritosEnEstaRecepcion = new Map(); // código → nombre del primero que lo usó
+    const codigosEscritosEnEstaRecepcion = new Map(); // código (normalizado) → nombre del primero que lo usó
     for (const it of draftItems) {
       if (!it.isNew) continue;
       const codigo = it.barcode.trim();
-      if (!codigo) continue;
-      const enCatalogo = catalogoPorCodigo.get(codigo);
+      const codigoNorm = normalizarCodigoParaComparar(codigo);
+      if (!codigoNorm) continue;
+      const enCatalogo = catalogoPorCodigo.get(codigoNorm);
       if (enCatalogo) {
-        return toast(`El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`, "error");
+        const aviso = enCatalogo.active
+          ? `El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`
+          : `El código "${codigo}" ya lo tenía "${enCatalogo.name}", que está dado de baja — reactívalo desde Inventario en vez de crear uno nuevo, o esto termina en dos fichas del mismo producto`;
+        return toast(aviso, "error");
       }
-      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigo);
+      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigoNorm);
       if (yaEscrito) {
         return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
       }
-      codigosEscritosEnEstaRecepcion.set(codigo, it.name.trim() || "un producto");
+      codigosEscritosEnEstaRecepcion.set(codigoNorm, it.name.trim() || "un producto");
     }
 
     // Productos nuevos que llegan sin código de barras: se les reparte uno
@@ -9509,25 +9521,32 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     chosenDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
     const date = chosenDate.toISOString();
 
-    // Mismo chequeo de códigos que en una recepción nueva, para las líneas
-    // nuevas que se hayan agregado durante esta edición.
+    // Mismo chequeo de códigos que en una recepción nueva (ver confirmReception
+    // más arriba), para las líneas nuevas que se hayan agregado durante esta
+    // edición: contra el catálogo COMPLETO —activos e inactivos— y con la
+    // comparación normalizada, no contra latestProducts (solo activos).
+    const todosLosCodigos = await todosLosCodigosDeBarra();
     const catalogoPorCodigo = new Map(
-      latestProducts.map(p => [String(p.barcode || "").trim(), p]).filter(([c]) => c)
+      todosLosCodigos.map(p => [normalizarCodigoParaComparar(p.barcode), p]).filter(([c]) => c)
     );
     const codigosEscritosEnEstaRecepcion = new Map();
     for (const it of draftItems) {
       if (!it.isNew) continue;
       const codigo = it.barcode.trim();
-      if (!codigo) continue;
-      const enCatalogo = catalogoPorCodigo.get(codigo);
+      const codigoNorm = normalizarCodigoParaComparar(codigo);
+      if (!codigoNorm) continue;
+      const enCatalogo = catalogoPorCodigo.get(codigoNorm);
       if (enCatalogo) {
-        return toast(`El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`, "error");
+        const aviso = enCatalogo.active
+          ? `El código "${codigo}" ya lo tiene "${enCatalogo.name}" — escribe otro, o déjalo en blanco para que el sistema le asigne uno`
+          : `El código "${codigo}" ya lo tenía "${enCatalogo.name}", que está dado de baja — reactívalo desde Inventario en vez de crear uno nuevo, o esto termina en dos fichas del mismo producto`;
+        return toast(aviso, "error");
       }
-      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigo);
+      const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigoNorm);
       if (yaEscrito) {
         return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
       }
-      codigosEscritosEnEstaRecepcion.set(codigo, it.name.trim() || "un producto");
+      codigosEscritosEnEstaRecepcion.set(codigoNorm, it.name.trim() || "un producto");
     }
 
     const necesitanCodigo = draftItems.filter(it => it.isNew && !it.barcode.trim());
@@ -15785,7 +15804,10 @@ function StaleStockPanel({ products, setProducts, session, toast }) {
   async function approveDeletion(product) {
     const latest = await loadJSON("products-catalog", products);
     const np = latest.filter(p => p.id !== product.id);
-    setProducts(np); await saveJSON("products-catalog", np);
+    setProducts(np);
+    // Mismo criterio que deleteProduct: la baja se pide con el id explícito,
+    // no se deduce de que el producto no venga en la lista.
+    await saveJSON("products-catalog", np, { idsAEliminar: [{ id: product.id, name: product.name }] });
     toast(`"${product.name}" eliminado del catálogo`, "success");
   }
   async function cancelRequest(product) {
@@ -15888,7 +15910,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   // productos terminando con el mismo código de barras, que el índice único
   // de la base rechaza), la pantalla ya había cambiado igual, como si hubiera
   // funcionado, y el error quedaba solo en la consola sin que nadie lo viera.
-  async function persist(np) { await saveJSON("products-catalog", np); setProducts(np); }
+  async function persist(np, opts) { await saveJSON("products-catalog", np, opts); setProducts(np); }
 
   // Antes, para no partir de una copia que otro dispositivo ya había dejado
   // atrás, cada guardado desde esta pantalla releía el catálogo COMPLETO —más
@@ -15915,6 +15937,27 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
       const latest = await productosAlDia();
       const prev = latest.find(x => x.id === p.id);
       const exists = !!prev;
+      // Al crear (no al editar), se revisa el código contra el catálogo
+      // COMPLETO —activos e inactivos, comparando normalizado— antes de
+      // guardar: si no, un código que ya tenía un producto dado de baja
+      // podía "colarse" sin aviso (por ejemplo escrito sin el cero adelante
+      // de un EAN-13) y terminar en dos fichas del mismo producto físico.
+      if (!exists && p.barcode) {
+        const codigoNorm = normalizarCodigoParaComparar(p.barcode);
+        if (codigoNorm) {
+          const todos = await todosLosCodigosDeBarra();
+          const choque = todos.find(c => normalizarCodigoParaComparar(c.barcode) === codigoNorm);
+          if (choque) {
+            toast(
+              choque.active
+                ? `Ese código ya lo tiene "${choque.name}"`
+                : `Ese código ya lo tenía "${choque.name}", que está dado de baja — reactívalo en vez de crear uno nuevo`,
+              "error"
+            );
+            return;
+          }
+        }
+      }
       const withZero = { ...p, stockZeroSince: nextStockZeroSince(prev?.stock, prev?.stockZeroSince, p.stock) };
       const np = exists ? latest.map(x => x.id === p.id ? withZero : x) : [...latest, withZero];
       await persist(np);
@@ -15935,7 +15978,12 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
 
   async function deleteProduct(id) {
     const latest = await productosAlDia();
-    await persist(latest.filter(p => p.id !== id));
+    const producto = latest.find(p => p.id === id);
+    // El id a retirar se manda aparte y explícito (idsAEliminar): la baja real
+    // en la base depende solo de este dato, nunca de que el producto "falte"
+    // en la lista guardada — así una copia local atrasada en otra pantalla no
+    // puede confundir a un producto recién creado con uno que se quiso borrar.
+    await persist(latest.filter(p => p.id !== id), { idsAEliminar: [{ id, name: producto?.name }] });
     setDeleting(null);
     toast("Producto eliminado", "success");
   }
