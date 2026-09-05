@@ -9271,7 +9271,11 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     // colisión recién se notaba cuando la base rechazaba el índice único (o,
     // peor, no se notaba nunca si el código venía escrito con o sin un cero
     // adelante: ver normalizarCodigoParaComparar en lib/codigos-barra.js).
-    const todosLosCodigos = await todosLosCodigosDeBarra();
+    // Solo se pide si hace falta: una recepción que solo repone productos que
+    // ya existen (el caso más común) no tiene ninguna línea "isNew", y pedir
+    // el catálogo completo igual solo la haría más lenta sin revisar nada.
+    const hayLineasNuevas = draftItems.some(it => it.isNew);
+    const todosLosCodigos = hayLineasNuevas ? await todosLosCodigosDeBarra() : [];
     const catalogoPorCodigo = new Map(
       todosLosCodigos.map(p => [normalizarCodigoParaComparar(p.barcode), p]).filter(([c]) => c)
     );
@@ -9524,8 +9528,10 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     // Mismo chequeo de códigos que en una recepción nueva (ver confirmReception
     // más arriba), para las líneas nuevas que se hayan agregado durante esta
     // edición: contra el catálogo COMPLETO —activos e inactivos— y con la
-    // comparación normalizada, no contra latestProducts (solo activos).
-    const todosLosCodigos = await todosLosCodigosDeBarra();
+    // comparación normalizada, no contra latestProducts (solo activos). Y,
+    // como allá, solo se pide si hay alguna línea nueva.
+    const hayLineasNuevas = draftItems.some(it => it.isNew);
+    const todosLosCodigos = hayLineasNuevas ? await todosLosCodigosDeBarra() : [];
     const catalogoPorCodigo = new Map(
       todosLosCodigos.map(p => [normalizarCodigoParaComparar(p.barcode), p]).filter(([c]) => c)
     );
