@@ -33,6 +33,8 @@ import {
   cuantosPendientes,
   codigosInternosUsados,
   todosLosCodigosDeBarra,
+  productosDadosDeBaja,
+  reactivarProducto,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
 import { cargarCatalogos, perfilVaALaCasa } from "@/lib/datos/catalogos";
@@ -15848,6 +15850,98 @@ function UnclassifiedRow({ product, categoryOptions, onAssign }) {
   );
 }
 
+/* Productos dados de baja: hasta ahora, la única forma de deshacer una baja
+   —a propósito o por un clic apurado en "Eliminar"— era pedir que alguien la
+   corrigiera directo en la base. Este panel es el camino de vuelta desde
+   adentro del sistema mismo.
+
+   Se pide la lista aparte —no sale de "products", que solo trae los
+   activos— y solo al abrir el panel, para no golpear la base cada vez que
+   alguien entra a Inventario. Se muestran los últimos 20: es para deshacer
+   un error reciente, no un archivo de todo lo que se ha borrado alguna vez. */
+function DeletedProductsPanel({ toast }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState(null);
+  const [reactivando, setReactivando] = useState(null);
+
+  async function cargar() {
+    setLoading(true);
+    try {
+      const todos = await productosDadosDeBaja();
+      setItems(todos.slice(0, 20));
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo traer la lista de productos dados de baja"), "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function abrir() {
+    setOpen(true);
+    if (items === null) cargar();
+  }
+
+  async function reactivar(p) {
+    setReactivando(p.id);
+    try {
+      await reactivarProducto(p.id);
+      setItems(prev => (prev || []).filter(x => x.id !== p.id));
+      toast(`"${p.name}" reactivado — vuelve a aparecer en Inventario y en Vender`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo reactivar"), "error");
+    } finally {
+      setReactivando(null);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button onClick={abrir} className="text-xs underline mb-3 block" style={{ color: C.gray }}>
+        Ver productos dados de baja (por si hay que deshacer una eliminación)
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-xl overflow-hidden mb-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <div className="px-4 py-3 flex items-center justify-between gap-2 flex-wrap" style={{ background: C.paperDark }}>
+        <span className="text-sm font-semibold flex items-center gap-2" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+          <Trash2 size={16} /> Productos dados de baja
+        </span>
+        <div className="flex items-center gap-3">
+          <button onClick={cargar} className="text-xs underline" style={{ color: C.gray }}>Actualizar</button>
+          <button onClick={() => setOpen(false)} className="text-xs underline" style={{ color: C.gray }}>Cerrar</button>
+        </div>
+      </div>
+      {loading ? (
+        <p className="text-sm px-4 py-3" style={{ color: C.gray }}>Cargando…</p>
+      ) : items && items.length === 0 ? (
+        <p className="text-sm px-4 py-3" style={{ color: C.gray }}>No hay ninguno dado de baja.</p>
+      ) : (
+        <div className="divide-y" style={{ borderColor: C.paperLine }}>
+          {(items || []).map(p => (
+            <div key={p.id} className="px-4 py-3 flex flex-wrap items-center gap-2.5">
+              <div className="flex-1 min-w-[180px]">
+                <div className="text-sm font-medium" style={{ color: C.ink }}>{p.name}</div>
+                <div className="text-xs font-mono" style={{ color: C.gray }}>
+                  {p.barcode} · tenía stock {p.stock} · {formatCLP(p.price)} · dado de baja el {formatDate(p.updatedAt)}
+                </div>
+              </div>
+              <Btn size="sm" icon={reactivando === p.id ? Loader2 : Check} disabled={reactivando === p.id} onClick={() => reactivar(p)}>
+                Reactivar
+              </Btn>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-xs px-4 py-3" style={{ color: C.grayLight, borderTop: `1px dashed ${C.paperLine}` }}>
+        Los últimos 20, más reciente primero. Reactivar deja el producto tal como estaba —mismo precio, mismo stock que tenía cuando se dio de baja— sin crear uno nuevo al lado.
+      </p>
+    </div>
+  );
+}
+
 /* Productos sin stock desde hace 6 meses o más: candidatos a sacarlos del
    catálogo porque ya no se venden ni se reponen. No se borran directo —un
    administrador pide la eliminación y otro (o el mismo, más adelante) la
@@ -15924,6 +16018,11 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   const [restocking, setRestocking] = useState(null);
   const [importing, setImporting] = useState(false);
   const [deleting, setDeleting] = useState(null);
+  // Lo que se escribe para confirmar la baja (ver el modal "Eliminar
+  // producto" más abajo): tiene que coincidir con el nombre del producto
+  // antes de habilitar el botón. Nace y muere con "deleting" para que la
+  // próxima vez que se abra el modal no quede el texto de la vez anterior.
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [shrinking, setShrinking] = useState(null);
   const [renaming, setRenaming] = useState(null);
   const [shrinkageSummaryOpen, setShrinkageSummaryOpen] = useState(false);
@@ -16124,7 +16223,8 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
 
   const lowStock = products.filter(p => p.stock <= p.minStock).length;
   const puedeAjustar = role === "admin" || enMarchaBlanca(settings);
-  const tableHandlers = { role, suppliers, puedeAjustar, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: setDeleting, onRename: setRenaming };
+  function abrirEliminar(p) { setDeleteConfirmText(""); setDeleting(p); }
+  const tableHandlers = { role, suppliers, puedeAjustar, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: abrirEliminar, onRename: setRenaming };
 
   return (
     <div>
@@ -16163,6 +16263,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
           <AlertTriangle size={15} /> {lowStock} producto(s) con stock bajo o agotado
         </div>
       )}
+      {role === "admin" && <DeletedProductsPanel toast={toast} />}
       {role === "admin" && <StaleStockPanel products={products} setProducts={setProducts} session={session} toast={toast} />}
 
       {searchResults ? (
@@ -16258,8 +16359,29 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
       {shrinkageSummaryOpen && <ShrinkageSummaryModal movements={movements} onClose={() => setShrinkageSummaryOpen(false)} />}
       {deleting && (
         <Modal title="Eliminar producto" onClose={() => setDeleting(null)}>
-          <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar <strong>{deleting.name}</strong>? Esta acción no se puede deshacer.</p>
-          <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteProduct(deleting.id)}>Eliminar</Btn></div>
+          <p className="text-sm mb-1" style={{ color: C.ink }}>
+            ¿Eliminar <strong>{deleting.name}</strong>? Deja de venderse y de aparecer en Inventario.
+          </p>
+          <p className="text-xs mb-4" style={{ color: C.gray }}>
+            Se puede deshacer después desde "Productos dados de baja" en esta misma pantalla — pero para
+            evitar una baja por un clic apurado, primero escribe el nombre del producto tal como aparece arriba.
+          </p>
+          <Field label="Escribe el nombre para confirmar">
+            <input
+              value={deleteConfirmText}
+              onChange={e => setDeleteConfirmText(e.target.value)}
+              placeholder={deleting.name}
+              className={inputCls}
+              style={inputStyle()}
+              autoFocus
+            />
+          </Field>
+          <div className="flex gap-2 mt-3">
+            <Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn>
+            <Btn variant="rust" full disabled={deleteConfirmText.trim().toLowerCase() !== deleting.name.trim().toLowerCase()} onClick={() => deleteProduct(deleting.id)}>
+              Eliminar
+            </Btn>
+          </div>
         </Modal>
       )}
     </div>
