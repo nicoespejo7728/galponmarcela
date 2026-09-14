@@ -9432,24 +9432,49 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       ...latestPurchaseItems,
     ];
 
+    // Se optimista en pantalla (setProducts de una) pero la recepción recién
+    // queda hecha cuando las escrituras de abajo terminan de verdad — y en el
+    // celular, con señal que entra y sale, "de verdad" no está garantizado.
+    // Antes, si algo de esto fallaba a mitad de camino (típico: se cortó la
+    // conexión justo entre el guardado del documento y el del catálogo), el
+    // error quedaba sin capturar: la pantalla ya mostraba el stock nuevo
+    // aunque nunca hubiera llegado a la base, no aparecía ningún aviso, y la
+    // recepción se perdía sin dejar rastro — hasta que alguien revisaba en
+    // otro equipo y no encontraba nada. Envolver todo esto en un try/catch es
+    // lo que permite notar el fallo, deshacer lo que se alcanzó a mostrar y
+    // avisar en vez de quedar en silencio.
     setProducts(newProducts); setMovements(newMovements);
     setInvoicesIndex(newInvoicesIndex); setPurchaseItems(newPurchaseItems);
     setSupplierLedger(newSupplierLedger);
-    // El orden importa: las líneas de compra, las fotos y el asiento de caja
-    // apuntan al documento, así que el documento va primero. Antes se guardaba
-    // todo en paralelo porque no había relaciones que respetar.
-    await saveJSON("invoices-index", newInvoicesIndex);
-    await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
-    await saveJSON("purchase-items-log", newPurchaseItems);
-    // A crédito no hay egreso nuevo que guardar (newMovements quedó igual a
-    // lo que ya había): se guarda el cargo en el libro de crédito en su
-    // lugar. Al contado/transferencia es al revés — no hay ledger que tocar.
-    if (isCredito) await saveJSON("supplier-ledger", newSupplierLedger);
-    else await saveJSON("movements-log", newMovements);
-    // La foto ya no es obligatoria para confirmar: se puede agregar acá si
-    // ya se tiene a mano, o después desde el historial de recepciones.
-    if (invoiceFiles.length > 0) {
-      await saveJSON(`invoice-image:${invoiceId}`, { pages: invoiceFiles.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })) });
+    try {
+      // El orden importa: las líneas de compra, las fotos y el asiento de
+      // caja apuntan al documento, así que el documento va primero. Antes se
+      // guardaba todo en paralelo porque no había relaciones que respetar.
+      await saveJSON("invoices-index", newInvoicesIndex);
+      await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
+      await saveJSON("purchase-items-log", newPurchaseItems);
+      // A crédito no hay egreso nuevo que guardar (newMovements quedó igual a
+      // lo que ya había): se guarda el cargo en el libro de crédito en su
+      // lugar. Al contado/transferencia es al revés — no hay ledger que tocar.
+      if (isCredito) await saveJSON("supplier-ledger", newSupplierLedger);
+      else await saveJSON("movements-log", newMovements);
+      // La foto ya no es obligatoria para confirmar: se puede agregar acá si
+      // ya se tiene a mano, o después desde el historial de recepciones.
+      if (invoiceFiles.length > 0) {
+        await saveJSON(`invoice-image:${invoiceId}`, { pages: invoiceFiles.map(f => ({ mediaType: f.mediaType, dataUrl: f.dataUrl, name: f.name })) });
+      }
+    } catch (e) {
+      // No llegó a la base: se deshace lo que ya se veía en pantalla (volver
+      // a lo último que sí está confirmado, no a "products" del inicio de la
+      // función, que puede ser una copia más vieja todavía) y se deja el
+      // formulario intacto —nada de limpiar draftItems— para reintentar con
+      // un solo clic apenas vuelva la señal, sin tener que escribir todo de
+      // nuevo.
+      setProducts(latestProducts); setMovements(latestMovements);
+      setInvoicesIndex(latestInvoicesIndex); setPurchaseItems(latestPurchaseItems);
+      setSupplierLedger(latestSupplierLedger);
+      toast(`${friendlyError(e, "No se pudo guardar la recepción")} No quedó registrada — nada cambió. Los datos siguen aquí abajo, sin perderse: inténtalo de nuevo.`, "error");
+      return;
     }
 
     const codigosNuevosAsignados = codigosAsignados.size > 0;
@@ -9673,41 +9698,57 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       ...latestPurchaseItems.filter(pi => !idsOriginales.has(pi.id)),
     ];
 
+    // Mismo motivo que en confirmReception: sin este try/catch, un corte de
+    // señal a mitad de la corrección la dejaba mostrando el ajuste en
+    // pantalla sin haber llegado a la base, sin ningún aviso.
     setProducts(newProducts);
     setInvoicesIndex(newInvoicesIndex);
     setPurchaseItems(newPurchaseItems);
+    try {
+      // Mismo orden que al confirmar una recepción nueva: primero el
+      // documento, después el catálogo y las líneas, y al final el pago/cargo.
+      await saveJSON("invoices-index", newInvoicesIndex);
+      await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
+      await saveJSON("purchase-items-log", newPurchaseItems);
 
-    // Mismo orden que al confirmar una recepción nueva: primero el
-    // documento, después el catálogo y las líneas, y al final el pago/cargo.
-    await saveJSON("invoices-index", newInvoicesIndex);
-    await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
-    await saveJSON("purchase-items-log", newPurchaseItems);
-
-    // --- Pago o cargo asociado: se corrige el monto (y, si no es a crédito,
-    //     la forma de pago) para que quede igual al total recalculado —
-    //     nunca se crea uno nuevo al lado del que ya había.
-    if (isCredito) {
-      if (editContext.ledgerEntryId) {
-        const newSupplierLedger = latestSupplierLedger.map(l =>
-          l.id === editContext.ledgerEntryId ? { ...l, amount: totalGross, date } : l);
-        setSupplierLedger(newSupplierLedger);
-        await saveJSON("supplier-ledger", newSupplierLedger);
+      // --- Pago o cargo asociado: se corrige el monto (y, si no es a crédito,
+      //     la forma de pago) para que quede igual al total recalculado —
+      //     nunca se crea uno nuevo al lado del que ya había.
+      if (isCredito) {
+        if (editContext.ledgerEntryId) {
+          const newSupplierLedger = latestSupplierLedger.map(l =>
+            l.id === editContext.ledgerEntryId ? { ...l, amount: totalGross, date } : l);
+          setSupplierLedger(newSupplierLedger);
+          await saveJSON("supplier-ledger", newSupplierLedger);
+        }
+      } else if (editContext.movementId) {
+        const anteriorMov = latestMovements.find(m => m.id === editContext.movementId);
+        if (anteriorMov) {
+          const actualizado = {
+            ...anteriorMov,
+            concept: `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
+            amount: totalGross,
+            paymentMethod: esCombinado ? "Pago combinado" : paymentMethod,
+          };
+          if (esCombinado) actualizado.paymentBreakdown = filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) }));
+          else delete actualizado.paymentBreakdown;
+          const newMovements = latestMovements.map(m => m.id === editContext.movementId ? actualizado : m);
+          setMovements(newMovements);
+          await saveJSON("movements-log", newMovements);
+        }
       }
-    } else if (editContext.movementId) {
-      const anteriorMov = latestMovements.find(m => m.id === editContext.movementId);
-      if (anteriorMov) {
-        const actualizado = {
-          ...anteriorMov,
-          concept: `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
-          amount: totalGross,
-          paymentMethod: esCombinado ? "Pago combinado" : paymentMethod,
-        };
-        if (esCombinado) actualizado.paymentBreakdown = filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) }));
-        else delete actualizado.paymentBreakdown;
-        const newMovements = latestMovements.map(m => m.id === editContext.movementId ? actualizado : m);
-        setMovements(newMovements);
-        await saveJSON("movements-log", newMovements);
-      }
+    } catch (e) {
+      // No llegó a la base: se vuelve a lo último confirmado (latestProducts
+      // y compañía, no "products" del inicio de la función) y se deja la
+      // edición abierta —nada de cancelEditReception()— para reintentar sin
+      // perder lo ya corregido.
+      setProducts(latestProducts);
+      setInvoicesIndex(latestInvoicesIndex);
+      setPurchaseItems(latestPurchaseItems);
+      setSupplierLedger(latestSupplierLedger);
+      setMovements(latestMovements);
+      toast(`${friendlyError(e, "No se pudo guardar la corrección")} No quedó registrada — nada cambió. Los datos siguen aquí abajo, sin perderse: inténtalo de nuevo.`, "error");
+      return;
     }
 
     const codigosNuevosAsignados = codigosAsignados.size > 0;
@@ -20218,7 +20259,12 @@ export default function SistemaVentas() {
 
   const toast = useCallback((msg, type = "success") => {
     setToastState({ msg, type });
-    setTimeout(() => setToastState(null), 2400);
+    // Los errores largos se quedan más tiempo en pantalla — alcanzar a leerlos
+    // importa más que ser breve, sobre todo en el celular, donde a veces se
+    // vuelve a mirar la pantalla recién un rato después de tocar el botón.
+    // Los éxitos (siempre cortos) se quedan en lo de siempre.
+    const duracion = type === "error" ? Math.min(7000, Math.max(2400, msg.length * 55)) : 2400;
+    setTimeout(() => setToastState(null), duracion);
   }, []);
 
   // Salir cierra la sesión en Supabase y borra las copias en memoria, para que
