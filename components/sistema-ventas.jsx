@@ -82,7 +82,7 @@ import {
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
   MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent, Layers,
-  Bluetooth,
+  Bluetooth, NotebookPen,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -18894,6 +18894,237 @@ function DiagnosticoBalanza({ espiado, onProbarOtro, espiando }) {
   );
 }
 
+/* =====================================================================
+   Bitácora de administradores (pedido de Fran, sept. 2026): "media
+   planilla, medio block de notas" para llevar un registro interno de
+   gastos —diarios, semanales, mensuales, anuales— a su propia manera. No
+   hay columnas fijas de "monto" o "categoría": ella misma nombra las
+   columnas y agrega o saca filas, como en un Excel en blanco. Vive en su
+   propia tabla (bitacora_admin, migración 0038) y no toca producto, venta
+   ni ningún otro dato del sistema — nada de lo que se anote acá puede
+   alterar Finanzas, Inventario o Análisis. Tampoco es visible para nadie
+   que no sea administrador, ni siquiera a nivel de base de datos.
+   ===================================================================== */
+
+const PERIODOS_BITACORA = [
+  { id: "diario", label: "Diario", columnasIniciales: ["Fecha", "Descripción", "Monto"] },
+  { id: "semanal", label: "Semanal", columnasIniciales: ["Semana", "Descripción", "Monto"] },
+  { id: "mensual", label: "Mensual", columnasIniciales: ["Mes", "Descripción", "Monto"] },
+  { id: "anual", label: "Anual", columnasIniciales: ["Año", "Descripción", "Monto"] },
+];
+
+function hojaVacia(periodoId) {
+  const def = PERIODOS_BITACORA.find(p => p.id === periodoId);
+  return { columns: [...(def?.columnasIniciales || ["Columna 1"])], rows: [], notes: "" };
+}
+
+function BitacoraAdminView({ toast, session }) {
+  const [datos, setDatos] = useState(null);
+  const [periodo, setPeriodo] = useState("diario");
+  const [loading, setLoading] = useState(true);
+  const [sucios, setSucios] = useState(() => new Set());
+  const [guardando, setGuardando] = useState(() => new Set());
+  const datosRef = useRef(null);
+  const timerRef = useRef(null);
+  const periodoRef = useRef("diario");
+
+  useEffect(() => { datosRef.current = datos; }, [datos]);
+  useEffect(() => { periodoRef.current = periodo; }, [periodo]);
+
+  useEffect(() => {
+    let cancelado = false;
+    (async () => {
+      try {
+        const d = await loadJSON("admin-notes", null);
+        if (cancelado) return;
+        const base = {};
+        PERIODOS_BITACORA.forEach(p => { base[p.id] = (d && d[p.id]) || hojaVacia(p.id); });
+        setDatos(base);
+      } catch (e) {
+        toast(friendlyError(e, "No se pudo cargar tu registro"), "error");
+        setDatos(Object.fromEntries(PERIODOS_BITACORA.map(p => [p.id, hojaVacia(p.id)])));
+      } finally {
+        if (!cancelado) setLoading(false);
+      }
+    })();
+    return () => { cancelado = true; };
+  }, [toast]);
+
+  async function guardarPeriodo(p) {
+    if (!datosRef.current) return;
+    setGuardando(prev => new Set(prev).add(p));
+    try {
+      await saveJSON("admin-notes", datosRef.current, { periodo: p });
+      setSucios(prev => { const n = new Set(prev); n.delete(p); return n; });
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo guardar tu registro"), "error");
+    } finally {
+      setGuardando(prev => { const n = new Set(prev); n.delete(p); return n; });
+    }
+  }
+
+  // Cada cambio programa un guardado a los 1.2s de quietud —como un Excel
+  // que se guarda solo— para no mandar una escritura a la base por cada
+  // letra que se escribe. Si se cambia de período (o se cierra la pantalla)
+  // antes de que se cumpla el plazo, se guarda al tiro en vez de esperar.
+  function tocar(p, actualizar) {
+    setDatos(prev => {
+      const next = { ...prev, [p]: actualizar(prev[p]) };
+      datosRef.current = next;
+      return next;
+    });
+    setSucios(prev => new Set(prev).add(p));
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => { timerRef.current = null; guardarPeriodo(p); }, 1200);
+  }
+
+  function flushPendiente() {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    if (sucios.has(periodoRef.current)) guardarPeriodo(periodoRef.current);
+  }
+
+  function cambiarPeriodo(nuevo) {
+    if (nuevo === periodo) return;
+    flushPendiente();
+    setPeriodo(nuevo);
+  }
+
+  useEffect(() => () => flushPendiente(), []); // guarda lo pendiente al salir de la pantalla
+
+  if (loading || !datos) {
+    return <EmptyState icon={Loader2} title="Cargando tu registro…" hint="Un momento." />;
+  }
+
+  const hoja = datos[periodo];
+  const estaSucio = sucios.has(periodo);
+  const estaGuardando = guardando.has(periodo);
+
+  function actualizarCelda(filaIdx, colIdx, valor) {
+    tocar(periodo, h => {
+      const rows = h.rows.map((r, i) => i !== filaIdx ? r : r.map((c, j) => j !== colIdx ? c : valor));
+      return { ...h, rows };
+    });
+  }
+  function agregarFila() {
+    tocar(periodo, h => ({ ...h, rows: [...h.rows, new Array(h.columns.length).fill("")] }));
+  }
+  function eliminarFila(filaIdx) {
+    tocar(periodo, h => ({ ...h, rows: h.rows.filter((_, i) => i !== filaIdx) }));
+  }
+  function renombrarColumna(colIdx, nombre) {
+    tocar(periodo, h => ({ ...h, columns: h.columns.map((c, i) => i !== colIdx ? c : nombre) }));
+  }
+  function agregarColumna() {
+    tocar(periodo, h => ({
+      ...h,
+      columns: [...h.columns, `Columna ${h.columns.length + 1}`],
+      rows: h.rows.map(r => [...r, ""]),
+    }));
+  }
+  function eliminarColumna(colIdx) {
+    if (hoja.columns.length <= 1) return;
+    tocar(periodo, h => ({
+      ...h,
+      columns: h.columns.filter((_, i) => i !== colIdx),
+      rows: h.rows.map(r => r.filter((_, i) => i !== colIdx)),
+    }));
+  }
+  function actualizarNotas(texto) {
+    tocar(periodo, h => ({ ...h, notes: texto }));
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-lg font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Mi registro</h2>
+          <p className="text-xs" style={{ color: C.gray }}>
+            Un espacio propio de los administradores — lo que se anote acá no toca ni el inventario, ni las finanzas, ni el análisis del negocio. Escribe las columnas y filas como quieras: es solo para llevar tu propio orden.
+          </p>
+        </div>
+        <span className="text-xs font-medium" style={{ color: estaGuardando ? "#8a6a1f" : estaSucio ? C.rust : C.greenDark }}>
+          {estaGuardando ? "Guardando…" : estaSucio ? "Cambios sin guardar…" : "Guardado"}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {PERIODOS_BITACORA.map(p => (
+          <button key={p.id} onClick={() => cambiarPeriodo(p.id)}
+            className="px-3 py-1.5 rounded-lg text-sm font-medium"
+            style={periodo === p.id ? { background: C.ink, color: "#fff" } : { background: "#fff", color: C.gray, border: `1px solid ${C.paperLine}` }}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: C.paperDark }}>
+                {hoja.columns.map((col, colIdx) => (
+                  <th key={colIdx} className="p-1.5 text-left" style={{ borderBottom: `1px solid ${C.paperLine}`, minWidth: 130 }}>
+                    <div className="flex items-center gap-1">
+                      <input value={col} onChange={e => renombrarColumna(colIdx, e.target.value)}
+                        className="flex-1 min-w-0 bg-transparent font-semibold text-xs px-1 py-0.5 rounded"
+                        style={{ color: C.ink }} />
+                      {hoja.columns.length > 1 && (
+                        <button onClick={() => eliminarColumna(colIdx)} style={{ color: C.grayLight }} title="Quitar columna">
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </th>
+                ))}
+                <th className="p-1.5" style={{ borderBottom: `1px solid ${C.paperLine}`, width: 36 }}>
+                  <button onClick={agregarColumna} title="Agregar columna" style={{ color: C.gray }}>
+                    <Plus size={14} />
+                  </button>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {hoja.rows.map((fila, filaIdx) => (
+                <tr key={filaIdx} style={{ borderBottom: `1px solid ${C.paperLine}` }}>
+                  {fila.map((celda, colIdx) => (
+                    <td key={colIdx} className="p-1">
+                      <input value={celda} onChange={e => actualizarCelda(filaIdx, colIdx, e.target.value)}
+                        className="w-full bg-transparent text-sm px-1.5 py-1 rounded"
+                        style={{ color: C.ink }} />
+                    </td>
+                  ))}
+                  <td className="p-1 text-center">
+                    <button onClick={() => eliminarFila(filaIdx)} style={{ color: C.grayLight }} title="Quitar fila">
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {hoja.rows.length === 0 && (
+          <div className="px-4 py-3 text-xs" style={{ color: C.grayLight }}>Sin filas todavía.</div>
+        )}
+        <button onClick={agregarFila} className="w-full py-2 text-xs font-medium text-left px-4" style={{ color: C.gray, borderTop: `1px solid ${C.paperLine}` }}>
+          + Agregar fila
+        </button>
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <h3 className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Notas</h3>
+        <textarea value={hoja.notes} onChange={e => actualizarNotas(e.target.value)} rows={6}
+          placeholder="Anota lo que quieras acá — solo los administradores lo van a leer."
+          className="w-full rounded-lg p-2.5 text-sm" style={inputStyle()} />
+      </div>
+
+      <Btn variant="ghost" size="sm" onClick={() => guardarPeriodo(periodo)} disabled={estaGuardando}>
+        Guardar ahora
+      </Btn>
+    </div>
+  );
+}
+
 function SettingsView({ settings, setSettings, toast, products, sales, allData, onRestore }) {
   const [businessName, setBusinessName] = useState(settings.businessName);
   const [currentPin, setCurrentPin] = useState("");
@@ -19930,6 +20161,7 @@ const GRUPOS = {
       { id: "finanzas", label: "Finanzas", icon: Wallet },
       { id: "analisis", label: "Análisis", icon: BarChart3 },
       { id: "usuarios", label: "Usuarios", icon: User },
+      { id: "bitacora", label: "Mi Registro", icon: NotebookPen },
       { id: "ajustes", label: "Ajustes", icon: SettingsIcon },
     ]},
   ],
@@ -20720,6 +20952,7 @@ export default function SistemaVentas() {
         {rolEfectivo === "admin" && <TabPane active={tab === "analisis"} visited={visitedTabs.has("analisis")}><AnalyticsView sales={sales} products={products} setProducts={setProducts} suppliers={suppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "ajustes"} visited={visitedTabs.has("ajustes")}><SettingsView settings={settings} setSettings={setSettings} toast={toast} products={products} sales={sales} allData={allData} onRestore={restoreAll} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "usuarios"} visited={visitedTabs.has("usuarios")}><UsersView users={users} setUsers={setUsers} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} session={session} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "bitacora"} visited={visitedTabs.has("bitacora")}><BitacoraAdminView toast={toast} session={session} /></TabPane>}
         <TabPane active={tab === "transformar"} visited={visitedTabs.has("transformar")}><TransformView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} settings={settings} setSettings={setSettings} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "conteos"} visited={visitedTabs.has("conteos")}><InventoryCountsView counts={inventoryCounts} setCounts={setInventoryCounts} products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} users={users} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         </main>
