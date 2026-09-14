@@ -6636,10 +6636,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
     // Liquidación activa de este producto (migración 0031), si tiene: un
     // precio rebajado puntual que el administrador dejó corriendo desde
-    // "Ofertas" para darle salida a stock parado. Tiene prioridad sobre el
-    // precio anterior (ver oldPriceInfo más abajo): si el administrador ya
-    // decidió el precio nuevo a mano, no corresponde aplicarle encima la
-    // regla de "se respeta el precio viejo hasta agotar ese stock".
+    // "Ofertas" para darle salida a stock parado.
     const clearance = liquidacionDeProducto(product.id, clearances);
     setCart(prev => {
       const existing = prev.find(i => i.productId === product.id);
@@ -6664,22 +6661,18 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
       }
       if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
-      // Si a este producto le queda stock de antes de su última baja de precio,
-      // TODA la línea se cobra al precio viejo (nunca se mezclan dos precios
-      // distintos del mismo producto en una boleta, para no confundir al
-      // cliente) — ver unitsStillAtOldPrice más abajo en el archivo. Si la
-      // cantidad que se termine llevando supera lo que en rigor correspondía
-      // al precio viejo, ese excedente queda registrado en checkout() como
-      // ganancia extra, no como error ni como pérdida.
-      const oldPriceInfo = clearance ? null : unitsStillAtOldPrice(product, purchaseItems, settings.breadCategory, inventoryCounts, settings);
+      // Siempre se cobra el precio vigente del producto (o el de liquidación,
+      // si tiene). Antes, si quedaba stock de antes de la última baja de
+      // precio, la línea completa se cobraba al precio viejo hasta agotar
+      // ese stock — la "regla del precio anterior" (retirada en septiembre
+      // 2026, a pedido de Fran: generaba demasiados problemas en la caja).
+      // El aviso de que ese stock deja algo menos de margen ahora se muestra
+      // al recibirlo, no al venderlo (ver DraftRow en ReceivingView).
       return [{
         productId: product.id, barcode: product.barcode, name: product.name,
-        price: clearance ? clearance.price : (oldPriceInfo ? oldPriceInfo.oldPrice : product.price),
+        price: clearance ? clearance.price : product.price,
         cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
         category: product.category,
-        isOldPriceLine: !!oldPriceInfo,
-        maxOldPriceQty: oldPriceInfo?.qty ?? 0,
-        newPrice: oldPriceInfo?.newPrice ?? product.price,
         isLiquidacion: !!clearance,
       }, ...prev];
     });
@@ -6963,15 +6956,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           ...(recargo ? { cardSurcharge: recargo } : {}),
           ...(discount ? { discount } : {}),
         };
-        if (!i.isOldPriceLine) return [base];
-        // Se cobró TODO al precio anterior para no mezclar dos precios en la
-        // misma boleta. Si la cantidad superó lo que en rigor quedaba a ese
-        // precio, el excedente no es un error ni una pérdida: es ganancia
-        // extra sobre lo esperado, y queda registrada así para quien revise
-        // Análisis después — ver buildOldPriceSalesLog más abajo.
-        const extraQty = Math.max(0, i.qty - (i.maxOldPriceQty || 0));
-        const extraProfit = extraQty * (i.price - i.newPrice);
-        return [{ ...base, oldPriceApplied: true, oldPrice: i.price, newPrice: i.newPrice, extraQty, extraProfit }];
+        return [base];
       }),
       total,
       // Solo para mostrar el renglón "Redondeo" en la boleta (ver
@@ -7433,10 +7418,6 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                           className="w-24 text-sm font-mono font-bold rounded-md px-1.5 py-1 outline-none"
                           style={{ color: C.brassText, background: C.brassSoft, border: `1.5px solid ${C.brass}` }}
                         />
-                      </div>
-                    ) : i.isOldPriceLine ? (
-                      <div className="text-xs font-mono mt-0.5" style={{ color: "#8a6a1f" }}>
-                        {formatCLP(i.price)} c/u (precio anterior, se mantiene hasta agotar ese stock)
                       </div>
                     ) : (
                       <div className="mt-0.5">
@@ -8722,9 +8703,8 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
   const precioNuevo = Number(item.finalPrice ?? suggested) || 0;
   // Solo importa cuando el precio que se aplica de una es el de venta —a
   // quien no es admin esto le queda como propuesta pendiente de aprobación,
-  // así que no tiene sentido pedirle acá una confirmación sobre un precio
-  // que todavía no rige.
-  const riesgoPrecioAnterior = role === "admin" && bajaDePrecioConStockViejo(currentProduct, precioNuevo, settings);
+  // así que no tiene sentido avisarle acá de algo que todavía no rige.
+  const quedaStockMasCaro = role === "admin" && quedanUnidadesAlPrecioAnterior(currentProduct, precioNuevo);
   // Por omisión se recibe en kilos cuando el producto lo permite: es como
   // viene la boleta. El botón queda al lado por si un día llegan sueltas.
   const [enKilo, setEnKilo] = useState(porKilo > 0);
@@ -8885,7 +8865,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
         <span className="text-[10px]" style={{ color: C.gray }}>{role === "admin" ? "precio de venta" : "precio propuesto"}</span>
         <input
           type="number" value={item.finalPrice ?? suggested}
-          onChange={e => onChange({ ...item, finalPrice: e.target.value, omitirProteccionAnterior: false })}
+          onChange={e => onChange({ ...item, finalPrice: e.target.value })}
           className={`${inputCls} font-mono w-24 text-center`} style={{ ...inputStyle(), borderColor: C.brass }} />
         {/* La cuenta a la vista. Sin esto el selector es un interruptor que
             nadie sabe si dejó bien puesto: acá se lee que a $1.190 con IVA se
@@ -8897,23 +8877,18 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
         )}
       </div>
       <button onClick={onRemove} style={{ color: C.rust }}><Trash2 size={15} /></button>
-      {/* La regla del precio anterior existe para no perder margen sin darse
-          cuenta — pero quien está recibiendo la boleta en la mano a veces
-          sabe mejor: el proveedor bajó el precio de verdad y quiere que se
-          venda ya todo al precio nuevo, aunque eso deje sin margen el stock
-          que quedaba del anterior. Acá se lo puede confirmar a propósito
-          (migración 0037); sin confirmar, la caja va a seguir cobrando el
-          precio de antes hasta que se agote ese stock. */}
-      {riesgoPrecioAnterior && (
+      {/* Simple aviso de consentimiento (pedido de Fran, sept. 2026): ya no
+          existe una regla que proteja el margen cobrando el precio viejo —
+          el precio que se anota acá rige de inmediato para todo el stock.
+          Esto solo informa que las unidades que quedan, compradas más caras,
+          van a venderse con algo menos de margen (o bajo costo, si la baja
+          es grande). No bloquea nada ni requiere marcar ninguna casilla. */}
+      {quedaStockMasCaro && (
         <div className="w-full rounded-lg p-2.5" style={{ background: C.rustSoft }}>
-          <p className="text-xs font-semibold mb-1.5" style={{ color: C.rust }}>
+          <p className="text-xs font-medium" style={{ color: C.rust }}>
             <AlertTriangle size={12} className="inline mr-1 -mt-0.5" />
-            Quedan {currentProduct.stock} unidades de "{currentProduct.name}" al precio anterior ({formatCLP(currentProduct.price)}). Si no confirmas, la caja va a seguir cobrando ese precio hasta agotarlas — no {formatCLP(precioNuevo)}.
+            Quedan {currentProduct.stock} unidades de "{currentProduct.name}" compradas al costo anterior. Al bajar el precio de venta a {formatCLP(precioNuevo)} (antes {formatCLP(currentProduct.price)}), esas unidades se van a vender con algo de pérdida de margen.
           </p>
-          <label className="flex items-center gap-2 text-xs font-medium" style={{ color: C.rust }}>
-            <input type="checkbox" checked={!!item.omitirProteccionAnterior} onChange={e => onChange({ ...item, omitirProteccionAnterior: e.target.checked })} />
-            Sé que hay stock al precio anterior y aun así quiero venderlo todo a {formatCLP(precioNuevo)} de inmediato
-          </label>
         </div>
       )}
     </div>
@@ -9131,16 +9106,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     return { qty: acc.qty + qty, net: acc.net + qty * cost };
   }, { qty: 0, net: 0 });
 
-  // Igual que el aviso de cada fila (ver DraftRow), pero para bloquear el
-  // botón de confirmar mientras quede alguna baja de precio sin que quien
-  // recibe la haya aceptado a propósito.
-  const itemsConRiesgoSinConfirmar = role !== "admin" ? [] : draftItems.filter(it => {
-    if (it.isNew || it.omitirProteccionAnterior) return false;
-    const prod = products.find(p => p.id === it.productId);
-    const precioNuevo = Number(it.finalPrice ?? suggestPrice(Number(it.netCost) || 0)) || 0;
-    return bajaDePrecioConStockViejo(prod, precioNuevo, settings);
-  });
-
   // Carga una recepción ya guardada al formulario para corregirla. Se pide
   // admin porque las políticas de la base solo dejan editar factura_compra y
   // compra_detalle a un administrador — pedirlo también acá evita que alguien
@@ -9223,9 +9188,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
-    }
-    if (itemsConRiesgoSinConfirmar.length > 0) {
-      return toast("Confirma la baja de precio marcada en rojo antes de continuar (o vuelve a subir el precio)", "error");
     }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Sin un proveedor registrado no hay a quién cargarle la deuda: el libro
@@ -9365,11 +9327,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           if (role === "admin") {
             updated.price = Number(item.finalPrice ?? suggested);
             updated.priceApproval = null;
-            // Confirmado a propósito en esta misma recepción (ver DraftRow):
-            // la baja de precio no debe dejar protegido el stock que quedaba
-            // del precio anterior. Campo transitorio, no se guarda tal cual —
-            // productos.escribir() lo lee y llama a marcar_precio_sin_proteccion.
-            if (item.omitirProteccionAnterior) updated.__omitirProteccionAnterior = true;
           } else {
             // Producto que ya se vendía: el precio en vitrina no cambia hasta
             // que un administrador apruebe. Lo que se guarda es la propuesta.
@@ -9517,9 +9474,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       if (!it.name.trim()) return toast("Todos los productos necesitan un nombre", "error");
       if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
     }
-    if (itemsConRiesgoSinConfirmar.length > 0) {
-      return toast("Confirma la baja de precio marcada en rojo antes de continuar (o vuelve a subir el precio)", "error");
-    }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Pasar de pagada a crédito (o al revés) mueve la plata de un libro a
     // otro —de Egresos al libro de crédito del proveedor, o viceversa— y eso
@@ -9639,7 +9593,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     for (const it of draftItems) {
       if (it.isNew || !it.productId) continue;
       newQtyByProduct.set(it.productId, (newQtyByProduct.get(it.productId) || 0) + (Number(it.qty) || 0));
-      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice, omitirProteccionAnterior: it.omitirProteccionAnterior });
+      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice });
     }
     const productosTocados = new Set([...oldQtyByProduct.keys(), ...newQtyByProduct.keys()]);
     for (const productId of productosTocados) {
@@ -9657,7 +9611,6 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           if (role === "admin") {
             updated.price = Number(datos.finalPrice ?? suggested);
             updated.priceApproval = null;
-            if (datos.omitirProteccionAnterior) updated.__omitirProteccionAnterior = true;
           } else {
             updated.priceApproval = { suggestedPrice: Number(datos.finalPrice ?? suggested), netCost: datos.netCost, requestedBy: session.name, date };
           }
@@ -10028,14 +9981,8 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           Hay códigos repetidos en la lista — corrígelos antes de confirmar.
         </div>
       )}
-      {itemsConRiesgoSinConfirmar.length > 0 && (
-        <div className="rounded-lg p-3 mb-3 flex items-center gap-2 text-xs font-medium" style={{ background: "#fdece9", color: C.rust }}>
-          <AlertTriangle size={14} className="flex-shrink-0" />
-          Confirma la baja de precio marcada en rojo {itemsConRiesgoSinConfirmar.length === 1 ? "arriba" : "en cada producto"} antes de continuar.
-        </div>
-      )}
       {draftItems.length > 0 && (
-        <Btn full variant="primary" icon={Truck} onClick={editingInvoiceId ? confirmEditReception : confirmReception} disabled={conflictosCodigo.size > 0 || itemsConRiesgoSinConfirmar.length > 0}>
+        <Btn full variant="primary" icon={Truck} onClick={editingInvoiceId ? confirmEditReception : confirmReception} disabled={conflictosCodigo.size > 0}>
           {editingInvoiceId ? `Guardar cambios (${draftItems.length} producto(s))` : `Confirmar recepción de ${draftItems.length} producto(s)`}
         </Btn>
       )}
@@ -11001,25 +10948,12 @@ function findLastPriceDrop(priceHistory) {
   for (let i = priceHistory.length - 1; i > 0; i--) {
     const prev = priceHistory[i - 1], cur = priceHistory[i];
     if (Number(cur.price) < Number(prev.price)) {
-      // Quien recibió mercadería o corrigió el precio confirmó en pantalla
-      // que aceptaba a propósito vender el stock del precio anterior al
-      // precio nuevo (ver ReceivingView, migración 0037): esta baja puntual
-      // no protege nada. Se sigue buscando más atrás por si hay una baja
-      // anterior a esta que nadie haya confirmado.
-      if (cur.omitido) continue;
       return { date: cur.date, oldPrice: Number(prev.price), newPrice: Number(cur.price), oldCost: Number(prev.cost) || 0 };
     }
   }
   return null;
 }
 
-/* Misma cuenta que usa el panel de Análisis de abajo, pero acá no es solo un
-   aviso: es la que decide cuánto cobrar en la caja. Si a un producto por
-   unidad todavía le quedan unidades de antes de su última baja de precio,
-   se cobran esas primero al precio viejo y recién las que sobren al precio
-   nuevo — así la próxima compra no se aprovecha de una rebaja que en
-   realidad era para el lote que llegó después. No se aplica a productos por
-   peso: ahí no tiene sentido repartir un mismo pesaje entre dos precios. */
 /* Marcha blanca.
 
    Mientras el sistema se pone en marcha, cualquiera del equipo puede corregir
@@ -11112,15 +11046,15 @@ function recargoPorTarjeta(item, formaDePago, settings) {
    exacta sin tener que reconstruir qué unidad exacta entró en qué tramo.
 
    Solo aplica a productos por unidad (no tiene sentido con productos que
-   se venden por peso), y nunca a una línea de producto temporal ni a una
-   que quedó al precio anterior: esas ya tienen su propia regla de precio y
-   no se mezclan con esta. Se recalcula en vivo con el carrito y la forma
-   de pago, igual que el recargo de tarjeta: la forma de pago se elige al
-   final, y si el cliente cambia de opinión el carrito tiene que cambiar
-   con él — y lo mismo si el administrador edita la carpeta a mitad de una
-   venta ya abierta, porque no queda copiada en la línea. */
+   se venden por peso), y nunca a una línea de producto temporal: esa no
+   tiene ficha de producto detrás con la que calzar una carpeta. Se
+   recalcula en vivo con el carrito y la forma de pago, igual que el
+   recargo de tarjeta: la forma de pago se elige al final, y si el cliente
+   cambia de opinión el carrito tiene que cambiar con él — y lo mismo si el
+   administrador edita la carpeta a mitad de una venta ya abierta, porque no
+   queda copiada en la línea. */
 function elegibleParaOferta(item) {
-  return !(item?.unitType === "peso" || item?.isTemporal || item?.isOldPriceLine || item?.isLiquidacion || item?.isGrupo);
+  return !(item?.unitType === "peso" || item?.isTemporal || item?.isLiquidacion || item?.isGrupo);
 }
 
 /* Liquidación activa de un producto (migración 0031), si tiene. */
@@ -11448,81 +11382,19 @@ function esPerecible(product, breadCategory) {
   return PALABRAS_PERECIBLES.some(palabra => seccion.includes(palabra));
 }
 
-/* La regla del precio anterior, en pausa.
-
-   Durante la puesta en marcha los precios y el stock se corrigen a mano todos
-   los días, y la regla no tiene cómo distinguir una corrección de una baja de
-   precio real: cada vez que alguien arregla un precio, la caja sigue cobrando
-   el viejo. Pasó con el pan, con las verduras y con las zanahorias. En vez de
-   ir agregando excepciones de a una —cada una descubierta cobrándole de más a
-   un cliente— se apaga entera mientras dure, y vuelve sola en la fecha. */
-function pausaDelPrecioAnterior(settings) {
-  const hasta = settings?.pausaPrecioAnteriorHasta;
-  if (!hasta) return false;
-  return new Date(`${String(hasta).slice(0, 10)}T23:59:59`) >= new Date();
-}
-
-/* Aviso al recibir mercadería (migración 0037): si se anota un precio de
-   venta más bajo que el actual y todavía queda stock del que se compró al
-   precio de antes, la regla del precio anterior de más abajo va a seguir
-   cobrando el precio viejo hasta que ese stock se agote — quien recibe
-   puede no saberlo, y terminar cobrando de más sin querer o, al revés,
-   preguntándose por qué "no baja" en la caja.
-
-   Esta función solo decide cuándo conviene avisar y pedir una confirmación
-   a propósito; la reproducción exacta de cuándo la regla protege de verdad
-   vive en unitsStillAtOldPrice. Por eso es a propósito más simple: mejor
-   avisar una vez de más (por ejemplo, en pan, donde la regla ni aplica) que
-   dejar pasar una baja real sin que nadie la haya confirmado. */
-function bajaDePrecioConStockViejo(product, newPrice, settings) {
+/* Aviso al recibir mercadería (pedido de Fran, sept. 2026): antes había una
+   regla que, al bajar el precio de venta, seguía cobrando el precio viejo
+   por el stock comprado caro hasta agotarlo — se eliminó porque generaba
+   más problemas de los que resolvía (confundía correcciones de precio con
+   bajas reales, migración 0037 y todo). Lo que queda es solo un aviso, sin
+   nada que bloquee ni que se guarde: si el producto tiene stock y el precio
+   nuevo queda por debajo del que rige hoy, se informa que esas unidades
+   van a venderse con algo menos de margen. */
+function quedanUnidadesAlPrecioAnterior(product, newPrice) {
   if (!product) return false;
   if (product.unitType === "peso") return false;
   if (!(product.stock > 0)) return false;
-  if (!(newPrice > 0) || !(newPrice < Number(product.price))) return false;
-  if (pausaDelPrecioAnterior(settings)) return false;
-  return true;
-}
-
-function unitsStillAtOldPrice(product, purchaseItems, breadCategory, inventoryCounts, settings) {
-  if (pausaDelPrecioAnterior(settings)) return null;
-  if (product.unitType === "peso") return null;
-  // Excepción del pan. La regla del precio anterior existe para el stock que
-  // se compró caro y sigue en la repisa: mientras quede de ese, se cobra al
-  // precio de antes. Con el pan eso no aplica — se hornea y se repone todos
-  // los días, así que el pan de hoy nunca es el que quedó de antes del cambio
-  // de precio. Sin esta excepción, bajar el pan de 220 a 200 no servía de
-  // nada: la caja seguía cobrando 220.
-  if (esPerecible(product, breadCategory)) return null;
-  if (!(product.stock > 0)) return null;
-  const drop = findLastPriceDrop(product.priceHistory);
-  if (!drop) return null;
-
-  // Sin costo registrado en el precio anterior no hay nada que proteger: esa
-  // regla existe para no vender bajo el costo de lo que se compró caro, y si
-  // el precio viejo venía de la importación —costo 0, nunca se supo cuánto
-  // costó— lo único que hace es cobrarle de más al cliente.
-  if (!(Number(drop.oldCost) > 0)) return null;
-
-  const dropTime = new Date(drop.date).getTime();
-
-  // Si el producto se contó después de la baja, el stock que hay es el que
-  // alguien contó en la repisa, no el que quedaba de antes. Es lo que pasó
-  // con el inventario general: el corte a cero borró el stock y todo volvió a
-  // entrar contado, así que cualquier baja de precio posterior habría cobrado
-  // el precio viejo sobre existencias que no vienen de ninguna compra cara.
-  const contadoDespues = (inventoryCounts || []).some(c => {
-    const cuando = new Date(c.completedAt || c.createdAt || c.dueDate || 0).getTime();
-    if (!(cuando > dropTime)) return false;
-    return (c.items || []).some(it => it.productId === product.id);
-  });
-  if (contadoDespues) return null;
-
-  const receivedSince = purchaseItems
-    .filter(pi => pi.productId === product.id && new Date(pi.date).getTime() > dropTime)
-    .reduce((a, pi) => a + (Number(pi.qty) || 0), 0);
-  const qty = Math.max(0, Math.min(product.stock, product.stock - receivedSince));
-  if (qty <= 0) return null;
-  return { qty, oldPrice: drop.oldPrice, newPrice: drop.newPrice };
+  return newPrice > 0 && newPrice < Number(product.price);
 }
 
 function buildPriceDropRisks(products, purchaseItems, breadCategory) {
@@ -11563,40 +11435,13 @@ function buildPriceDropRisks(products, purchaseItems, breadCategory) {
   return rows.sort((a, b) => (b.realLoss - a.realLoss) || (b.opportunityCost - a.opportunityCost));
 }
 
-/* En la caja, cuando a un producto le queda poco stock al precio anterior y
-   el cliente pide más de lo que corresponde a ese precio, se cobra TODO al
-   precio anterior (más alto) en vez de mezclar dos precios en la misma
-   boleta —eso confundiría al cliente—. Esto hace que esas ventas dejen más
-   margen del esperado, no menos: es una excepción y conviene que quede a la
-   vista de un administrador, en vez de perderse entre el resto de las
-   ventas. Ver checkout() en POSView, donde se calcula extraQty/extraProfit. */
-function buildOldPriceSalesLog(sales) {
-  const rows = [];
-  sales.forEach(s => {
-    (s.items || []).forEach(it => {
-      if (!it.oldPriceApplied) return;
-      rows.push({
-        saleId: s.id, invoiceNumber: s.invoiceNumber, date: s.date, name: it.name,
-        qty: it.qty, oldPrice: it.oldPrice, newPrice: it.newPrice,
-        extraQty: it.extraQty || 0, extraProfit: it.extraProfit || 0,
-      });
-    });
-  });
-  return rows.sort((a, b) => new Date(b.date) - new Date(a.date));
-}
-
-function PriceDropAlertPanel({ products, purchaseItems, sales, breadCategory }) {
+function PriceDropAlertPanel({ products, purchaseItems, breadCategory }) {
   const rows = useMemo(() => buildPriceDropRisks(products, purchaseItems, breadCategory), [products, purchaseItems, breadCategory]);
   const [showAll, setShowAll] = useState(false);
   const shown = showAll ? rows : rows.slice(0, 12);
   const hasRealLoss = rows.some(r => r.belowOldCost);
   const totalOpportunity = rows.reduce((a, r) => a + r.opportunityCost, 0);
   const totalRealLoss = rows.reduce((a, r) => a + r.realLoss, 0);
-
-  const oldPriceSales = useMemo(() => buildOldPriceSalesLog(sales), [sales]);
-  const [showAllSales, setShowAllSales] = useState(false);
-  const shownSales = showAllSales ? oldPriceSales : oldPriceSales.slice(0, 8);
-  const totalExtraProfit = oldPriceSales.reduce((a, r) => a + r.extraProfit, 0);
 
   return (
     <div className="rounded-xl overflow-hidden mt-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -11638,32 +11483,6 @@ function PriceDropAlertPanel({ products, purchaseItems, sales, breadCategory }) 
         <p className="text-xs mt-3" style={{ color: C.grayLight }}>
           Es una estimación, no una medición exacta: el sistema no distingue lote por lote qué unidad física es cuál. Se calcula comparando el stock actual contra lo recibido (compras y reposiciones) desde la última baja de precio registrada en cada producto.
         </p>
-
-        {oldPriceSales.length > 0 && (
-          <div className="mt-4 pt-4" style={{ borderTop: `1px dashed ${C.paperLine}` }}>
-            <div className="text-sm font-semibold mb-1" style={{ color: C.ink }}>Ventas donde se mantuvo el precio anterior ({oldPriceSales.length})</div>
-            <p className="text-xs mb-2" style={{ color: C.gray }}>
-              Para no cobrarle al cliente dos precios distintos del mismo producto en la misma boleta, cuando la cantidad pedida superó lo que quedaba al precio anterior, se cobró todo a ese precio más alto. Esto no genera pérdida — al contrario, esas unidades de más dejaron una ganancia extra sobre lo esperado. Es un caso excepcional, no algo que deba pasar seguido.
-            </p>
-            {totalExtraProfit > 0 && (
-              <p className="text-sm font-semibold mb-2" style={{ color: C.greenDark }}>Ganancia extra acumulada por este motivo: {formatCLP(totalExtraProfit)}</p>
-            )}
-            <div className="divide-y" style={{ borderColor: C.paperLine }}>
-              {shownSales.map((r, idx) => (
-                <div key={`${r.saleId}-${idx}`} className="py-2 flex items-center justify-between gap-2 text-xs">
-                  <div className="min-w-0">
-                    <div className="truncate" style={{ color: C.ink }}>Boleta #{r.invoiceNumber} · {formatDate(r.date)} — {r.qty}× {r.name}</div>
-                    <div style={{ color: C.gray }}>Cobrado a {formatCLP(r.oldPrice)} c/u (precio anterior; el vigente es {formatCLP(r.newPrice)}){r.extraQty > 0 ? ` · ${r.extraQty} de esas unidades ya correspondían al precio nuevo` : ""}</div>
-                  </div>
-                  {r.extraProfit > 0 && <Badge tone="green">+{formatCLP(r.extraProfit)}</Badge>}
-                </div>
-              ))}
-            </div>
-            {oldPriceSales.length > shownSales.length && (
-              <button onClick={() => setShowAllSales(true)} className="text-xs font-medium mt-2 underline" style={{ color: C.gray }}>Ver las {oldPriceSales.length - shownSales.length} restantes</button>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -12093,7 +11912,7 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
       {/* Cada panel va envuelto por separado a propósito: si uno se cae, los
           otros dos siguen en pie. */}
       <SiFalla nombre="el aviso de stock con precio antiguo">
-        <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} sales={sales} breadCategory={settings.breadCategory} />
+        <PriceDropAlertPanel products={products} purchaseItems={purchaseItems} breadCategory={settings.breadCategory} />
       </SiFalla>
 
       <SiFalla nombre="el predictor de inversión">
@@ -19113,17 +18932,6 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
     }
   }
 
-  async function setPausaPrecio(fecha) {
-    const ns = { ...settings, pausaPrecioAnteriorHasta: fecha || null };
-    setSettings(ns);
-    try {
-      await saveJSON("business-settings", ns);
-      toast(fecha ? `La regla queda apagada hasta el ${formatDateOnly(fecha)}` : "La regla del precio anterior vuelve a aplicarse", "success");
-    } catch (e) {
-      toast(friendlyError(e, "No se pudo guardar"), "error");
-    }
-  }
-
   function sumarDias(dias) {
     const d = new Date();
     d.setDate(d.getDate() + dias);
@@ -19367,26 +19175,6 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
         <div className="flex flex-wrap gap-2">
           <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca(sumarDias(7))}>Una semana más</Btn>
           <Btn size="sm" variant="ghost" onClick={() => setMarchaBlanca("")}>Cerrar ahora</Btn>
-        </div>
-      </div>
-
-      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-        <h3 className="text-base font-semibold mb-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Regla del precio anterior</h3>
-        <p className="text-sm mb-3" style={{ color: C.gray }}>
-          En régimen normal, cuando baja el precio de un producto la caja sigue cobrando el precio viejo
-          por el stock que se compró caro. Mientras se están corrigiendo precios a mano eso falla seguido
-          —se arregla un precio y la caja no lo toma— así que conviene tenerla apagada.
-          {pausaDelPrecioAnterior(settings)
-            ? ` Ahora está apagada hasta el ${formatDateOnly(String(settings.pausaPrecioAnteriorHasta).slice(0, 10))}: se cobra siempre el precio actual.`
-            : " Ahora está aplicándose."}
-        </p>
-        <Field label="Apagada hasta el día (inclusive)">
-          <input type="date" value={String(settings.pausaPrecioAnteriorHasta || "").slice(0, 10)}
-            onChange={e => setPausaPrecio(e.target.value)} className={inputCls} style={inputStyle()} />
-        </Field>
-        <div className="flex flex-wrap gap-2">
-          <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio(sumarDias(7))}>Una semana más</Btn>
-          <Btn size="sm" variant="ghost" onClick={() => setPausaPrecio("")}>Volver a aplicarla</Btn>
         </div>
       </div>
 
