@@ -16414,7 +16414,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
             </button>
             <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{selectedSection} ({sectionItems.length})</span>
           </div>
-          <ProductTable items={sectionItems} resetKey={selectedSection} {...tableHandlers} />
+          <ProductTable items={sectionItems} resetKey={selectedSection} {...tableHandlers} showCategory categoryOptions={categoryOptions} onAssignCategory={assignCategory} />
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
