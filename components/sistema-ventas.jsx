@@ -211,6 +211,28 @@ function normalize(s) {
   return (s || "").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+// Descarga la imagen promocional de una oferta al celular/computador de
+// quien administra, lista para adjuntar al grupo de WhatsApp de los
+// clientes (pedido de Fran, sept. 2026: que sea f\u00e1cil de bajar para
+// compartir). Sirve tanto para la vista previa (una dataURL local, reci\u00e9n
+// generada) como para una oferta ya guardada (una URL del almacenamiento,
+// de otro origen) \u2014 se trae siempre como blob antes de forzar la descarga,
+// que es lo \u00fanico que funciona parejo para los dos casos: un <a download>
+// apuntado directo a una URL de otro origen, el navegador la abre en vez
+// de bajarla.
+async function descargarImagenOferta(url, nombreOferta) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("No se pudo descargar la imagen");
+  const blob = await resp.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const slug = normalize(nombreOferta).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "oferta";
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = `oferta-${slug}.jpg`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(blobUrl);
+}
+
 // Nombres de producto y de sección/categoría siempre se guardan en
 // MAYÚSCULAS — así "Bebidas", "bebidas" y "BEBIDAS" nunca quedan como tres
 // secciones distintas por error de tipeo. Se aplica en todo lugar donde se
@@ -14592,6 +14614,17 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
                       )}
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
+                      {/* Bajar directo la imagen ya armada, sin tener que
+                          entrar a editar la oferta — pedido de Fran, sept.
+                          2026: que sea fácil de descargar para compartir
+                          por el grupo de WhatsApp de los clientes. */}
+                      {o.imageUrl && (
+                        <button
+                          title="Descargar imagen para WhatsApp"
+                          onClick={() => descargarImagenOferta(o.imageUrl, o.name).catch(e => toast(friendlyError(e, "No se pudo descargar la imagen"), "error"))}
+                          className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.green }}
+                        ><Download size={15} /></button>
+                      )}
                       <button onClick={() => setEditing(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.gray }}><Pencil size={15} /></button>
                       <button onClick={() => setDeleting(o)} className="p-2 rounded-lg hover:bg-black/5" style={{ color: C.rust }}><Trash2 size={15} /></button>
                     </div>
@@ -14789,7 +14822,6 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
           oferta: { name: form.name, tiers: tiersValidos, productNames: nombresProductos },
           fotos: fotosActivas,
           settings,
-          colores: C,
         });
         if (!cancelado) setPreviewUrl(dataUrl);
       } catch (e) {
@@ -15021,8 +15053,17 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
             {previewUrl ? (
               <div>
                 <img src={previewUrl} alt="Vista previa de la imagen promocional" className="mx-auto rounded-md block" style={{ maxHeight: 320, opacity: generando ? 0.6 : 1 }} />
-                <div className="flex items-center justify-center gap-3 mt-2">
+                <div className="flex items-center justify-center gap-3 mt-2 flex-wrap">
                   {generando && <span className="text-xs" style={{ color: C.gray }}>Actualizando…</span>}
+                  <button
+                    type="button"
+                    disabled={generando}
+                    onClick={() => descargarImagenOferta(previewUrl, form.name).catch(e => toast?.(friendlyError(e, "No se pudo descargar la imagen"), "error"))}
+                    className="text-xs font-medium underline flex items-center gap-1 disabled:opacity-40"
+                    style={{ color: C.green }}
+                  >
+                    <Download size={13} /> Descargar para WhatsApp
+                  </button>
                   <button type="button" onClick={quitarImagenCompleta} className="text-xs underline" style={{ color: C.rust }}>Quitar imagen promocional</button>
                 </div>
               </div>
