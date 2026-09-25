@@ -15547,7 +15547,55 @@ function CorregirNombreModal({ product, onClose, onSave }) {
   );
 }
 
-function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename, puedeAjustar, resetKey }) {
+/* Cambiar de sección sin abrir el modal completo — pensado para la búsqueda
+   general de Inventario (pedido de Fran, sept. 2026): ahí un producto puede
+   aparecer sin que se vea de qué sección es, y corregirlo significaba abrir
+   "Editar producto" solo para eso. Elegir una sección de la lista aplica al
+   tiro (reutiliza assignCategory, ya probado); solo si se escribe una nueva
+   aparece el campo de texto y hay que confirmarla con el botón. */
+function CategoryQuickPicker({ product, categoryOptions, onAssign }) {
+  const [addingNew, setAddingNew] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const current = product.category?.trim() || "";
+
+  if (addingNew) {
+    return (
+      <div className="flex items-center gap-1">
+        <input
+          autoFocus value={customName} onChange={e => setCustomName(e.target.value)}
+          placeholder="Nueva sección" className={`${inputCls} w-auto text-xs`}
+          style={{ ...inputStyle(), textTransform: "uppercase" }}
+        />
+        <button title="Confirmar" disabled={!customName.trim()}
+          onClick={() => { onAssign(product, customName.trim()); setAddingNew(false); setCustomName(""); }}
+          style={{ color: customName.trim() ? C.green : C.grayLight }}>
+          <Check size={14} />
+        </button>
+        <button title="Cancelar" onClick={() => { setAddingNew(false); setCustomName(""); }} style={{ color: C.gray }}>
+          <X size={14} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <select
+      value={current && categoryOptions.includes(current) ? current : (current ? "__keep__" : "")}
+      onChange={e => {
+        if (e.target.value === "__new__") setAddingNew(true);
+        else if (e.target.value !== "__keep__") onAssign(product, e.target.value);
+      }}
+      className={`${inputCls} w-auto text-xs`} style={inputStyle()}
+    >
+      {!current && <option value="">Sin clasificar</option>}
+      {current && !categoryOptions.includes(current) && <option value="__keep__">{current}</option>}
+      {categoryOptions.map(c => <option key={c} value={c}>{c}</option>)}
+      <option value="__new__">+ Nueva sección…</option>
+    </select>
+  );
+}
+
+function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onDelete, onRename, puedeAjustar, resetKey, showCategory, categoryOptions, onAssignCategory }) {
   const [page, setPage] = useState(0);
   const pageSize = 40;
   // Se vuelve a la primera página solo cuando cambia DE QUÉ LISTA se trata
@@ -15576,6 +15624,7 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
           <thead>
             <tr className="text-left" style={{ color: C.gray, borderBottom: `1.5px solid ${C.paperLine}` }}>
               <th className="px-4 py-2.5 font-medium">Producto</th>
+              {showCategory && <th className="px-4 py-2.5 font-medium">Sección</th>}
               <th className="px-4 py-2.5 font-medium">Código</th>
               <th className="px-4 py-2.5 font-medium text-right">Precio</th>
               {role === "admin" && <th className="px-4 py-2.5 font-medium text-right">Costo</th>}
@@ -15590,11 +15639,26 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
               <tr key={p.id} style={{ borderBottom: `1px solid ${C.paperLine}` }}>
                 <td className="px-4 py-2.5">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-medium" style={{ color: C.ink }}>{p.name}</span>
+                    {/* El nombre también abre el editor — un clic menos que
+                        buscar el lápiz entre los demás botones (pedido de
+                        Fran, sept. 2026: editar más rápido desde la
+                        búsqueda). Mismo permiso que el lápiz de abajo. */}
+                    <button
+                      className="font-medium text-left hover:underline"
+                      style={{ color: C.ink }}
+                      onClick={() => puedeAjustar ? onEdit(p) : onRename(p)}
+                    >
+                      {p.name}
+                    </button>
                     {p.quickAccess && <span title="Acceso rápido en Vender"><Tags size={12} style={{ color: C.green }} /></span>}
                   </div>
                   {role === "admin" && supplierName && <div className="text-[11px] flex items-center gap-1 mt-0.5" style={{ color: C.grayLight }}><Building2 size={10} />{supplierName}</div>}
                 </td>
+                {showCategory && (
+                  <td className="px-4 py-2.5">
+                    <CategoryQuickPicker product={p} categoryOptions={categoryOptions || []} onAssign={onAssignCategory} />
+                  </td>
+                )}
                 <td className="px-4 py-2.5 font-mono text-xs" style={{ color: C.gray }}>{p.barcode}</td>
                 <td className="px-4 py-2.5 text-right font-mono">
                   <div className="flex items-center justify-end gap-1.5">
@@ -16091,7 +16155,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
             <span>{searchResults.length} resultado(s) para "{query}"</span>
             <button onClick={() => setQuery("")} className="underline">Limpiar búsqueda</button>
           </div>
-          <ProductTable items={searchResults} resetKey={query} {...tableHandlers} />
+          <ProductTable items={searchResults} resetKey={query} {...tableHandlers} showCategory categoryOptions={categoryOptions} onAssignCategory={assignCategory} />
         </div>
       ) : selectedSection === "__unclassified__" ? (
         <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
