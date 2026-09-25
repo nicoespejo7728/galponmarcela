@@ -14489,6 +14489,54 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
     }
   }
 
+  /* ---- Rearmar al nuevo diseño las imágenes promocionales que ya existían
+     (pedido de Fran, sept. 2026) ----
+     Solo se guarda el cartel ya armado, nunca las fotos sueltas que se le
+     adjuntaron (ver comentario en guardarImagenOferta, lib/datos/imagenes.js)
+     — así que rearmar una oferta vieja solo puede hacerse con su nombre y
+     sus tramos, sin las fotos que tenía: quedan con el emblema de "%" en vez
+     de las fotos, hasta que alguien vuelva a entrar a "Editar oferta" y las
+     adjunte de nuevo. Por eso esto pide confirmación antes de tocar nada. */
+  const ofertasConImagen = useMemo(() => offers.filter(o => o.imageUrl), [offers]);
+  const [confirmarActualizarImagenes, setConfirmarActualizarImagenes] = useState(false);
+  const [actualizandoImagenes, setActualizandoImagenes] = useState(false);
+
+  async function actualizarImagenesAlNuevoDiseno() {
+    setConfirmarActualizarImagenes(false);
+    setActualizandoImagenes(true);
+    let ok = 0, fallidas = 0;
+    try {
+      const latest = await loadJSON("quantity-offers", offers);
+      for (const o of latest) {
+        if (!o.imageUrl) continue;
+        try {
+          const nombresProductos = (o.productIds || [])
+            .map(id => nombreDeProducto(id))
+            .filter(n => n && n !== "producto eliminado");
+          const dataUrl = await generarImagenOferta({
+            oferta: { name: o.name, tiers: o.tiers || [], productNames: nombresProductos },
+            fotos: [],
+            settings,
+          });
+          const url = await guardarImagenOferta(o.id, dataUrl, "image/jpeg");
+          setOffers(prev => prev.map(x => x.id === o.id ? { ...x, imageUrl: url } : x));
+          ok++;
+        } catch (e) {
+          console.error("[ofertas] no se pudo actualizar la imagen", o.id, e);
+          fallidas++;
+        }
+      }
+    } finally {
+      setActualizandoImagenes(false);
+    }
+    toast(
+      fallidas === 0
+        ? `${ok} imagen${ok === 1 ? "" : "es"} actualizada${ok === 1 ? "" : "s"} al nuevo diseño`
+        : `${ok} actualizada(s), ${fallidas} no se pudo(pudieron) actualizar — revisa la conexión e inténtalo de nuevo`,
+      fallidas === 0 ? "success" : "error"
+    );
+  }
+
   /* ---- Liquidaciones ---- */
   const sortedLiq = useMemo(
     () => [...clearances].sort((a, b) => normalize(nombreDeProducto(a.productId)).localeCompare(normalize(nombreDeProducto(b.productId)), "es")),
@@ -14581,6 +14629,16 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.gray }} />
               <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar oferta o producto…" className={`${inputCls} pl-9`} style={inputStyle()} />
             </div>
+            {ofertasConImagen.length > 0 && (
+              <Btn
+                variant="ghost"
+                icon={actualizandoImagenes ? Loader2 : RefreshCw}
+                disabled={actualizandoImagenes}
+                onClick={() => setConfirmarActualizarImagenes(true)}
+              >
+                Actualizar imágenes al nuevo diseño ({ofertasConImagen.length})
+              </Btn>
+            )}
             <Btn icon={Plus} onClick={() => setEditing({})}>Nueva oferta</Btn>
           </div>
 
@@ -14721,6 +14779,20 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
             ¿Desactivar <strong>{deleting.name}</strong>? Deja de aplicarse en el mesón; los productos quedan libres para entrar a otra carpeta.
           </p>
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteOferta(deleting.id)}>Desactivar</Btn></div>
+        </Modal>
+      )}
+      {confirmarActualizarImagenes && (
+        <Modal title="Actualizar imágenes al nuevo diseño" onClose={() => setConfirmarActualizarImagenes(false)}>
+          <p className="text-sm mb-3" style={{ color: C.ink }}>
+            Se rearma la imagen promocional de las <strong>{ofertasConImagen.length}</strong> oferta(s) que ya tienen una, con el cartel nuevo (rojo/amarillo/azul).
+          </p>
+          <p className="text-sm mb-4 rounded-lg p-2.5" style={{ color: C.rust, background: C.rustSoft }}>
+            Ojo: las fotos que le hayas puesto a cada oferta no quedaron guardadas aparte — solo el cartel ya armado. Las que actualices acá van a quedar sin fotos (con un emblema en su lugar) hasta que entres a "Editar oferta" y las adjuntes de nuevo.
+          </p>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={() => setConfirmarActualizarImagenes(false)}>Cancelar</Btn>
+            <Btn full onClick={actualizarImagenesAlNuevoDiseno}>Actualizar igual</Btn>
+          </div>
         </Modal>
       )}
 
