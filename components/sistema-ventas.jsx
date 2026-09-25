@@ -14895,33 +14895,66 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
       </div>
 
       <div className="mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-semibold" style={{ color: C.ink }}>Tramos de cantidad</span>
-          <button type="button" onClick={agregarTramo} className="text-xs font-medium underline" style={{ color: C.green }}>+ Agregar tramo</button>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-sm font-semibold" style={{ color: C.ink }}>¿Cuántas por cuánto?</span>
+          <button type="button" onClick={agregarTramo} className="text-xs font-medium underline flex-shrink-0" style={{ color: C.green }}>+ Agregar tramo</button>
         </div>
+        <p className="text-xs mb-2" style={{ color: C.gray }}>
+          Por cada tramo: la cantidad que el cliente tiene que llevar, y el precio TOTAL que paga por esa cantidad (no el precio de una unidad).
+        </p>
         {form.tiers.length === 0 && (
-          <p className="text-xs mb-1" style={{ color: C.gray }}>Sin tramos todavía. Ej: 3 unidades por $1.000.</p>
+          <p className="text-xs mb-1 italic" style={{ color: C.gray }}>Sin tramos todavía. Ej: lleva 3, paga $1.000 en total.</p>
         )}
-        {form.tiers.map((t, idx) => (
-          <div key={idx} className="rounded-lg p-2.5 mb-2" style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}>
-            <div className="flex items-center gap-2 mb-2">
-              <input
-                type="number" min="2" value={t.quantity}
-                onChange={e => cambiarTramo(idx, { quantity: e.target.value })}
-                className={`${inputCls} font-mono w-20`} style={inputStyle()} placeholder="3"
-                aria-label="Cantidad del tramo"
-              />
-              <span className="text-xs whitespace-nowrap" style={{ color: C.gray }}>unidades por</span>
-              <input
-                type="number" min="1" value={t.price}
-                onChange={e => cambiarTramo(idx, { price: e.target.value })}
-                className={`${inputCls} font-mono flex-1`} style={inputStyle()} placeholder="1000"
-                aria-label="Precio del tramo"
-              />
-              <button type="button" onClick={() => quitarTramo(idx)} aria-label="Quitar tramo" className="flex-shrink-0" style={{ color: C.rust }}>
-                <Trash2 size={16} />
+        {form.tiers.map((t, idx) => {
+          const cantidadValida = Number(t.quantity) >= 2;
+          const precioValido = Number(t.price) > 0;
+          return (
+          <div key={idx} className="rounded-lg p-3 mb-2" style={{ background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: C.gray }}>Tramo {idx + 1}</span>
+              <button type="button" onClick={() => quitarTramo(idx)} className="flex items-center gap-1 text-xs" style={{ color: C.rust }}>
+                <Trash2 size={14} /> Quitar
               </button>
             </div>
+            <div className="flex items-start gap-2 mb-2.5">
+              <div className="w-24 flex-shrink-0">
+                <span className="block text-[11px] font-medium mb-1" style={{ color: C.ink }}>Lleva</span>
+                <input
+                  type="number" min="2" value={t.quantity}
+                  onChange={e => cambiarTramo(idx, { quantity: e.target.value })}
+                  className={`${inputCls} font-mono text-center`} style={inputStyle()} placeholder="3"
+                  aria-label="Cantidad de unidades del tramo"
+                />
+                <span className="block text-[10px] mt-0.5 text-center" style={{ color: C.gray }}>unidades</span>
+              </div>
+              <div className="flex-1">
+                <span className="block text-[11px] font-medium mb-1" style={{ color: C.ink }}>Paga en total</span>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-base" style={{ color: C.gray }}>$</span>
+                  <input
+                    type="number" min="1" value={t.price}
+                    onChange={e => cambiarTramo(idx, { price: e.target.value })}
+                    className={`${inputCls} font-mono pl-7`} style={inputStyle()} placeholder="1000"
+                    aria-label="Precio total del tramo"
+                  />
+                </div>
+                <span className="block text-[10px] mt-0.5" style={{ color: C.gray }}>por las {t.quantity || "…"} unidades juntas, no cada una</span>
+              </div>
+            </div>
+            {/* Traducción en una frase de lo que se acaba de tipear — para que
+                quede clarísimo, sin tener que hacer la cuenta en la cabeza,
+                que "3" y "1000" arriba significan "3 unidades por $1.000"
+                (pedido de Fran, sept. 2026: que se entienda de una mirada). */}
+            {cantidadValida && precioValido ? (
+              <p className="text-xs font-semibold rounded-md px-2.5 py-1.5 mb-2.5" style={{ color: C.greenDark, background: C.greenSoft }}>
+                Se verá: "{t.quantity} unidades por {formatCLP(Number(t.price))}" · {formatCLP(Number(t.price) / Number(t.quantity))} c/u
+              </p>
+            ) : (
+              <p className="text-xs px-2.5 py-1.5 mb-2.5" style={{ color: C.rust }}>
+                {!cantidadValida && !precioValido ? "Falta la cantidad y el precio." : !cantidadValida ? "Falta la cantidad (mínimo 2)." : "Falta el precio total."}
+              </p>
+            )}
+            <span className="block text-[11px] font-medium mb-1" style={{ color: C.ink }}>Válido pagando con</span>
             <div className="flex flex-wrap gap-x-3 gap-y-1">
               {PAYMENT_METHODS.map(m => (
                 <label key={m} className="flex items-center gap-1 text-xs" style={{ color: C.ink }}>
@@ -14939,10 +14972,11 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
               ))}
             </div>
           </div>
-        ))}
+          );
+        })}
         {form.tiers.length > 0 && (
           <p className="text-[11px]" style={{ color: C.gray }}>
-            Una carpeta puede tener varios tramos a la vez (ej. 3x$1.000 y 6x$1.800): en el carrito se aplica sola la combinación que le sale más barata al cliente.
+            Una carpeta puede tener varios tramos a la vez (ej. 3 por $1.000 y 6 por $1.800): en el carrito se aplica sola la combinación que le sale más barata al cliente.
           </p>
         )}
       </div>
