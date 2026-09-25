@@ -8696,7 +8696,130 @@ function enKilos(unidades, porKilo) {
   return kg === 0 ? "" : String(Number(kg.toFixed(3)));
 }
 
-function DraftRow({ item, onChange, onRemove, role, products, categories = [], conflictoCodigo, settings }) {
+/* =====================================================================
+   Sugerencia de sección al recibir mercadería (pedido de Fran, sept. 2026).
+
+   Antes, un producto nuevo que llegaba en una recepción se quedaba "sin
+   clasificar" salvo que alguien eligiera la sección a mano — y como nadie
+   volvía después a corregirlas, se iban acumulando ahí. Ahora el sistema
+   mira el catálogo que YA está clasificado —el trabajo que el equipo ya
+   hizo— para adivinar la sección de un producto nuevo por las palabras que
+   comparte con uno parecido: "ARROZ VERDE CAMPO 1KG" comparte "ARROZ" con
+   "ARROZ TUCAPEL 1KG", que está en Abarrotes, así que sugiere Abarrotes.
+
+   No hay una tabla de aprendizaje aparte ni nada que entrenar a mano: el
+   modelo se recalcula sobre el catálogo actual cada vez que cambia. Apenas
+   alguien clasifica (o corrige) un producto, esa elección queda guardada en
+   el propio catálogo y pasa a contar para la próxima sugerencia — así es
+   como "aprende" caso a caso, cada vez con más ejemplos de dónde va cada
+   palabra. Una corrección no se guarda aparte: simplemente el producto
+   corregido pasa a ser, él mismo, el próximo ejemplo. */
+
+// Palabras que no dicen nada de la sección — tamaños, formatos, unidades —
+// y que si no se filtraran "aprenderían" a repartirse parejo entre todas las
+// secciones, ensuciando la sugerencia en vez de ayudarla.
+const PALABRAS_IGNORADAS_CATEGORIA = new Set([
+  "KG", "KGS", "GR", "GRS", "GRAMOS", "GRAMO", "LT", "LTS", "LITRO", "LITROS",
+  "ML", "CC", "UN", "UND", "UNIDAD", "UNIDADES", "PACK", "CAJA", "BOLSA",
+  "SOBRE", "BOTELLA", "FRASCO", "LATA", "GRANDE", "CHICO", "CHICA",
+  "MEDIANO", "MEDIANA", "FAMILIAR", "PROMO", "OFERTA", "NUEVO", "NUEVA",
+  "CON", "SIN", "PARA", "DEL", "LOS", "LAS",
+]);
+
+function palabrasClaveCategoria(nombre) {
+  return (nombre || "")
+    .toUpperCase()
+    .split(/[^A-ZÁÉÍÓÚÑ0-9]+/)
+    .filter(w => w.length >= 3)
+    .filter(w => !/^\d+([.,]\d+)?$/.test(w))
+    // "1KG", "500G", "2LT", "750ML"…: número pegado a una unidad.
+    .filter(w => !/^\d+([.,]\d+)?(KGS?|GRS?|G|LTS?|L|ML|CC|UNDS?|UN)$/.test(w))
+    .filter(w => !PALABRAS_IGNORADAS_CATEGORIA.has(w));
+}
+
+function construirModeloCategorias(products) {
+  const modelo = new Map(); // palabra -> Map(categoría -> { count, ejemplo })
+  (products || []).forEach(p => {
+    const cat = p.category?.trim();
+    if (!cat || cat === "Sin Clasificar") return;
+    // Set: una palabra repetida dos veces en el mismo nombre no debe pesar
+    // el doble que una que aparece en dos productos distintos.
+    const palabras = new Set(palabrasClaveCategoria(p.name));
+    palabras.forEach(w => {
+      if (!modelo.has(w)) modelo.set(w, new Map());
+      const porCategoria = modelo.get(w);
+      const actual = porCategoria.get(cat);
+      porCategoria.set(cat, { count: (actual?.count || 0) + 1, ejemplo: actual?.ejemplo || p.name });
+    });
+  });
+  return modelo;
+}
+
+// Puntaje de una palabra para una categoría = qué tan "propia" de esa
+// categoría es, entre todas las categorías donde aparece (0 a 1). Así una
+// palabra como "FAMILIAR" —si no estuviera ya en la lista de ignoradas—
+// que aparece repartida parejo entre diez secciones no empuja casi nada a
+// ninguna, mientras que "ARROZ", que siempre cae en Abarrotes, empuja fuerte.
+// requerirUmbral=false se usa solo como último recurso al momento de
+// guardar (ver "categoriaFinal" en confirmReception/confirmEditReception):
+// si de verdad no hay ninguna coincidencia ni siquiera débil, sigue
+// devolviendo null y el producto queda "Sin Clasificar" como antes — esto
+// no inventa una sección de la nada, solo baja la exigencia para no
+// desperdiciar una pista floja cuando la alternativa es dejarlo sin nada.
+function sugerirCategoria(nombre, modelo, { requerirUmbral = true } = {}) {
+  if (!modelo || modelo.size === 0) return null;
+  const palabras = palabrasClaveCategoria(nombre);
+  if (palabras.length === 0) return null;
+  const puntajePorCategoria = new Map();
+  const detallePorCategoria = new Map();
+  palabras.forEach(w => {
+    const porCategoria = modelo.get(w);
+    if (!porCategoria) return;
+    const total = [...porCategoria.values()].reduce((a, x) => a + x.count, 0);
+    porCategoria.forEach((info, cat) => {
+      const aporte = info.count / total;
+      puntajePorCategoria.set(cat, (puntajePorCategoria.get(cat) || 0) + aporte);
+      if (!detallePorCategoria.has(cat)) detallePorCategoria.set(cat, []);
+      detallePorCategoria.get(cat).push({ palabra: w, ejemplo: info.ejemplo });
+    });
+  });
+  if (puntajePorCategoria.size === 0) return null;
+  const [mejorCategoria, mejorPuntaje] = [...puntajePorCategoria.entries()].sort((a, b) => b[1] - a[1])[0];
+  // Umbral mínimo: sin esto, una sola palabra débil (repartida entre varias
+  // secciones) alcanzaría para sugerir algo poco confiable. Mejor no
+  // sugerir nada que sugerir mal — salvo que se pida explícitamente saltarlo.
+  if (requerirUmbral && mejorPuntaje < 0.34) return null;
+  return { category: mejorCategoria, detalle: detallePorCategoria.get(mejorCategoria) };
+}
+
+// Última palabra sobre la sección de un producto al momento de guardar: si
+// quedó vacía, se intenta primero con la sugerencia normal (la misma que ya
+// se le mostró a quien recibía) y, si ni eso hubo, con cualquier coincidencia
+// aunque sea débil — para que "no cambié la sugerencia" y "no había ninguna
+// sugerencia segura" terminen igual en una sección y no en "Sin Clasificar"
+// (pedido de Fran, sept. 2026: evitar que un producto entre al inventario
+// sin sección). Devuelve "" si de plano no hay ninguna pista en el nombre.
+function categoriaGarantizada(nombre, modelo) {
+  return (
+    sugerirCategoria(nombre, modelo)?.category ||
+    sugerirCategoria(nombre, modelo, { requerirUmbral: false })?.category ||
+    ""
+  );
+}
+
+// Texto corto para mostrar por qué se sugirió — la transparencia es lo que
+// hace que se confíe en la sugerencia (o se note rápido cuándo no aplica).
+function explicarSugerencia(sugerencia) {
+  if (!sugerencia?.detalle?.length) return "";
+  const { palabra, ejemplo } = sugerencia.detalle[0];
+  return `por "${palabra}", como en "${ejemplo}"`;
+}
+
+function esSeccionVacia(cat) {
+  return !cat || !cat.trim() || cat.trim() === "Sin Clasificar";
+}
+
+function DraftRow({ item, onChange, onRemove, role, products, categories = [], conflictoCodigo, settings, categoriaModel, onAssignCategory }) {
   const suggested = suggestPrice(Number(item.netCost) || 0);
   const currentProduct = !item.isNew ? products.find(p => p.id === item.productId) : null;
   const porKilo = unidadesPorKilo(currentProduct);
@@ -8755,6 +8878,34 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
   // migración 0007 dejó abierto que cualquiera del equipo cree una sección al
   // recibir mercadería nueva, y eso no cambia.
   const [addingCategory, setAddingCategory] = useState(() => categories.length === 0);
+
+  // Sugerencia de sección para un producto nuevo, por las palabras de su
+  // nombre (ver construirModeloCategorias/sugerirCategoria más arriba).
+  const sugerencia = useMemo(
+    () => item.isNew ? sugerirCategoria(item.name, categoriaModel) : null,
+    [item.isNew, item.name, categoriaModel]
+  );
+  // Se aplica sola UNA vez por fila, y solo mientras la categoría siga en
+  // blanco — así no pisa una elección hecha a mano, y no vuelve a saltar
+  // sobre una categoría que ya se dejó vacía a propósito (por ejemplo, para
+  // crear una sección nueva).
+  const sugerenciaAplicadaRef = useRef(false);
+  useEffect(() => {
+    if (!item.isNew || item.category || sugerenciaAplicadaRef.current || !sugerencia) return;
+    sugerenciaAplicadaRef.current = true;
+    onChange({ ...item, category: sugerencia.category });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sugerencia, item.isNew, item.category]);
+
+  // Mismo mecanismo para un producto YA existente que llega a esta recepción
+  // sin sección (el otro camino por el que se acumulaban en "Sin
+  // Clasificar": no solo productos nuevos, también restock de uno viejo que
+  // nunca se terminó de clasificar).
+  const currentProductSinClasificar = !item.isNew && currentProduct && esSeccionVacia(currentProduct.category);
+  const sugerenciaExistente = useMemo(
+    () => currentProductSinClasificar ? sugerirCategoria(currentProduct.name, categoriaModel) : null,
+    [currentProductSinClasificar, currentProduct, categoriaModel]
+  );
   return (
     <div className="px-4 py-3 flex flex-wrap items-center gap-2.5" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
       <div className="flex-1 min-w-[180px]">
@@ -8801,6 +8952,15 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
                 <AlertTriangle size={11} /> {conflictoCodigo}
               </div>
             )}
+            {/* Se muestra mientras la categoría elegida sea justo la que se
+                sugirió (se haya aplicado sola o elegido a mano de la lista):
+                así queda claro por qué quedó ahí, y desaparece apenas se
+                cambia por otra. */}
+            {sugerencia && item.category === sugerencia.category && (
+              <div className="flex items-center gap-1 text-[10px]" style={{ color: C.green }}>
+                <Sparkles size={11} /> Sugerida: {sugerencia.category} ({explicarSugerencia(sugerencia)})
+              </div>
+            )}
             <div className="flex gap-1">
               <button type="button" onClick={() => onChange({ ...item, unitType: "unidad" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType !== "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Unidad</button>
               <button type="button" onClick={() => onChange({ ...item, unitType: "peso" })} className="flex-1 py-1 rounded-md text-[11px] font-medium" style={item.unitType === "peso" ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}>Peso (gramos)</button>
@@ -8811,6 +8971,22 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
             <div className="text-sm font-medium" style={{ color: C.ink }}>{item.name}</div>
             <div className="text-xs font-mono" style={{ color: C.gray }}>{item.barcode}</div>
             <div className="text-xs mt-0.5" style={{ color: C.green }}>Stock actual: <span className="font-mono font-semibold">{currentProduct ? currentProduct.stock : "—"}</span></div>
+            {/* Este producto ya existía pero nunca quedó clasificado — la
+                misma sugerencia por palabras clave de arriba, aplicada acá
+                para no dejar pasar la oportunidad de cerrarlo mientras se
+                está recibiendo de nuevo (pedido de Fran, sept. 2026). */}
+            {currentProductSinClasificar && onAssignCategory && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-medium" style={{ color: C.rust }}>Sin clasificar:</span>
+                <CategoryQuickPicker product={currentProduct} categoryOptions={sortedCategories.map(c => c.name)} onAssign={onAssignCategory} />
+                {sugerenciaExistente && (
+                  <button type="button" onClick={() => onAssignCategory(currentProduct, sugerenciaExistente.category)}
+                    className="text-[10px] underline flex items-center gap-1" style={{ color: C.green }}>
+                    <Sparkles size={11} /> Sugerida: {sugerenciaExistente.category} ({explicarSugerencia(sugerenciaExistente)}) — usar
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -8904,6 +9080,25 @@ const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado",
 
 function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente, settings }) {
   const [draftItems, setDraftItems] = useState([]);
+  // Modelo de sugerencia de sección (ver DraftRow/construirModeloCategorias):
+  // se recalcula solo cuando cambia el catálogo, no en cada tecla que se
+  // escribe — recorrer miles de productos por letra sería lento de más.
+  const categoriaModel = useMemo(() => construirModeloCategorias(products), [products]);
+  // Asignar sección a un producto YA existente que llega a esta recepción
+  // sin clasificar (ver DraftRow) — se guarda al tiro, igual que en
+  // Inventario, sin esperar a "Confirmar recepción": es una corrección al
+  // catálogo, no algo que dependa de si esta recepción se termina o no.
+  async function asignarCategoriaExistente(product, nuevaCategoria) {
+    try {
+      const latest = await loadJSON("products-catalog", products);
+      const np = latest.map(p => p.id === product.id ? { ...p, category: upperField(nuevaCategoria) } : p);
+      setProducts(np);
+      await saveJSON("products-catalog", np);
+      toast(`"${product.name}" asignado a "${upperField(nuevaCategoria)}"`, "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo asignar la sección"), "error");
+    }
+  }
   /* Cómo vienen los precios en ESTA factura. Casi siempre un proveedor es
      todo de una forma, así que se pone una vez arriba y baja a todas las
      líneas; la que haya que corregir se corrige en su propia línea. */
@@ -9295,11 +9490,18 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       const netCost = Number(item.netCost) || 0;
       const suggested = suggestPrice(netCost);
       if (item.isNew) {
+        // Si el usuario dejó la sección tal cual quedó sugerida (o vacía,
+        // porque no hubo una sugerencia lo bastante segura como para
+        // aplicarse sola) se recalcula acá, al momento de guardar — así el
+        // producto nunca entra al catálogo sin sección cuando el nombre da
+        // alguna pista, aunque el usuario no haya tocado nada (ver
+        // categoriaGarantizada más arriba; pedido de Fran, sept. 2026).
+        const categoriaFinal = (item.category || "").trim() || categoriaGarantizada(item.name, categoriaModel);
         newProducts.push({
           id: uid("prod"),
           barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           name: upperField(item.name),
-          category: upperField(item.category),
+          category: upperField(categoriaFinal),
           // Producto nuevo: entra con el precio que puso quien lo recibió, para
           // que se pueda vender de inmediato. Si no es administrador, ese
           // precio queda además marcado como pendiente de aprobación.
@@ -9324,6 +9526,16 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           if (p.id !== item.productId) return p;
           const updated = { ...p, stock: p.stock + qty, cost: netCost, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, p.stock + qty) };
           if (!updated.supplierId && supplierId) updated.supplierId = supplierId;
+          // Producto que ya existía pero seguía "Sin Clasificar": si nadie
+          // usó el picker de sección de esta misma fila (ver DraftRow /
+          // asignarCategoriaExistente más arriba) para asignarle una a mano,
+          // se le pone acá la mejor sugerencia posible antes de guardar —
+          // mismo criterio que un producto nuevo: no debe volver a quedar
+          // sin sección solo porque nadie tocó nada.
+          if (esSeccionVacia(updated.category)) {
+            const cat = categoriaGarantizada(item.name, categoriaModel);
+            if (cat) updated.category = upperField(cat);
+          }
           if (role === "admin") {
             updated.price = Number(item.finalPrice ?? suggested);
             updated.priceApproval = null;
@@ -9560,11 +9772,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       const qty = Number(item.qty) || 0;
       const netCost = Number(item.netCost) || 0;
       const suggested = suggestPrice(netCost);
+      // Misma garantía que en confirmReception: si quedó sin sección, se
+      // recalcula acá antes de guardar (ver categoriaGarantizada más arriba).
+      const categoriaFinal = (item.category || "").trim() || categoriaGarantizada(item.name, categoriaModel);
       newProducts.push({
         id: uid("prod"),
         barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         name: upperField(item.name),
-        category: upperField(item.category),
+        category: upperField(categoriaFinal),
         price: Number(item.finalPrice ?? suggested),
         cost: netCost,
         stock: qty,
@@ -9593,7 +9808,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     for (const it of draftItems) {
       if (it.isNew || !it.productId) continue;
       newQtyByProduct.set(it.productId, (newQtyByProduct.get(it.productId) || 0) + (Number(it.qty) || 0));
-      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice });
+      ultimoDatoPorProducto.set(it.productId, { netCost: Number(it.netCost) || 0, finalPrice: it.finalPrice, name: it.name });
     }
     const productosTocados = new Set([...oldQtyByProduct.keys(), ...newQtyByProduct.keys()]);
     for (const productId of productosTocados) {
@@ -9615,6 +9830,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             updated.priceApproval = { suggestedPrice: Number(datos.finalPrice ?? suggested), netCost: datos.netCost, requestedBy: session.name, date };
           }
           updated.priceHistory = pushPriceHistory(p.priceHistory, datos.netCost, updated.price);
+        }
+        // Misma garantía que en confirmReception: producto que seguía "Sin
+        // Clasificar" y nadie le asignó sección a mano durante esta edición.
+        if (esSeccionVacia(updated.category)) {
+          const cat = categoriaGarantizada(datos?.name || p.name, categoriaModel);
+          if (cat) updated.category = upperField(cat);
         }
         return updated;
       });
@@ -9969,7 +10190,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           </div>
           <div>
             {draftItems.map(item => (
-              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} conflictoCodigo={conflictosCodigo.get(item.tempId)} settings={settings} />
+              <DraftRow key={item.tempId} item={item} role={role} products={products} categories={categories} onChange={upd => updateDraft(item.tempId, upd)} onRemove={() => removeDraft(item.tempId)} conflictoCodigo={conflictosCodigo.get(item.tempId)} settings={settings} categoriaModel={categoriaModel} onAssignCategory={asignarCategoriaExistente} />
             ))}
           </div>
         </div>
@@ -15703,8 +15924,8 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
   );
 }
 
-function UnclassifiedRow({ product, categoryOptions, onAssign }) {
-  const [choice, setChoice] = useState("");
+function UnclassifiedRow({ product, categoryOptions, onAssign, sugerencia }) {
+  const [choice, setChoice] = useState(() => sugerencia?.category || "");
   const [customName, setCustomName] = useState("");
   const usingCustom = choice === "__new__";
 
@@ -15719,6 +15940,13 @@ function UnclassifiedRow({ product, categoryOptions, onAssign }) {
       <div className="flex-1 min-w-[160px]">
         <div className="font-medium text-sm" style={{ color: C.ink }}>{product.name}</div>
         <div className="text-xs font-mono" style={{ color: C.gray }}>{product.barcode} · {formatCLP(product.price)}{product.unitType === "peso" ? "/kg" : ""} · stock {product.stock}</div>
+        {/* Ya viene preseleccionada abajo si hay sugerencia — esto solo
+            explica por qué, para no pedir que se confíe a ciegas. */}
+        {sugerencia && choice === sugerencia.category && (
+          <div className="text-[10px] flex items-center gap-1 mt-0.5" style={{ color: C.green }}>
+            <Sparkles size={10} /> Sugerida: {sugerencia.category} ({explicarSugerencia(sugerencia)})
+          </div>
+        )}
       </div>
       <select value={choice} onChange={e => setChoice(e.target.value)} className={`${inputCls} w-auto text-sm`} style={inputStyle()}>
         <option value="">Elegir categoría…</option>
@@ -15942,6 +16170,9 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
   }, [products]);
 
   const categoryOptions = useMemo(() => sections.map(s => s.name), [sections]);
+  // Mismo modelo de sugerencia que en Recepción (ver DraftRow) — acá sirve
+  // para ayudar a vaciar el acumulado de "Sin clasificar" que ya existía.
+  const categoriaModel = useMemo(() => construirModeloCategorias(products), [products]);
 
   const searchResults = useMemo(() => {
     if (!query) return null;
@@ -16170,7 +16401,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
           ) : (
             <div>
               {sectionItems.map(p => (
-                <UnclassifiedRow key={p.id} product={p} categoryOptions={categoryOptions} onAssign={assignCategory} />
+                <UnclassifiedRow key={p.id} product={p} categoryOptions={categoryOptions} onAssign={assignCategory} sugerencia={sugerirCategoria(p.name, categoriaModel)} />
               ))}
             </div>
           )}
