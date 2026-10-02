@@ -138,7 +138,7 @@ const C = {
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Playfair+Display:wght@600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Playfair+Display:wght@600;700;800;900&family=Baloo+2:wght@500;600;700;800&display=swap');
 
 /* Escala tipográfica. El mínimo es 14px: por debajo de eso el texto cansa en
    una jornada completa, y en el teléfono cualquier campo bajo 16px hace que
