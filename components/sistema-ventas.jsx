@@ -58,7 +58,7 @@ import {
   cuerpoBoleta, estilosBoleta, estilosSoloImpresion, reglaDePagina, ID_IMPRESION, ID_ESTILOS,
   leerAjustesBoleta, guardarAjustesBoleta, AJUSTES_POR_OMISION, ventaDePrueba,
 } from "@/lib/boleta";
-import { generarImagenOferta } from "@/lib/promo-oferta";
+import { generarImagenOferta, ESTILOS_OFERTA } from "@/lib/promo-oferta";
 import { guardarImagenOferta, quitarImagenOferta } from "@/lib/datos/imagenes";
 import {
   FORMAS_DE_COSTO, FORMA_POR_OMISION, netoDesde, comoEnLaFactura,
@@ -138,7 +138,7 @@ const C = {
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Playfair+Display:wght@600;700;800;900&display=swap');
 
 /* Escala tipográfica. El mínimo es 14px: por debajo de eso el texto cansa en
    una jornada completa, y en el teléfono cualquier campo bajo 16px hace que
@@ -14517,6 +14517,7 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
             oferta: { name: o.name, tiers: o.tiers || [], productNames: nombresProductos },
             fotos: [],
             settings,
+            estilo: o.imageStyle || "vibrante",
           });
           const url = await guardarImagenOferta(o.id, dataUrl, "image/jpeg");
           setOffers(prev => prev.map(x => x.id === o.id ? { ...x, imageUrl: url } : x));
@@ -14784,7 +14785,7 @@ function OfertasView({ offers, setOffers, clearances, setClearances, products, s
       {confirmarActualizarImagenes && (
         <Modal title="Actualizar imágenes al nuevo diseño" onClose={() => setConfirmarActualizarImagenes(false)}>
           <p className="text-sm mb-3" style={{ color: C.ink }}>
-            Se rearma la imagen promocional de las <strong>{ofertasConImagen.length}</strong> oferta(s) que ya tienen una, con el cartel nuevo (rojo/amarillo/azul).
+            Se rearma la imagen promocional de las <strong>{ofertasConImagen.length}</strong> oferta(s) que ya tienen una, manteniendo el estilo que tenga elegido cada oferta (las que no tienen uno elegido todavía quedan con el estilo "Vibrante").
           </p>
           <p className="text-sm mb-4 rounded-lg p-2.5" style={{ color: C.rust, background: C.rustSoft }}>
             Ojo: las fotos que le hayas puesto a cada oferta no quedaron guardadas aparte — solo el cartel ya armado. Las que actualices acá van a quedar sin fotos (con un emblema en su lugar) hasta que entres a "Editar oferta" y las adjuntes de nuevo.
@@ -14824,6 +14825,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
     name: initial?.name || "",
     productIds: initial?.productIds || [],
     tiers: initial?.tiers || [],
+    imageStyle: initial?.imageStyle || "vibrante",
   });
   const [productQuery, setProductQuery] = useState("");
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
@@ -14841,6 +14843,14 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
   const esNueva = !initial?.id;
   const [fotos, setFotos] = useState({});           // productId -> dataUrl
   const [fotosTocadas, setFotosTocadas] = useState(false);
+  // Igual que fotosTocadas: cambiar el estilo en una oferta que ya existía
+  // también tiene que disparar el rearmado de la vista previa (si no, el
+  // selector no haría nada visible hasta volver a tocar una foto).
+  const [estiloTocado, setEstiloTocado] = useState(false);
+  function elegirEstilo(id) {
+    set("imageStyle", id);
+    setEstiloTocado(true);
+  }
   const [quitarPedido, setQuitarPedido] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(initial?.imageUrl || null);
   const [generando, setGenerando] = useState(false);
@@ -14878,7 +14888,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
   useEffect(() => {
     if (quitarPedido) return;
     if (!form.name.trim()) return;
-    if (!esNueva && !fotosTocadas) return;
+    if (!esNueva && !fotosTocadas && !estiloTocado) return;
     const fotosActivas = form.productIds.map(id => fotos[id]).filter(Boolean);
     const nombresProductos = form.productIds
       .map(id => products.find(p => p.id === id)?.name)
@@ -14894,6 +14904,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
           oferta: { name: form.name, tiers: tiersValidos, productNames: nombresProductos },
           fotos: fotosActivas,
           settings,
+          estilo: form.imageStyle,
         });
         if (!cancelado) setPreviewUrl(dataUrl);
       } catch (e) {
@@ -14903,7 +14914,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
       }
     }, 500);
     return () => { cancelado = true; clearTimeout(espera); setGenerando(false); };
-  }, [form.name, form.tiers, fotos, form.productIds, products, settings, esNueva, fotosTocadas, quitarPedido]);
+  }, [form.name, form.tiers, fotos, form.productIds, form.imageStyle, products, settings, esNueva, fotosTocadas, estiloTocado, quitarPedido]);
 
   // Qué carpeta (si alguna, y no esta misma) ya tiene reclamado cada producto —
   // un producto solo puede estar en una a la vez, así que acá se avisa en vez
@@ -14959,7 +14970,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
     // algo que guardar o quitar, no cómo se guarda.
     if (quitarPedido) {
       payload._quitarImagen = true;
-    } else if (previewUrl && (esNueva || fotosTocadas)) {
+    } else if (previewUrl && (esNueva || fotosTocadas || estiloTocado)) {
       payload._imagenGenerada = { dataUrl: previewUrl, mediaType: "image/jpeg" };
     }
     onSave(payload);
@@ -15119,6 +15130,27 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
           </div>
         )}
         <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={onFotoSeleccionada} className="hidden" />
+
+        <div className="mb-3">
+          <span className="block text-[11px] font-medium mb-1.5" style={{ color: C.ink }}>Estilo del cartel</span>
+          <div className="grid grid-cols-3 gap-2">
+            {ESTILOS_OFERTA.map(e => {
+              const elegido = form.imageStyle === e.id;
+              return (
+                <button
+                  key={e.id} type="button" onClick={() => elegirEstilo(e.id)} aria-pressed={elegido}
+                  className="text-left rounded-lg p-2 transition"
+                  style={elegido
+                    ? { background: C.greenSoft, border: `1.5px solid ${C.green}` }
+                    : { background: C.paperDark, border: `1.5px solid ${C.paperLine}` }}
+                >
+                  <span className="block text-xs font-semibold" style={{ color: elegido ? C.greenDark : C.ink }}>{e.label}</span>
+                  <span className="block text-[10px] leading-snug mt-0.5" style={{ color: C.gray }}>{e.descripcion}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {(generando || previewUrl) && (
           <div className="rounded-lg p-2.5" style={{ background: C.paperDark, border: `1px solid ${C.paperLine}` }}>
