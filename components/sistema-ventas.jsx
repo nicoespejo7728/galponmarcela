@@ -17813,6 +17813,33 @@ function isOverdue(record) {
   return record.status === "pendiente" && record.dueDate < new Date().toISOString().slice(0, 10);
 }
 
+/* Avance de un conteo guardado en ESTE navegador (ver CountExecutionModal
+   más abajo) — pedido de Fran, oct. 2026: contar una categoría grande toma
+   rato, y antes de esto lo tecleado solo vivía en memoria del componente,
+   así que una recarga de la página a mitad de camino lo borraba todo. Se
+   guarda por id de conteo, así no se mezcla el avance de uno con el de
+   otro. Todo envuelto en try/catch: si el navegador tiene el almacenamiento
+   bloqueado (modo privado, por ejemplo), el conteo igual tiene que poder
+   hacerse, solo que sin el autoguardado. */
+const CONTEO_BORRADOR_PREFIJO = "galpon:conteo-borrador:";
+function leerBorradorConteo(recordId, categoryProducts) {
+  try {
+    const guardado = JSON.parse(localStorage.getItem(CONTEO_BORRADOR_PREFIJO + recordId) || "null");
+    if (!guardado || typeof guardado !== "object") return null;
+    // Se arma de nuevo contra la lista actual de productos de la categoría
+    // (no contra lo que haya en el borrador): si se agregó o quitó un
+    // producto de la categoría desde que se guardó el borrador, igual queda
+    // una fila por cada producto real, ni de más ni de menos.
+    return Object.fromEntries(categoryProducts.map(p => [p.id, guardado[p.id] ?? String(p.stock)]));
+  } catch { return null; }
+}
+function guardarBorradorConteo(recordId, counts) {
+  try { localStorage.setItem(CONTEO_BORRADOR_PREFIJO + recordId, JSON.stringify(counts)); } catch { /* sin almacenamiento disponible, se sigue igual */ }
+}
+function borrarBorradorConteo(recordId) {
+  try { localStorage.removeItem(CONTEO_BORRADOR_PREFIJO + recordId); } catch { /* nada que limpiar si nunca se guardó */ }
+}
+
 function ScheduleCountModal({ users, categories, onClose, onSave, toast, session }) {
   const [dueDate, setDueDate] = useState(nextOccurrence(15));
   const [category, setCategory] = useState(categories[0] || "");
@@ -17861,15 +17888,39 @@ function ScheduleCountModal({ users, categories, onClose, onSave, toast, session
 
 function CountExecutionModal({ record, products, onClose, onSubmit }) {
   const categoryProducts = useMemo(() => products.filter(p => p.category === record.category), [products, record.category]);
-  const [counts, setCounts] = useState(() => Object.fromEntries(categoryProducts.map(p => [p.id, String(p.stock)])));
+  const [counts, setCounts] = useState(() =>
+    leerBorradorConteo(record.id, categoryProducts) || Object.fromEntries(categoryProducts.map(p => [p.id, String(p.stock)]))
+  );
+  const [saving, setSaving] = useState(false);
 
-  function submit() {
+  // Autoguardado local: antes, lo tecleado acá solo vivía en este
+  // componente, así que una recarga de la página (o cerrar y volver a abrir
+  // el navegador) a mitad de un conteo largo lo borraba todo y había que
+  // empezar de nuevo (pedido de Fran, oct. 2026). Cambiar de pestaña DENTRO
+  // del sistema ya no lo borraba —las pestañas se quedan montadas, solo
+  // ocultas, ver comentario en TabPane—, pero esto cubre también los casos
+  // en que de verdad se pierde el componente.
+  useEffect(() => { guardarBorradorConteo(record.id, counts); }, [record.id, counts]);
+
+  async function submit() {
+    if (saving) return;
     const items = categoryProducts.map(p => {
       const counted = Number(counts[p.id]);
       const safeCounted = Number.isFinite(counted) ? counted : p.stock;
       return { productId: p.id, name: p.name, unitType: p.unitType, expected: p.stock, counted: safeCounted, diff: Number((safeCounted - p.stock).toFixed(3)) };
     });
-    onSubmit(items);
+    setSaving(true);
+    try {
+      await onSubmit(items);
+      // Se guardó bien: el borrador ya cumplió su función.
+      borrarBorradorConteo(record.id);
+    } catch {
+      // El aviso de error ya lo mostró el padre (toast). Acá no hace falta
+      // más que dejar el modal abierto, con lo tecleado intacto, para que
+      // se pueda reintentar sin perder nada.
+    } finally {
+      setSaving(false);
+    }
   }
 
   const totalDiff = Object.entries(counts).reduce((sum, [id, v]) => {
@@ -17880,8 +17931,8 @@ function CountExecutionModal({ record, products, onClose, onSubmit }) {
   }, 0);
 
   return (
-    <Modal title={`Conteo — ${record.category}`} onClose={onClose} wide>
-      <p className="text-xs mb-3" style={{ color: C.gray }}>Cuenta físicamente cada producto de esta categoría y anota la cantidad real. Al confirmar, el stock del sistema se ajusta a lo contado y las diferencias quedan registradas.</p>
+    <Modal title={`Conteo — ${record.category}`} onClose={saving ? () => {} : onClose} wide>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>Cuenta físicamente cada producto de esta categoría y anota la cantidad real. Al confirmar, el stock del sistema se ajusta a lo contado y las diferencias quedan registradas. Tu avance se guarda solo en este dispositivo, así que si tienes que salir a mitad de camino lo encuentras tal cual al volver.</p>
       {categoryProducts.length === 0 ? (
         <EmptyState icon={ClipboardList} title="Sin productos en esta categoría" hint="No hay nada que contar aquí." />
       ) : (
@@ -17900,6 +17951,7 @@ function CountExecutionModal({ record, products, onClose, onSubmit }) {
                     <input
                       type="number" step={p.unitType === "peso" ? "0.001" : "1"}
                       value={counts[p.id]} onChange={e => setCounts(c => ({ ...c, [p.id]: e.target.value }))}
+                      disabled={saving}
                       className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()}
                     />
                     {diff !== 0 && <Badge tone={diff > 0 ? "green" : "rust"}>{diff > 0 ? "+" : ""}{diff}</Badge>}
@@ -17915,7 +17967,14 @@ function CountExecutionModal({ record, products, onClose, onSubmit }) {
           Diferencia neta: {totalDiff > 0 ? "+" : ""}{totalDiff.toFixed(2)} unidades respecto al sistema
         </div>
       )}
-      <Btn full icon={Check} onClick={submit} disabled={categoryProducts.length === 0}>Confirmar conteo y ajustar stock</Btn>
+      <Btn full icon={saving ? Loader2 : Check} onClick={submit} disabled={categoryProducts.length === 0 || saving}>
+        {saving ? "Guardando el conteo y ajustando el stock…" : "Confirmar conteo y ajustar stock"}
+      </Btn>
+      {saving && (
+        <p className="text-xs text-center mt-2" style={{ color: C.gray }}>
+          No cierres esta ventana — puede demorar unos segundos. Vas a ver un aviso claro de "listo" o de error apenas termine.
+        </p>
+      )}
     </Modal>
   );
 }
@@ -18041,38 +18100,58 @@ function InventoryCountsView({ counts, setCounts, products, setProducts, movemen
   }
 
   async function submitCount(items) {
-    const date = new Date().toISOString();
-    const latestProducts = await loadJSON("products-catalog", products);
-    const newProducts = latestProducts.map(p => {
-      const item = items.find(i => i.productId === p.id);
-      return item ? { ...p, stock: item.counted, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, item.counted) } : p;
-    });
-    const diffItems = items.filter(i => i.diff !== 0);
-    const latestMovements = await loadJSON("movements-log", movements);
-    const diffMovements = diffItems.map(i => {
-      const prod = latestProducts.find(p => p.id === i.productId);
-      return {
-        id: uid("mov"), date, type: i.diff < 0 ? "egreso" : "ingreso",
-        concept: `Ajuste por conteo de inventario: ${i.name} (${i.diff > 0 ? "+" : ""}${i.diff})`,
-        amount: Math.abs(i.diff) * (prod?.cost || 0),
-        category: "Ajuste de inventario", auto: true,
-        // Dejan el rastro de qué conteo y qué producto originaron el ajuste.
-        countId: executing.id, productId: i.productId, diff: i.diff,
-      };
-    });
-    const newMovements = [...diffMovements, ...latestMovements];
-    const latestCounts = await conteosAlDia();
-    const newCounts = latestCounts.map(r => r.id === executing.id ? { ...r, status: "completado", completedAt: date, completedBy: session.name, items } : r);
+    // Antes esta función no tenía try/catch: si guardar fallaba a mitad de
+    // camino (un corte de red, Supabase lento, lo mismo que Fran reportó
+    // que le pasa últimamente), no había NINGÚN aviso de error — el modal
+    // se quedaba tal cual, sin decir si había funcionado o no (pedido de
+    // Fran, oct. 2026: que el sistema sea claro sobre si la acción se pudo
+    // hacer). Ahora se avisa siempre, con éxito o con error, y se vuelve a
+    // lanzar el error para que CountExecutionModal sepa que falló, reactive
+    // el botón y no borre lo que la persona ya tecleó.
+    try {
+      const date = new Date().toISOString();
+      const latestProducts = await loadJSON("products-catalog", products);
+      const newProducts = latestProducts.map(p => {
+        const item = items.find(i => i.productId === p.id);
+        return item ? { ...p, stock: item.counted, stockZeroSince: nextStockZeroSince(p.stock, p.stockZeroSince, item.counted) } : p;
+      });
+      const diffItems = items.filter(i => i.diff !== 0);
+      const latestMovements = await loadJSON("movements-log", movements);
+      const diffMovements = diffItems.map(i => {
+        const prod = latestProducts.find(p => p.id === i.productId);
+        return {
+          id: uid("mov"), date, type: i.diff < 0 ? "egreso" : "ingreso",
+          concept: `Ajuste por conteo de inventario: ${i.name} (${i.diff > 0 ? "+" : ""}${i.diff})`,
+          amount: Math.abs(i.diff) * (prod?.cost || 0),
+          category: "Ajuste de inventario", auto: true,
+          // Dejan el rastro de qué conteo y qué producto originaron el ajuste.
+          countId: executing.id, productId: i.productId, diff: i.diff,
+        };
+      });
+      const newMovements = [...diffMovements, ...latestMovements];
+      const latestCounts = await conteosAlDia();
+      const newCounts = latestCounts.map(r => r.id === executing.id ? { ...r, status: "completado", completedAt: date, completedBy: session.name, items } : r);
 
-    setProducts(newProducts); setMovements(newMovements); setCounts(newCounts);
-    await Promise.all([
-      saveJSON("products-catalog", newProducts, { origen: "conteo" }),
-      saveJSON("inventory-counts", newCounts),
-    ]);
-    // El detalle del ajuste apunta al conteo, así que va después de él.
-    await saveJSON("movements-log", newMovements);
-    setExecuting(null);
-    toast("Conteo registrado y stock ajustado", "success");
+      // Lo que se ve en pantalla se actualiza DESPUÉS de que las escrituras
+      // de verdad terminaron bien — antes se hacía al revés (optimista,
+      // antes de guardar), y si una escritura fallaba a mitad de camino la
+      // pantalla igual mostraba el conteo como listo y el stock ya
+      // ajustado, aunque en el servidor no hubiera quedado nada guardado.
+      await Promise.all([
+        saveJSON("products-catalog", newProducts, { origen: "conteo" }),
+        saveJSON("inventory-counts", newCounts),
+      ]);
+      // El detalle del ajuste apunta al conteo, así que va después de él.
+      await saveJSON("movements-log", newMovements);
+
+      setProducts(newProducts); setMovements(newMovements); setCounts(newCounts);
+      setExecuting(null);
+      toast("Conteo registrado y stock ajustado", "success");
+    } catch (e) {
+      console.error("[conteos] no se pudo registrar el conteo", e);
+      toast(friendlyError(e, "No se pudo registrar el conteo — el stock no se modificó. Revisa la conexión e inténtalo de nuevo"), "error");
+      throw e;
+    }
   }
 
   async function submitException(reason) {
