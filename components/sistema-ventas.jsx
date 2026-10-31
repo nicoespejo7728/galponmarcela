@@ -8052,6 +8052,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       {quickCustomerOpen && (
         <CustomerModal
           quick
+          toast={toast}
           onClose={() => setQuickCustomerOpen(false)}
           onSave={async (c) => {
             const latest = await loadJSON("customers", customers);
@@ -15928,7 +15929,7 @@ function ProductGroupModal({ initial, productGroups, products, onClose, onSave }
    usa desde el POS (solo nombre y teléfono, para no frenar una venta);
    desde acá (administración) se completa con dirección, límite y notas.
 --------------------------------------------------------- */
-function CustomerModal({ initial, onClose, onSave, quick }) {
+function CustomerModal({ initial, onClose, onSave, quick, toast }) {
   const [form, setForm] = useState({
     id: initial?.id || uid("cus"),
     name: initial?.name || "",
@@ -15937,9 +15938,35 @@ function CustomerModal({ initial, onClose, onSave, quick }) {
     notes: initial?.notes || "",
     creditLimit: initial?.creditLimit ?? "",
   });
+  // PIN de administrador al CREAR un cliente de fiado (pedido de Fran, nov.
+  // 2026): para que un vendedor no pueda abrirle fiado a quien quiera sin
+  // que un administrador lo autorice primero — ni desde Vender (al elegir
+  // Fiado y tocar "nuevo cliente") ni desde Fiados en el menú de
+  // administración, porque ambas pantallas usan este mismo formulario. Solo
+  // aplica a un cliente NUEVO: editar uno que ya existe (cambiarle el
+  // teléfono, la dirección, etc.) no abre deuda nueva, así que no lo pide.
+  // Mismo mecanismo que la merma y el consumo interno (autorizarConPin):
+  // sirve el PIN del negocio o el personal de cualquier administrador.
+  const esNuevo = !initial?.id;
+  const [pin, setPin] = useState("");
+  const [autorizando, setAutorizando] = useState(false);
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
-  function submit() {
-    if (!form.name.trim()) return;
+  async function submit() {
+    if (!form.name.trim()) return toast?.("Escribe el nombre del cliente", "error");
+    if (esNuevo) {
+      if (!pin.trim()) return toast?.("Pide el PIN de un administrador para abrir fiado a un cliente nuevo", "error");
+      setAutorizando(true);
+      try {
+        if (!(await autorizarConPin(pin))) {
+          setAutorizando(false);
+          return toast?.("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+        }
+      } catch (e) {
+        setAutorizando(false);
+        return toast?.(friendlyError(e, "No se pudo comprobar el PIN"), "error");
+      }
+      setAutorizando(false);
+    }
     onSave({
       ...form,
       name: form.name.trim(),
@@ -15959,7 +15986,12 @@ function CustomerModal({ initial, onClose, onSave, quick }) {
           <Field label="Notas (opcional)"><textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={2} className={inputCls} style={inputStyle()} placeholder="Referencias, condiciones de pago, etc." /></Field>
         </>
       )}
-      <Btn full icon={Check} onClick={submit}>Guardar cliente</Btn>
+      {esNuevo && (
+        <Field label="PIN de administrador (para autorizar fiado a un cliente nuevo)">
+          <input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
+        </Field>
+      )}
+      <Btn full icon={Check} onClick={submit} disabled={autorizando}>{autorizando ? "Comprobando PIN…" : "Guardar cliente"}</Btn>
     </Modal>
   );
 }
@@ -16399,7 +16431,7 @@ function ClientesView({ customers, setCustomers, customerLedger, setCustomerLedg
         </div>
       )}
 
-      {editing !== null && <CustomerModal initial={editing.id ? editing : null} onClose={() => setEditing(null)} onSave={saveCustomer} />}
+      {editing !== null && <CustomerModal initial={editing.id ? editing : null} onClose={() => setEditing(null)} onSave={saveCustomer} toast={toast} />}
       {deleting && (
         <Modal title="Eliminar cliente" onClose={() => setDeleting(null)}>
           <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar <strong>{deleting.name}</strong>? Las ventas y movimientos de fiado ya registrados no se modifican.</p>
