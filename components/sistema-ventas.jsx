@@ -211,6 +211,79 @@ function normalize(s) {
   return (s || "").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+/* "Quiz\u00e1s quisiste decir..." (pedido de Fran, oct. 2026): hasta ahora, si
+   alguien buscaba un producto o un cliente con una falta de ortograf\u00eda, la
+   b\u00fasqueda (por substring) no encontraba nada \u2014 y esto pasaba m\u00e1s seguido
+   de lo que se nota, porque no avisaba de ning\u00fan otro modo: la persona ve\u00eda
+   "no hay resultados" y terminaba creando el producto de nuevo, o el perfil
+   de fiado de nuevo, en vez de encontrar el que ya exist\u00eda. Lo de abajo
+   mide qu\u00e9 tan parecido es lo escrito a lo que realmente hay guardado, letra
+   por letra, para poder sugerir el m\u00e1s cercano cuando la b\u00fasqueda normal no
+   encuentra nada \u2014 como hace cualquier buscador cuando uno escribe mal. */
+
+/* Distancia de edici\u00f3n (Levenshtein): cu\u00e1ntas letras hay que cambiar, sacar
+   o agregar para pasar de un texto al otro. "manteqilla" a "mantequilla" da
+   1; dos palabras sin ninguna relaci\u00f3n dan un n\u00famero grande. Se recorre con
+   dos filas nada m\u00e1s (no la matriz completa) porque esto puede correr
+   contra miles de productos cada vez que alguien escribe algo que no
+   encuentra nada. */
+function distanciaEdicion(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const costo = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + costo);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+/* Qu\u00e9 tan cerca est\u00e1 lo escrito de un texto guardado: se compara contra el
+   texto completo (recortado a un largo parecido, para no penalizar un
+   nombre largo por ser largo) y contra cada palabra suelta \u2014 as\u00ed se agarra
+   tanto "escrib\u00ed mal la \u00fanica palabra" ("mantekilla") como "escrib\u00ed mal una
+   palabra del medio" ("leche decremada" buscando "LECHE DESCREMADA SOPROLE
+   1L"). Se queda con la mejor de todas esas comparaciones. */
+function distanciaMinimaContra(q, textoNormalizado) {
+  let mejor = distanciaEdicion(q, textoNormalizado.slice(0, q.length + 3));
+  for (const palabra of textoNormalizado.split(" ")) {
+    if (!palabra) continue;
+    const recorte = palabra.length > q.length + 3 ? palabra.slice(0, q.length + 3) : palabra;
+    const d = distanciaEdicion(q, recorte);
+    if (d < mejor) mejor = d;
+  }
+  return mejor;
+}
+
+/* Busca, entre una lista de objetos (productos, clientes, lo que sea), los
+   m\u00e1s parecidos a lo que se escribi\u00f3. `obtenerTexto` saca el texto a
+   comparar de cada uno (el nombre, por ejemplo). Solo vale la pena sugerir
+   si qued\u00f3 razonablemente cerca \u2014 con una palabra muy corta (3-4 letras)
+   alcanza con una letra de diferencia; con una m\u00e1s larga se permite un poco
+   m\u00e1s, porque ah\u00ed s\u00ed hay margen para una falta de ortograf\u00eda real sin que
+   dos palabras distintas se confundan entre s\u00ed. */
+function sugerirParecidos(texto, candidatos, obtenerTexto, maxSugerencias = 3) {
+  const q = normalize(texto).trim();
+  if (q.length < 3) return [];
+  const umbral = q.length <= 4 ? 1 : q.length <= 7 ? 2 : 3;
+  const conDistancia = [];
+  for (const c of candidatos) {
+    const t = normalize(obtenerTexto(c) || "");
+    if (!t) continue;
+    const d = distanciaMinimaContra(q, t);
+    if (d <= umbral && d > 0) conDistancia.push({ c, d });
+  }
+  conDistancia.sort((a, b) => a.d - b.d);
+  return conDistancia.slice(0, maxSugerencias).map(x => x.c);
+}
+
 // Descarga la imagen promocional de una oferta al celular/computador de
 // quien administra, lista para adjuntar al grupo de WhatsApp de los
 // clientes (pedido de Fran, sept. 2026: que sea f\u00e1cil de bajar para
@@ -244,9 +317,16 @@ function upperField(s) {
 // Traduce mensajes de error crudos (de la API, de la red, del navegador —
 // casi siempre en inglés) a mensajes claros en español, para que cualquier
 // persona que use el sistema entienda qué pasó, sin tecnicismos.
+/* Convierte un error técnico en un mensaje con motivo y solución (pedido de
+   Fran, oct. 2026: todo error del sistema debe decir por qué pasó y cómo
+   solucionarlo, no solo que algo falló). `fallback` es la acción que se
+   estaba intentando (p. ej. "No se pudo guardar el producto"), y cada rama
+   de abajo le agrega la razón real —hasta donde se puede saber desde acá— y
+   un siguiente paso concreto, en vez de dejar solo "algo salió mal". */
 function friendlyError(err, fallback) {
   const raw = (err && err.message) ? String(err.message) : (typeof err === "string" ? err : "");
   const low = raw.toLowerCase();
+  const base = fallback || "No se pudo completar la acción";
   if (low.includes("rate limit") || low.includes("too many requests") || low.includes("reload to continue")) {
     return "El asistente de IA está saturado por uso seguido de todo el equipo (no es algo que hayas hecho tú). Espera uno o dos minutos y vuelve a intentarlo.";
   }
@@ -254,21 +334,35 @@ function friendlyError(err, fallback) {
     return "El servicio de IA está saturado a nivel general en este momento (no es algo que hayas hecho tú, ni un problema de este sistema). El sistema ya reintentó varias veces solo antes de mostrarte esto — intenta de nuevo en unos minutos.";
   }
   if (low.includes("failed to fetch") || low.includes("networkerror") || low.includes("network request failed") || low.includes("load failed")) {
-    return "No se pudo conectar a internet. Revisa tu conexión y vuelve a intentarlo.";
+    return `${base} — no hay conexión a internet en este momento. Revisa el wifi o los datos móviles y vuelve a intentarlo; lo que tenías escrito sigue aquí, no se pierde.`;
   }
   if (low.includes("timeout") || low.includes("timed out")) {
-    return "La solicitud tardó demasiado y se cortó. Intenta de nuevo.";
+    return `${base} — la conexión está lenta o inestable y la respuesta no llegó a tiempo. Vuelve a intentarlo; si pasa seguido en el mismo lugar, es la señal de ahí, no un error del sistema.`;
   }
   if (low.includes("unauthorized") || low.includes("forbidden") || low.includes(" 401") || low.includes(" 403")) {
-    return "No se pudo autorizar la solicitud. Intenta de nuevo más tarde.";
+    return `${base} — tu sesión puede haber vencido, o esta acción es solo para administrador y tu usuario no tiene ese permiso. Cierra sesión y vuelve a entrar; si sigue sin funcionar, pide que un administrador confirme tu rol.`;
   }
   if (low.includes("json") || low.includes("unexpected token")) {
-    return fallback || "No se pudo interpretar la respuesta. Intenta de nuevo.";
+    return `${base} — la respuesta del servidor llegó incompleta y no se pudo leer. Vuelve a intentarlo; si se repite varias veces seguidas, es un problema técnico y conviene avisar en vez de seguir insistiendo.`;
   }
-  // Errores técnicos crudos de Postgres/PostgREST (códigos, nombres de
-  // columnas, jerga de restricciones): mejor el genérico que ese texto.
-  if (/pgrst\d|violates|duplicate key|constraint|relation .* does not exist|permission denied for|jwt |P0001|23505|23503|42501/i.test(raw)) {
-    return fallback || "Ocurrió un problema inesperado. Intenta de nuevo.";
+  // Errores crudos de Postgres/PostgREST: antes esto devolvía SOLO el
+  // fallback para no mostrar jerga técnica, pero así se perdía la única
+  // pista real de qué pasó. Ahora se traduce la causa más probable según el
+  // código, que si es uno de estos sí dice algo específico y accionable.
+  if (/duplicate key|23505/i.test(raw)) {
+    return `${base} — ya existe otro registro con ese mismo dato (el mismo código de barras, nombre de usuario, número de documento, etc.). Revisa si no se está repitiendo algo que ya existía y cámbialo.`;
+  }
+  if (/23503|violates foreign key/i.test(raw)) {
+    return `${base} — esto depende de otro registro (un producto, proveedor o cliente) que ya no existe o fue eliminado. Revisa que lo que elegiste siga existiendo e inténtalo de nuevo.`;
+  }
+  if (/42501|permission denied for/i.test(raw)) {
+    return `${base} — tu usuario no tiene permiso para esto; es una acción solo para administrador. Pide que la haga un administrador, o que te den ese permiso si corresponde.`;
+  }
+  if (/relation .* does not exist/i.test(raw)) {
+    return `${base} — falta algo en la base de datos, probablemente una actualización del sistema que no se terminó de instalar. No se arregla desde acá: avisa para revisarlo antes de seguir usando esta función.`;
+  }
+  if (/pgrst\d|violates|constraint|jwt |P0001/i.test(raw)) {
+    return `${base} — la base de datos rechazó el cambio por una restricción interna (un valor fuera de rango, un dato que no cuadra con otro, algo así). Revisa los datos que ingresaste; si no encuentras el problema, anota exactamente qué estabas haciendo y avisa para revisarlo directo ahí.`;
   }
   // Cualquier otro mensaje se muestra tal cual. Los que arma el propio
   // sistema (como los de las funciones de la base: "Solo un administrador
@@ -277,7 +371,7 @@ function friendlyError(err, fallback) {
   // de esos mensajes no llevan ninguna letra acentuada y terminaban
   // tapados por el genérico sin que nadie entendiera la razón real.
   if (raw) return raw;
-  return fallback || "Ocurrió un problema inesperado. Intenta de nuevo.";
+  return `${base}. Vuelve a intentarlo; si se repite, anota exactamente qué estabas haciendo y avisa para revisarlo.`;
 }
 function isSameDay(iso, ref) { return dayKey(iso) === dayKey(ref); }
 function isSameMonth(iso, ref) {
@@ -5501,16 +5595,59 @@ async function askMarcelita(history, localContext, canScheduleCounts) {
 /* ---------------------------------------------------------
    PEQUEÑOS COMPONENTES DE UI
 --------------------------------------------------------- */
-function Toast({ toast }) {
-  if (!toast) return null;
-  const isErr = toast.type === "error";
+/* Aviso de sistema, a pantalla completa (pedido de Fran, oct. 2026).
+
+   Antes esto era un "toast" chico abajo a la izquierda, que desaparecía solo
+   a los pocos segundos — y eso era justo el problema: con el celular en la
+   mano, mirando al cliente y no la pantalla, era fácil no alcanzar a verlo.
+   Si el aviso era que algo NO se guardó, la persona seguía adelante
+   pensando que sí. Ahora cualquier aviso del sistema —se haya guardado bien
+   una recepción, falle una venta, falte un dato en un formulario— tapa toda
+   la pantalla con el resultado bien grande y no se cierra solo: hay que
+   tocar "Continuar" para seguir, así que verlo deja de ser opcional. */
+function AvisoDeSistema({ aviso, onContinuar }) {
+  if (!aviso) return null;
+  const isErr = aviso.type === "error";
+  // El título grande distingue "editado" de "guardado" mirando el propio
+  // mensaje (pedido de Fran, oct. 2026) — no hace falta marcar a mano cada
+  // uno de los más de ochenta lugares que llaman a toast(): el sistema ya es
+  // consistente usando "actualizado", "corregido" o "editado" para toda
+  // corrección a algo que ya existía (ver el resto de los avisos de éxito).
+  // Cualquier otro éxito —crear, registrar, eliminar, imprimir— queda como
+  // "guardado", que es como se entiende en el día a día del mesón.
+  const esEdicion = !isErr && /actualiz|corregi|editad|modificad/i.test(aviso.msg || "");
+  const titulo = isErr ? "ERROR" : (esEdicion ? "EDITADO CORRECTAMENTE" : "GUARDADO CORRECTAMENTE");
   return (
     <div
-      className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[200] px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium flex items-center gap-2 animate-[fadeUp_.25s_ease]"
-      style={{ background: isErr ? C.rust : C.greenDark, color: C.paper }}
+      className="fixed inset-0 z-[400] flex items-center justify-center p-6"
+      style={{ background: isErr ? C.rust : C.greenDark }}
+      role="alertdialog"
+      aria-modal="true"
+      aria-live="assertive"
     >
-      {isErr ? <AlertTriangle size={16} /> : <Check size={16} />}
-      {toast.msg}
+      <div className="flex flex-col items-center text-center max-w-sm w-full">
+        <div
+          className="w-20 h-20 rounded-full flex items-center justify-center mb-5 flex-shrink-0"
+          style={{ border: `3px solid ${C.paper}` }}
+        >
+          {isErr ? <X size={44} style={{ color: C.paper }} /> : <Check size={44} style={{ color: C.paper }} />}
+        </div>
+        <h2
+          className="text-2xl font-extrabold tracking-wide mb-3"
+          style={{ color: C.paper, fontFamily: "'Space Grotesk', sans-serif" }}
+        >
+          {titulo}
+        </h2>
+        <p className="text-base leading-snug mb-8" style={{ color: C.paper, opacity: 0.95 }}>{aviso.msg}</p>
+        <button
+          onClick={onContinuar}
+          autoFocus
+          className="px-10 py-3 rounded-xl font-bold text-base w-full sm:w-auto"
+          style={{ background: "rgba(255,255,255,0.16)", color: C.paper, border: "1px solid rgba(255,255,255,0.45)" }}
+        >
+          Continuar
+        </button>
+      </div>
     </div>
   );
 }
@@ -5570,6 +5707,30 @@ function BarraDeConexion({ enCola, onSubir }) {
           {subiendo ? "Subiendo…" : "Subir ahora"}
         </button>
       )}
+    </div>
+  );
+}
+
+/* Avisa cuando quedó corriendo una versión vieja del sistema (ver
+   registrar-sw.jsx). Es justo lo que le pasaba al celular y la tablet: una
+   pestaña que nunca se recarga sola se queda con los arreglos de antes —
+   conteos, ventas, recepciones, ediciones— aunque el servidor ya tenga la
+   versión que los corrige. A propósito no se recarga sola: puede haber una
+   venta o una recepción a medio escribir, y perderla sería peor que seguir
+   un rato más con la versión vieja. */
+function BarraDeActualizacion({ disponible, onRecargar }) {
+  if (!disponible) return null;
+  return (
+    <div className="px-4 sm:px-6 py-2 flex items-center gap-2 flex-wrap" style={{ background: C.greenSoft }}>
+      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: C.green }} />
+      <span className="text-xs font-semibold" style={{ color: C.greenDark }}>Hay una versión nueva</span>
+      <span className="text-xs" style={{ color: C.greenDark, opacity: 0.85 }}>
+        Termina lo que estés haciendo y recarga para que el sistema quede al día.
+      </span>
+      <button onClick={onRecargar}
+        className="ml-auto text-xs font-semibold underline" style={{ color: C.greenDark }}>
+        Recargar ahora
+      </button>
     </div>
   );
 }
@@ -5949,7 +6110,7 @@ function LoginScreen({ users, businessName, businessLogo, onLogin, toast }) {
         password,
       });
       if (error || !data?.user) {
-        return toast("Usuario o contraseña incorrectos", "error");
+        return toast("Usuario o contraseña incorrectos — revísalos bien (mayúsculas, espacios de más) y vuelve a intentar; si no los recuerdas, pide a un administrador que te los restablezca desde Usuarios.", "error");
       }
       await cargarCatalogos({ forzar: true });
       const sb2 = obtenerCliente();
@@ -6025,7 +6186,7 @@ function AdminGateModal({ onClose, onEnter, toast }) {
         // La contraseña no calzó: signInWithPassword no llega a tocar la
         // sesión que ya había, así que quien estaba vendiendo sigue
         // identificado igual que antes de intentar entrar aquí.
-        return toast("Usuario o contraseña incorrectos", "error");
+        return toast("Usuario o contraseña incorrectos — revísalos bien (mayúsculas, espacios de más) y vuelve a intentar; si no los recuerdas, pide a un administrador que te los restablezca desde Usuarios.", "error");
       }
       await cargarCatalogos({ forzar: true });
       const { data: perfil } = await sb
@@ -6707,6 +6868,13 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     const q = normalize(customerQuery);
     return customers.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q)).slice(0, 6);
   }, [customerQuery, customers]);
+  // "Quizás quisiste decir…" (pedido de Fran, oct. 2026): para que un cliente
+  // de fiado mal escrito en la búsqueda no termine creándose de nuevo acá
+  // mismo, a mitad de una venta.
+  const customerSugerencias = useMemo(() => {
+    if (customerQuery.trim().length < 2 || customerMatches.length > 0) return [];
+    return sugerirParecidos(customerQuery, customers, (c) => c.name);
+  }, [customerQuery, customers, customerMatches]);
 
   function customerBalance(customerId) {
     return customerLedger.reduce((s, m) => {
@@ -6735,7 +6903,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           const addQty = Number(weightKg) || 0;
           if (addQty <= 0) return prev;
           const already = existing ? existing.qty : 0;
-          if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
+          if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}" — queda menos de lo que intentas agregar. Baja la cantidad, o ingresa stock nuevo desde Recepción si ya llegó y no se ha registrado.`, "error"); return prev; }
           // El producto que se acaba de escanear/tocar sube al principio de
           // la lista (esté agregándose recién o sumando a una línea que ya
           // estaba) — así se confirma de un vistazo que entró bien, sin tener
@@ -6748,10 +6916,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           }, ...prev];
         }
         if (existing) {
-          if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
+          if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}" — ya está en el carrito todo el stock disponible. No se puede agregar más hasta que entre stock nuevo por Recepción.`, "error"); return prev; }
           return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
         }
-        if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
+        if (product.stock <= 0) { toast(`"${product.name}" no tiene stock — no se puede vender sin stock registrado. Ingrésalo desde Recepción si llegó mercadería, o corrígelo desde Inventario si el producto sí está físicamente y el número está mal.`, "error"); return prev; }
         return [{
           productId: product.id, barcode: null, name: product.name,
           price: product.price, cost: product.cost, qty: 1, stock: product.stock,
@@ -6771,7 +6939,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         const addQty = Number(weightKg) || 0;
         if (addQty <= 0) return prev;
         const already = existing ? existing.qty : 0;
-        if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}"`, "error"); return prev; }
+        if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}" — queda menos de lo que intentas agregar. Baja la cantidad, o ingresa stock nuevo desde Recepción si ya llegó y no se ha registrado.`, "error"); return prev; }
         // Igual que en el grupo de arriba: la línea que se acaba de tocar
         // sube al principio, se esté agregando recién o sumando a una que ya
         // estaba en el carrito.
@@ -6784,10 +6952,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         }, ...prev];
       }
       if (existing) {
-        if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}"`, "error"); return prev; }
+        if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}" — ya está en el carrito todo el stock disponible. No se puede agregar más hasta que entre stock nuevo por Recepción.`, "error"); return prev; }
         return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
       }
-      if (product.stock <= 0) { toast(`"${product.name}" no tiene stock`, "error"); return prev; }
+      if (product.stock <= 0) { toast(`"${product.name}" no tiene stock — no se puede vender sin stock registrado. Ingrésalo desde Recepción si llegó mercadería, o corrígelo desde Inventario si el producto sí está físicamente y el número está mal.`, "error"); return prev; }
       // Siempre se cobra el precio vigente del producto (o el de liquidación,
       // si tiene). Antes, si quedaba stock de antes de la última baja de
       // precio, la línea completa se cobraba al precio viejo hasta agotar
@@ -6822,7 +6990,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       if (texto === "") return { ...i, qtyTexto: "" };
       const q = Math.max(0, Math.floor(Number(texto) || 0));
       if (q > i.stock) {
-        toast(`Solo quedan ${i.stock} de "${i.name}"`, "error");
+        toast(`Solo quedan ${i.stock} de "${i.name}" — ajusta la cantidad a eso o menos.`, "error");
         return { ...i, qty: i.stock, qtyTexto: undefined };
       }
       return { ...i, qty: q, qtyTexto: undefined };
@@ -6855,7 +7023,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     setCart(prev => prev.map(i => {
       if (i.productId !== productId) return i;
       const q = Math.max(0, Number(newQty) || 0);
-      if (q > i.stock) { toast(`Solo quedan ${enGramos(i.stock)} g de "${i.name}"`, "error"); return i; }
+      if (q > i.stock) { toast(`Solo quedan ${enGramos(i.stock)} g de "${i.name}" — ajusta el peso a eso o menos.`, "error"); return i; }
       return { ...i, qty: q };
     }));
   }
@@ -6878,7 +7046,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     setCart(prev => prev.map(i => {
       if (i.productId !== productId) return i;
       const q = i.qty + delta;
-      if (q > i.stock) { toast("No hay más stock disponible", "error"); return i; }
+      if (q > i.stock) { toast("No hay más stock disponible — ajusta la cantidad a lo que realmente queda, o ingresa stock nuevo desde Recepción.", "error"); return i; }
       return { ...i, qty: q };
     }).filter(i => i.qty > 0));
   }
@@ -6950,7 +7118,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     // en el carrito con el precio en 0 si nadie lo tocó todavía — se corta
     // acá, antes de cobrar, en vez de dejar pasar una línea gratis.
     const sinPrecio = cart.find(i => i.isTemporal && !(i.price > 0));
-    if (sinPrecio) { toast(`Falta poner el precio de "${sinPrecio.name}"`, "error"); return; }
+    if (sinPrecio) { toast(`Falta poner el precio de "${sinPrecio.name}" — escríbelo antes de cobrar. Si no sabes cuál poner, revisa el último precio de ese producto en Productos.`, "error"); return; }
 
     // Débito o Crédito puros (no un pago combinado, ahí no hay un solo monto
     // que mandar) con una máquina Point asignada a esta caja: el cobro se
@@ -7031,7 +7199,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       const grupo = productGroups.find(g => g.id === i.groupId);
       const { partes, faltante } = resolverLineasDeGrupo(i.qty, grupo, latestProducts);
       if (faltante > 0) {
-        toast(`No hay stock suficiente de "${i.name}" entre las marcas agrupadas`, "error");
+        toast(`No hay stock suficiente de "${i.name}" entre las marcas agrupadas — sumando todas las marcas de este grupo no alcanza para la cantidad pedida. Baja la cantidad, o repón stock de alguna de las marcas.`, "error");
         return;
       }
       resolucionesGrupo.set(i.productId, partes);
@@ -7442,6 +7610,15 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
               </div>
             )}
+            {nameMatches.length === 0 && nameQuery.trim().length >= 2 && (nameHits.sugerencias || []).length > 0 && (
+              <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                <SugerenciasParecidas
+                  sugerencias={nameHits.sugerencias}
+                  obtenerTexto={(p) => p.name}
+                  onElegir={(p) => { addToCart(p); setNameQuery(""); }}
+                />
+              </div>
+            )}
           </div>
           <Btn variant="dark" icon={Camera} onClick={() => setScannerOpen(true)}>Cámara</Btn>
         </div>
@@ -7746,6 +7923,15 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                           ))}
                         </div>
                       )}
+                      {customerMatches.length === 0 && customerSugerencias.length > 0 && (
+                        <div className="absolute z-30 left-0 right-0 top-full mt-1.5 rounded-lg overflow-hidden shadow-xl" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+                          <SugerenciasParecidas
+                            sugerencias={customerSugerencias}
+                            obtenerTexto={(c) => c.name}
+                            onElegir={(c) => { setSelectedCustomer(c); setCustomerQuery(""); }}
+                          />
+                        </div>
+                      )}
                     </div>
                     <button onClick={() => setQuickCustomerOpen(true)} className="mt-2 text-xs font-semibold flex items-center gap-1" style={{ color: C.brass }}><UserPlus size={13} />Nuevo cliente</button>
                   </div>
@@ -7913,6 +8099,10 @@ function AbonoFiadoModal({ customers, customerLedger, onClose, onConfirm }) {
     const q = normalize(query);
     return conSaldo.filter(c => normalize(c.name).includes(q) || normalize(c.phone).includes(q));
   }, [query, conSaldo]);
+  const sugerenciasAbono = useMemo(() => {
+    if (query.trim().length < 2 || visibles.length > 0) return [];
+    return sugerirParecidos(query, conSaldo, (c) => c.name);
+  }, [query, conSaldo, visibles]);
 
   function confirmar() {
     const n = Number(amount);
@@ -7945,6 +8135,10 @@ function AbonoFiadoModal({ customers, customerLedger, onClose, onConfirm }) {
                   <span className="font-mono text-base font-semibold flex-shrink-0" style={{ color: C.rust }}>{formatCLP(balanceOf(c.id))}</span>
                 </button>
               ))}
+            </div>
+          ) : sugerenciasAbono.length > 0 ? (
+            <div className="rounded-xl overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}` }}>
+              <SugerenciasParecidas sugerencias={sugerenciasAbono} obtenerTexto={(c) => c.name} onElegir={(c) => setSelected(c)} />
             </div>
           ) : (
             <p className="text-sm mt-2" style={{ color: C.gray }}>
@@ -9206,7 +9400,7 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
 // el negocio, no el cliente.
 const SUPPLIER_PAYMENT_METHODS = ["Efectivo", "Transferencia", "Pago combinado", "Crédito con el proveedor"];
 
-function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente, settings }) {
+function ReceivingView({ products, setProducts, movements, setMovements, suppliers, setSuppliers, categories, invoicesIndex, setInvoicesIndex, purchaseItems, setPurchaseItems, supplierLedger, setSupplierLedger, role, session, toast, setTab, setSeccionProductosPendiente, settings, facturaPendienteDeEditar, setFacturaPendienteDeEditar }) {
   const [draftItems, setDraftItems] = useState([]);
   // Modelo de sugerencia de sección (ver DraftRow/construirModeloCategorias):
   // se recalcula solo cuando cambia el catálogo, no en cada tecla que se
@@ -9436,7 +9630,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
   function loadInvoiceForEdit(inv) {
     const lineas = purchaseItems.filter(pi => pi.invoiceId === inv.id);
     if (lineas.length === 0) {
-      toast("Esta recepción no tiene productos guardados — no se puede cargar para editar.", "error");
+      toast("Esta recepción no tiene productos guardados — no se puede cargar para editar. Puede ser una recepción muy antigua o un dato incompleto; avísame con el proveedor y la fecha para revisarla directo en la base.", "error");
       return;
     }
     const items = lineas.map(pi => {
@@ -9496,6 +9690,24 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     setReceptionDate(new Date().toISOString().slice(0, 10));
   }
 
+  // Recoge la recepción que se pidió editar desde Proveedores (ver
+  // onRequestEditInvoice más arriba, en el componente raíz): esa pantalla no
+  // tiene el formulario de recepción a mano, así que deja la factura pedida
+  // en facturaPendienteDeEditar y cambia a esta pestaña — acá se recoge apenas
+  // se monta y se limpia, para no volver a cargarla sola si se cancela la
+  // edición y se vuelve a entrar a esta pestaña después.
+  useEffect(() => {
+    if (!facturaPendienteDeEditar) return;
+    if (role !== "admin") {
+      toast?.("Solo un administrador puede editar una recepción ya guardada.", "error");
+      setFacturaPendienteDeEditar(null);
+      return;
+    }
+    loadInvoiceForEdit(facturaPendienteDeEditar);
+    setFacturaPendienteDeEditar(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facturaPendienteDeEditar]);
+
   async function confirmReception() {
     if (draftItems.length === 0) return;
     if (matchingInvoice) {
@@ -9510,7 +9722,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     }
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos nuevos necesitan un nombre", "error");
-      if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
+      if (!it.qty || Number(it.qty) <= 0) return toast(`La cantidad de "${it.name.trim() || "un producto"}" tiene que ser mayor que cero — revísala.`, "error");
     }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Sin un proveedor registrado no hay a quién cargarle la deuda: el libro
@@ -9525,7 +9737,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
     if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
-      return toast("El desglose del pago combinado debe sumar exactamente el total de la recepción", "error");
+      return toast(
+        filasDesglose.length < 2
+          ? "El pago combinado necesita al menos dos formas de pago con un monto puesto — agrega otra, o cambia el tipo de pago si en realidad es solo una."
+          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totals.net * 1.19)} — ajusta los montos hasta que calcen exacto.`,
+        "error"
+      );
     }
     // Se relee lo más reciente del almacenamiento justo antes de guardar, para
     // no partir de una copia local que otro dispositivo ya haya dejado atrás.
@@ -9581,7 +9798,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       }
       const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigoNorm);
       if (yaEscrito) {
-        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
+        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}". Cambia uno de los dos códigos antes de guardar.`, "error");
       }
       codigosEscritosEnEstaRecepcion.set(codigoNorm, it.name.trim() || "un producto");
     }
@@ -9812,16 +10029,20 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     }
     for (const it of draftItems) {
       if (!it.name.trim()) return toast("Todos los productos necesitan un nombre", "error");
-      if (!it.qty || Number(it.qty) <= 0) return toast("Revisa las cantidades ingresadas", "error");
+      if (!it.qty || Number(it.qty) <= 0) return toast(`La cantidad de "${it.name.trim() || "un producto"}" tiene que ser mayor que cero — revísala.`, "error");
     }
     const isCredito = paymentMethod === "Crédito con el proveedor";
     // Pasar de pagada a crédito (o al revés) mueve la plata de un libro a
-    // otro —de Egresos al libro de crédito del proveedor, o viceversa— y eso
-    // puede chocar con abonos que ya se hayan registrado sobre ese cargo. Es
-    // una corrección de fondo, no una corrección de recepción: se deja fuera
-    // de este formulario a propósito.
-    if (isCredito !== editContext.isCredito) {
-      return toast("No se puede cambiar entre \"a crédito\" y \"pagada\" corrigiendo acá — la forma de pago se queda en la misma categoría. Si de verdad cambió, avisa para corregirlo a mano.", "error");
+    // otro —de Egresos al libro de crédito del proveedor, o viceversa—, y eso
+    // SÍ se corrige acá (pedido de Fran, oct. 2026: es justo uno de los
+    // errores de ingreso que necesitaba poder arreglar). La única vez que se
+    // bloquea es cuando no hay forma segura de hacerlo: si ya se le registró
+    // algún abono a este proveedor, un abono no queda vinculado a QUÉ cargo
+    // paga (ver registerPayment en SuppliersView) — no hay cómo saber si ya
+    // cubrió parte de esta recepción, y convertirla a pagada sin más dejaría
+    // el saldo del proveedor mintiendo. Ver más abajo (cruzaLimiteCredito).
+    if (isCredito && !editContext.isCredito && !editContext.originalInvoice.supplierId) {
+      return toast("Esta recepción no tiene un proveedor registrado — no se puede pasar a \"crédito\" sin uno. Regístralo primero desde Proveedores.", "error");
     }
     // La fecha de pago del crédito es opcional a propósito (pedido de Fran,
     // 31-ago-2026): con algunos proveedores se sabe que se les debe pero no
@@ -9830,7 +10051,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
     if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
-      return toast("El desglose del pago combinado debe sumar exactamente el total de la recepción", "error");
+      return toast(
+        filasDesglose.length < 2
+          ? "El pago combinado necesita al menos dos formas de pago con un monto puesto — agrega otra, o cambia el tipo de pago si en realidad es solo una."
+          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totals.net * 1.19)} — ajusta los montos hasta que calcen exacto.`,
+        "error"
+      );
     }
 
     const [latestProducts, latestMovements, latestInvoicesIndex, latestPurchaseItems, latestSupplierLedger] = await Promise.all([
@@ -9840,6 +10066,20 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       loadJSON("purchase-items-log", purchaseItems),
       loadJSON("supplier-ledger", supplierLedger),
     ]);
+
+    // ¿Se está cruzando entre "a crédito" y "pagada"? Se decide recién acá,
+    // con el libro de crédito recién releído de la base (no con lo que haya
+    // en pantalla, que puede estar atrasado) — es la única forma de estar
+    // seguros de si ya hay algún abono registrado a este proveedor.
+    const cruzaLimiteCredito = isCredito !== editContext.isCredito;
+    if (cruzaLimiteCredito) {
+      const huboAbonoAlProveedor = latestSupplierLedger.some(
+        m => m.supplierId === editContext.originalInvoice.supplierId && m.type === "abono"
+      );
+      if (huboAbonoAlProveedor) {
+        return toast(`No se puede cambiar entre "a crédito" y "pagada": ya se le registraron abonos a ${editContext.originalInvoice.supplierName}, y un abono no queda vinculado a qué recepción paga — no hay forma segura de saber si ya cubrió parte de esta. Corrígelo a mano desde Proveedores, revisando el saldo con cuidado.`, "error");
+      }
+    }
 
     const chosenDate = new Date(`${receptionDate}T00:00:00`);
     const now = new Date();
@@ -9871,7 +10111,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       }
       const yaEscrito = codigosEscritosEnEstaRecepcion.get(codigoNorm);
       if (yaEscrito) {
-        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}"`, "error");
+        return toast(`El código "${codigo}" está repetido en esta recepción — en "${yaEscrito}" y en "${it.name.trim() || "otro producto"}". Cambia uno de los dos códigos antes de guardar.`, "error");
       }
       codigosEscritosEnEstaRecepcion.set(codigoNorm, it.name.trim() || "un producto");
     }
@@ -10015,17 +10255,21 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
       await saveJSON("purchase-items-log", newPurchaseItems);
 
-      // --- Pago o cargo asociado: se corrige el monto (y, si no es a crédito,
-      //     la forma de pago) para que quede igual al total recalculado —
-      //     nunca se crea uno nuevo al lado del que ya había.
-      if (isCredito) {
+      // --- Pago o cargo asociado ---
+      // Si no se cruzó entre crédito y pagada: se corrige el monto (y, si no
+      // es a crédito, la forma de pago) del mismo cargo o pago que ya había
+      // — nunca se crea uno nuevo al lado. Si SÍ se cruzó (cruzaLimiteCredito,
+      // más arriba — ya se comprobó que es seguro, sin abonos de por medio):
+      // se da de baja el asiento del libro que ya no corresponde y nace el
+      // del otro, igual que si fuera una recepción nueva.
+      if (!cruzaLimiteCredito && isCredito) {
         if (editContext.ledgerEntryId) {
           const newSupplierLedger = latestSupplierLedger.map(l =>
             l.id === editContext.ledgerEntryId ? { ...l, amount: totalGross, date } : l);
           setSupplierLedger(newSupplierLedger);
           await saveJSON("supplier-ledger", newSupplierLedger);
         }
-      } else if (editContext.movementId) {
+      } else if (!cruzaLimiteCredito && editContext.movementId) {
         const anteriorMov = latestMovements.find(m => m.id === editContext.movementId);
         if (anteriorMov) {
           const actualizado = {
@@ -10039,6 +10283,40 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           const newMovements = latestMovements.map(m => m.id === editContext.movementId ? actualizado : m);
           setMovements(newMovements);
           await saveJSON("movements-log", newMovements);
+        }
+      } else if (cruzaLimiteCredito && isCredito) {
+        // Pasó de pagada a crédito: nace el cargo en el libro del proveedor y
+        // se da de baja el egreso de Caja que había quedado mal.
+        const newSupplierLedger = [{
+          id: uid("provmov"), supplierId: editContext.originalInvoice.supplierId, type: "cargo",
+          amount: totalGross, date, invoiceId: editContext.invoiceId, paymentMethod: null, note: "",
+        }, ...latestSupplierLedger];
+        setSupplierLedger(newSupplierLedger);
+        await saveJSON("supplier-ledger", newSupplierLedger);
+        if (editContext.movementId) {
+          const newMovements = latestMovements.filter(m => m.id !== editContext.movementId);
+          setMovements(newMovements);
+          await saveJSON("movements-log", newMovements);
+        }
+      } else if (cruzaLimiteCredito && !isCredito) {
+        // Pasó de crédito a pagada: nace el egreso en Caja y se da de baja el
+        // cargo del libro del proveedor que había quedado mal.
+        const newMovements = [{
+          id: uid("mov"), date, type: "egreso",
+          concept: `Recepción de pedido: ${supplierName}${refNumber.trim() ? ` (Doc ${refNumber.trim()})` : ""}`,
+          amount: totalGross,
+          category: "Compra de mercadería",
+          auto: true,
+          supplierId: editContext.originalInvoice.supplierId || null, invoiceId: editContext.invoiceId,
+          paymentMethod: esCombinado ? "Pago combinado" : paymentMethod,
+          ...(esCombinado ? { paymentBreakdown: filasDesglose.map(d => ({ method: d.method, amount: Number(d.amount) })) } : {}),
+        }, ...latestMovements];
+        setMovements(newMovements);
+        await saveJSON("movements-log", newMovements);
+        if (editContext.ledgerEntryId) {
+          const newSupplierLedger = latestSupplierLedger.filter(l => l.id !== editContext.ledgerEntryId);
+          setSupplierLedger(newSupplierLedger);
+          await saveJSON("supplier-ledger", newSupplierLedger);
         }
       }
     } catch (e) {
@@ -10170,6 +10448,22 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
             La mercadería entra al stock igual, pero no se registra como gasto de caja: queda anotada como deuda con {supplier.trim() || "el proveedor"}{duePaymentDate ? " hasta esa fecha" : " sin fecha límite todavía"} — ver Proveedores.
           </p>
         )}
+        {/* Aviso persistente (no un toast que se pueda perder) cuando la
+            corrección cruza entre "a crédito" y "pagada" — pedido de Fran,
+            oct. 2026, después de que un cambio así se viera guardado en
+            pantalla pero no se confirmara al volver a mirar la recepción. El
+            cambio SÍ se guarda ahora (ver confirmEditReception), salvo que ya
+            haya abonos registrados a este proveedor — eso recién se sabe al
+            guardar, con datos frescos de la base, así que acá solo se avisa
+            que el cruce está pasando. */}
+        {editingInvoiceId && editContext && (paymentMethod === "Crédito con el proveedor") !== editContext.isCredito && (
+          <div className="rounded-lg p-3 mb-3 flex items-start gap-2" style={{ background: C.brassSoft, border: `1.5px solid ${C.brass}` }}>
+            <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" style={{ color: C.brassText }} />
+            <p className="text-xs" style={{ color: C.brassText }}>
+              Estás cambiando esta recepción entre "a crédito" y "pagada" — al guardar se da de baja {editContext.isCredito ? "el cargo en el libro del proveedor" : "el gasto en Caja"} que había quedado mal y nace {editContext.isCredito ? "el gasto en Caja" : "el cargo en el libro del proveedor"} correcto. Si ya se le registraron abonos a este proveedor, no se podrá guardar así — el aviso lo dirá al confirmar.
+            </p>
+          </div>
+        )}
         {paymentMethod === "Pago combinado" && (
           <div className="rounded-lg p-3 mb-3 space-y-2" style={{ background: C.paperDark }}>
             <p className="text-xs" style={{ color: C.gray }}>Con qué medios se pagó y cuánto con cada uno</p>
@@ -10282,6 +10576,15 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
                 <MasResultados mostrados={nameMatches.length} total={nameHits.total} />
               </div>
             )}
+            {nameMatches.length === 0 && nameQuery.trim().length >= 2 && (nameHits.sugerencias || []).length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1.5 rounded-lg overflow-hidden shadow-lg" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+                <SugerenciasParecidas
+                  sugerencias={nameHits.sugerencias}
+                  obtenerTexto={(p) => p.name}
+                  onElegir={(p) => addExistingDraft(p)}
+                />
+              </div>
+            )}
           </div>
           <Btn variant="ghost" size="sm" icon={Plus} onClick={addNewDraft}>Producto nuevo (no está en el catálogo)</Btn>
         </div>
@@ -10369,7 +10672,20 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
       {quickAddSupplier && <SupplierModal initial={{ name: supplier }} onClose={() => setQuickAddSupplier(false)} onSave={saveQuickSupplier} />}
       {scannerOpen && <CameraScanner onDetect={handlePistolaScan} onClose={() => setScannerOpen(false)} />}
-      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} toast={toast} onClose={() => setViewingInvoice(null)} />}
+      {viewingInvoice && (
+        <InvoiceViewerModal
+          invoiceMeta={viewingInvoice}
+          purchaseItems={purchaseItems}
+          toast={toast}
+          role={role}
+          onClose={() => setViewingInvoice(null)}
+          onEdit={(inv) => {
+            setViewingInvoice(null);
+            loadInvoiceForEdit(inv);
+            if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -10525,7 +10841,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
       withdrawals: [], reinforcements: [], status: "open",
     };
     const latest = await loadJSON("open-shifts", openShifts);
-    if (latest.length > 0) return toast("Ya hay una caja abierta", "error");
+    if (latest.length > 0) return toast("Ya hay una caja abierta — ciérrala antes de abrir una nueva. Si nadie la cerró al terminar el turno anterior, revísala en Caja antes de seguir.", "error");
     await persistOpenShifts([...latest, shift]);
     setOpeningAmount("");
     toast("Caja abierta", "success");
@@ -10948,7 +11264,7 @@ function BreadDayCloseCard({ products, setProducts, movements, setMovements, bre
 
   async function confirmClose() {
     if (totalOut <= 0) return toast("Ingresa al menos una cantidad", "error");
-    if (overStock) return toast("Esa cantidad supera el stock actual de pan fresco", "error");
+    if (overStock) return toast("Esa cantidad supera el stock actual de pan fresco — ajústala a lo que realmente queda.", "error");
     setSaving(true);
     try {
       const latestProducts = await loadJSON("products-catalog", products);
@@ -11681,7 +11997,7 @@ const TOPE_BUSQUEDA = 60;
 
 function buscarProductos(products, texto, tope = TOPE_BUSQUEDA) {
   const q = normalize(texto).trim();
-  if (!q) return { lista: [], total: 0 };
+  if (!q) return { lista: [], total: 0, sugerencias: [] };
   const encontrados = [];
   for (const p of products) {
     const nombre = normalize(p.name);
@@ -11693,7 +12009,12 @@ function buscarProductos(products, texto, tope = TOPE_BUSQUEDA) {
   encontrados.sort((a, b) =>
     (b.empieza - a.empieza) || (b.hay - a.hay) ||
     String(a.p.name).localeCompare(String(b.p.name), "es"));
-  return { lista: encontrados.slice(0, tope).map(x => x.p), total: encontrados.length };
+  // Sin ningún resultado por substring: antes de darlo por "no existe", se
+  // prueba por parecido (ver sugerirParecidos más arriba) — es justo lo que
+  // llevaba a crear productos repetidos cuando el nombre tenía una falta de
+  // ortografía y el que ya existía no aparecía nunca.
+  const sugerencias = encontrados.length === 0 ? sugerirParecidos(q, products, (p) => p.name) : [];
+  return { lista: encontrados.slice(0, tope).map(x => x.p), total: encontrados.length, sugerencias };
 }
 
 /* Aviso al pie del desplegable cuando la búsqueda encontró más de lo que
@@ -11704,6 +12025,36 @@ function MasResultados({ mostrados, total }) {
   return (
     <div className="px-3 py-2 text-xs text-center" style={{ background: C.paperDark, color: C.gray }}>
       Se muestran {mostrados} de {total}. Escribe un poco más para afinar la búsqueda.
+    </div>
+  );
+}
+
+/* "¿Quisiste decir...?" (pedido de Fran, oct. 2026) — se muestra en vez del
+   "sin resultados" de siempre cuando la búsqueda no encontró nada por
+   substring pero sí hay algo parecido guardado. Tocar la sugerencia hace lo
+   mismo que haberlo escrito bien: la llama `onElegir` pasa el objeto
+   encontrado (el producto, el cliente) para que la pantalla lo use tal cual
+   usaría cualquier otro resultado de la búsqueda normal. */
+function SugerenciasParecidas({ sugerencias, obtenerTexto, onElegir }) {
+  if (!sugerencias || sugerencias.length === 0) return null;
+  return (
+    <div className="px-3 py-3 text-sm" style={{ background: C.paperDark }}>
+      <p className="text-xs mb-1.5" style={{ color: C.gray }}>
+        No hay nada con ese nombre exacto. ¿Quizás quisiste decir…?
+      </p>
+      <div className="flex flex-col gap-1">
+        {sugerencias.map((s, i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={() => onElegir(s)}
+            className="text-left px-2.5 py-1.5 rounded-lg font-medium"
+            style={{ background: C.greenSoft, color: C.greenDark }}
+          >
+            {obtenerTexto(s)}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -12284,7 +12635,7 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
    pedidos). Cuando una recepción queda asociada a un proveedor
    registrado, aquí se ve el total comprado y la última compra.
 --------------------------------------------------------- */
-function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [], toast }) {
+function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [], toast, role, onEdit }) {
   const [pages, setPages] = useState([]);
   const [pageIdx, setPageIdx] = useState(0);
   const [loading, setLoading] = useState(!invoiceMeta.noDocument);
@@ -12384,6 +12735,20 @@ function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [], toast })
           {invoiceMeta.statedTotal != null && <div className="flex justify-between"><span style={{ color: C.gray }}>Monto informado</span><span className="font-mono">{formatCLP(invoiceMeta.statedTotal)}</span></div>}
           <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Monto neto</span><span className="font-mono">{formatCLP(invoiceMeta.totalNet)}</span></div>
           <div className="flex justify-between font-semibold"><span>Total con IVA</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
+          {/* Corregir cantidades, kilos o forma de pago de una recepción ya
+              guardada — pedido de Fran, oct. 2026. Solo un administrador: la
+              política de la base ya lo exige para factura_compra/compra_detalle
+              (ver loadInvoiceForEdit), esto solo evita que alguien más abra el
+              formulario para encontrarse con el error recién al confirmar. */}
+          {onEdit && (
+            role === "admin" ? (
+              <Btn full variant="dark" size="sm" icon={Pencil} onClick={() => onEdit(invoiceMeta)} className="mt-2">
+                Editar esta recepción
+              </Btn>
+            ) : (
+              <p className="text-[11px] text-center mt-2" style={{ color: C.grayLight }}>Solo un administrador puede editar una recepción ya guardada.</p>
+            )
+          )}
         </div>
       </div>
     </Modal>
@@ -12568,7 +12933,7 @@ function SupplierCard({ s, role, invoicesIndex, purchaseItems, balance, onEdit, 
   );
 }
 
-function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, supplierLedger, setSupplierLedger, movements, setMovements, products, role, toast }) {
+function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, supplierLedger, setSupplierLedger, movements, setMovements, products, role, toast, onRequestEditInvoice }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [editing, setEditing] = useState(null);
@@ -12744,7 +13109,16 @@ function SuppliersView({ suppliers, setSuppliers, invoicesIndex, purchaseItems, 
           <div className="flex gap-2"><Btn variant="ghost" full onClick={() => setDeleting(null)}>Cancelar</Btn><Btn variant="rust" full onClick={() => deleteSupplier(deleting.id)}>Eliminar</Btn></div>
         </Modal>
       )}
-      {viewingInvoice && <InvoiceViewerModal invoiceMeta={viewingInvoice} purchaseItems={purchaseItems} toast={toast} onClose={() => setViewingInvoice(null)} />}
+      {viewingInvoice && (
+        <InvoiceViewerModal
+          invoiceMeta={viewingInvoice}
+          purchaseItems={purchaseItems}
+          toast={toast}
+          role={role}
+          onClose={() => setViewingInvoice(null)}
+          onEdit={onRequestEditInvoice ? (inv) => { setViewingInvoice(null); onRequestEditInvoice(inv); } : undefined}
+        />
+      )}
       {viewingLedger && (
         <SupplierLedgerModal
           supplier={viewingLedger}
@@ -13941,7 +14315,7 @@ function ReviewProductsView({ products, setProducts, categories, suppliers, setS
       toast(`${desactivados} duplicado(s) unificados en "${nombre}"${movidos ? ` · ${movidos} unidad(es) movidas` : ""}`, "success");
     } catch (e) {
       console.error("[unificar productos]", e);
-      toast(`No se pudieron unificar: ${e?.message || e}`, "error");
+      toast(`No se pudieron unificar los productos — ${e?.message || e}. Puede ser que alguno ya tenga movimientos (ventas, recepciones) que lo impiden; si no es claro por qué, anota qué productos eran y avisa para revisarlo.`, "error");
     } finally {
       setTrabajando(null);
     }
@@ -14275,7 +14649,7 @@ function CategoriesView({ categories, setCategories, products, setProducts, toas
       // inesperado" no deja nada con qué seguir: si la base rechazó algo,
       // conviene leer qué fue.
       console.error("[unificar categorías]", e);
-      toast(`No se pudieron unificar: ${e?.message || e}`, "error");
+      toast(`No se pudieron unificar los productos — ${e?.message || e}. Puede ser que alguno ya tenga movimientos (ventas, recepciones) que lo impiden; si no es claro por qué, anota qué productos eran y avisa para revisarlo.`, "error");
     }
   }
 
@@ -14978,7 +15352,7 @@ function OfertaModal({ initial, offers, products, settings, toast, onClose, onSa
       setFotosTocadas(true);
       setQuitarPedido(false);
     } catch (err) {
-      if (toast) toast(err.message || "No se pudo leer esa foto", "error");
+      if (toast) toast(friendlyError(err, "No se pudo leer esa foto") + " — prueba con otra foto, o revisa que el archivo no esté dañado.", "error");
     }
   }
   function quitarFoto(productId) {
@@ -15880,6 +16254,15 @@ function ClientesView({ customers, setCustomers, customerLedger, setCustomerLedg
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const sorted = useMemo(() => [...filtered].sort((a, b) => balanceOf(b.id) - balanceOf(a.id)), [filtered, customerLedger]);
 
+  // "Quizás quisiste decir…" (pedido de Fran, oct. 2026): sin esto, un cliente
+  // con el nombre mal escrito en la búsqueda parecía no existir, y terminaba
+  // creándose de nuevo — con su historial de fiado quedando repartido entre
+  // dos perfiles distintos del mismo cliente.
+  const sugerenciasClientes = useMemo(() => {
+    if (!query.trim() || query.trim().length < 2 || filtered.length > 0) return [];
+    return sugerirParecidos(query, customers, (c) => c.name);
+  }, [customers, query, filtered]);
+
   const totalDebt = customers.reduce((s, c) => s + Math.max(0, balanceOf(c.id)), 0);
   const withDebt = customers.filter(c => balanceOf(c.id) > 0).length;
   const overLimit = customers.filter(c => c.creditLimit != null && balanceOf(c.id) > c.creditLimit).length;
@@ -15951,6 +16334,11 @@ function ClientesView({ customers, setCustomers, customerLedger, setCustomerLedg
         <Btn icon={Plus} onClick={() => setEditing({})}>Nuevo cliente</Btn>
       </div>
 
+      {sorted.length === 0 && sugerenciasClientes.length > 0 && (
+        <div className="rounded-xl overflow-hidden mb-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <SugerenciasParecidas sugerencias={sugerenciasClientes} obtenerTexto={(c) => c.name} onElegir={(c) => setQuery(c.name)} />
+        </div>
+      )}
       {sorted.length === 0 ? (
         <EmptyState icon={CreditCard} title="Sin clientes" hint="Registra a los clientes a los que se les puede vender fiado, o créalos directamente desde el POS al elegir 'Fiado' como forma de pago." />
       ) : (
@@ -16464,6 +16852,14 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
     const q = normalize(query);
     return products.filter(p => normalize(p.name).includes(q) || normalize(p.barcode).includes(q));
   }, [products, query]);
+  // "Quizás quisiste decir…" (pedido de Fran, oct. 2026): si la búsqueda por
+  // substring no encontró nada, antes de dar el producto por inexistente se
+  // prueba por parecido — justo lo que llevaba a crear de nuevo un producto
+  // que, con el nombre bien escrito, ya estaba en el catálogo.
+  const searchSugerencias = useMemo(() => {
+    if (!query || query.trim().length < 2 || (searchResults && searchResults.length > 0)) return [];
+    return sugerirParecidos(query, products, (p) => p.name);
+  }, [products, query, searchResults]);
 
   const sectionItems = useMemo(() => {
     if (selectedSection === "__unclassified__") return products.filter(isUnclassified);
@@ -16671,6 +17067,9 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
             <span>{searchResults.length} resultado(s) para "{query}"</span>
             <button onClick={() => setQuery("")} className="underline">Limpiar búsqueda</button>
           </div>
+          {searchResults.length === 0 && searchSugerencias.length > 0 && (
+            <SugerenciasParecidas sugerencias={searchSugerencias} obtenerTexto={(p) => p.name} onElegir={(p) => setQuery(p.name)} />
+          )}
           <ProductTable items={searchResults} resetKey={query} {...tableHandlers} showCategory categoryOptions={categoryOptions} onAssignCategory={assignCategory} />
         </div>
       ) : selectedSection === "__unclassified__" ? (
@@ -16805,7 +17204,7 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
 
   async function submit() {
     if (qtyNum <= 0) return toast("Ingresa una cantidad válida", "error");
-    if (qtyNum > product.stock) return toast("Esa cantidad supera el stock disponible", "error");
+    if (qtyNum > product.stock) return toast(`Esa cantidad supera el stock disponible (quedan ${product.stock}) — ajústala a lo que realmente hay.`, "error");
     if (needsAuthorizerName && !authorizerName.trim()) return toast("Indica qué administrador autoriza", "error");
     try {
       if (!(await autorizarConPin(pin))) {
@@ -18576,6 +18975,11 @@ function GeneralInventoryView({ products, setProducts, inventoryCounts, session,
                 <MasResultados mostrados={matches.length} total={hits.total} />
               </div>
             )}
+            {query.trim().length > 0 && matches.length === 0 && (hits.sugerencias || []).length > 0 && (
+              <div className="mt-3 rounded-xl overflow-hidden" style={{ border: `1.5px solid ${C.paperLine}`, background: "#fff" }}>
+                <SugerenciasParecidas sugerencias={hits.sugerencias} obtenerTexto={(p) => p.name} onElegir={pick} />
+              </div>
+            )}
             {query.trim().length > 0 && matches.length === 0 && (
               <>
                 <EmptyState icon={Search} title="Sin resultados" hint="Prueba con otra palabra, escanea el código, o agrégalo como producto nuevo." />
@@ -18662,6 +19066,15 @@ function ProductSearchSelect({ products, value, onSelect, placeholder }) {
             </button>
           ))}
           <MasResultados mostrados={matches.length} total={hits.total} />
+        </div>
+      )}
+      {open && matches.length === 0 && query.trim().length >= 2 && (hits.sugerencias || []).length > 0 && (
+        <div className="absolute z-20 top-full left-0 right-0 mt-1 rounded-lg overflow-hidden shadow-lg" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <SugerenciasParecidas
+            sugerencias={hits.sugerencias}
+            obtenerTexto={(p) => p.name}
+            onElegir={(p) => { onSelect(p.id); setQuery(""); setOpen(false); }}
+          />
         </div>
       )}
     </div>
@@ -18975,7 +19388,7 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
       return toast("El PIN debe tener al menos 4 dígitos", "error");
     }
     const taken = users.some(u => normalize(u.username) === normalize(form.username.trim()) && u.id !== initial?.id);
-    if (taken) return toast("Ese nombre de usuario ya está en uso", "error");
+    if (taken) return toast("Ese nombre de usuario ya está en uso — elige otro, o revisa en la lista si esa persona ya tenía un usuario creado.", "error");
     // La unicidad del PIN ya no se puede comprobar aquí: el PIN de las demás
     // personas nunca llega al navegador. La revisa el servidor al guardar
     // (galpon.fijar_pin, migración 0013) y, si choca, el error vuelve como
@@ -19107,7 +19520,7 @@ function UsersView({ users, setUsers, sales, invoicesIndex, shiftsLog, session, 
   async function deleteUser(user) {
     const admins = users.filter(u => u.role === "admin");
     if (user.role === "admin" && admins.length <= 1) {
-      toast("No puedes eliminar al único administrador", "error");
+      toast("No puedes eliminar al único administrador — el sistema necesita al menos uno con acceso completo. Crea otro administrador primero si de verdad quieres sacar a este.", "error");
       setDeleting(null);
       return;
     }
@@ -19160,7 +19573,7 @@ function MyAccountModal({ session, users, setUsers, onClose, toast }) {
         email: `${session.username}@elgalpon.local`,
         password: currentPassword,
       });
-      if (errorActual) return toast("Tu contraseña actual no es correcta", "error");
+      if (errorActual) return toast("Tu contraseña actual no es correcta — revísala bien e inténtalo de nuevo. Si no la recuerdas, pide a otro administrador que te la restablezca desde Usuarios.", "error");
 
       const { error } = await sb.auth.updateUser({ password: newPassword });
       if (error) return toast(friendlyError(error, "No se pudo cambiar la contraseña"), "error");
@@ -19314,7 +19727,7 @@ function BalanzaAjustes({ toast }) {
       /* Cancelar el cuadro de puertos del navegador no es un error: es alguien
          que se arrepintió. No hay que gritarle por eso. */
       if (e?.name === "NotFoundError") return;
-      toast(e?.message || "No se pudo abrir el puerto", "error");
+      toast((e?.message || "No se pudo abrir el puerto") + " — revisa que la balanza esté encendida y conectada por USB al computador (no al teléfono: esto necesita cable), y que ningún otro programa la esté usando.", "error");
     }
   }
 
@@ -19340,7 +19753,7 @@ function BalanzaAjustes({ toast }) {
   function conectar() {
     conPuerto(async (p) => {
       const ok = await balanza.conectar(p, ajustes);
-      toast(ok ? "Balanza conectada" : "No se pudo conectar la balanza", ok ? "success" : "error");
+      toast(ok ? "Balanza conectada" : "No se pudo conectar la balanza — revisa que esté encendida y prueba primero con \"Buscar\" para que el sistema detecte la configuración correcta.", ok ? "success" : "error");
     });
   }
 
@@ -19848,7 +20261,7 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
   async function changePin() {
     // El PIN vive en la base guardado con bcrypt. Se comprueba el actual y se
     // cambia allá mismo: en ningún momento pasa por el navegador en claro.
-    if (!(await verificarPin(currentPin))) return toast("PIN actual incorrecto", "error");
+    if (!(await verificarPin(currentPin))) return toast("PIN actual incorrecto — revísalo bien e inténtalo de nuevo.", "error");
     if (!newPin || newPin.length < 4) return toast("El nuevo PIN debe tener al menos 4 dígitos", "error");
     try {
       await cambiarPin(newPin);
@@ -19931,7 +20344,7 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
         if (!parsed.products || !parsed.settings) throw new Error("no-shape");
         setRestoreFile(parsed);
       } catch {
-        toast("Ese archivo no parece ser un respaldo válido de este sistema", "error");
+        toast("Ese archivo no parece ser un respaldo válido de este sistema — asegúrate de elegir el archivo .json que generó este mismo sistema al hacer un respaldo (botón \"Descargar respaldo\"), no otro archivo.", "error");
       }
     };
     reader.readAsText(file);
@@ -19949,7 +20362,11 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
       // genérico obliga a adivinar. Queda además en la consola completo.
       console.error("[restaurar] falló", err);
       const detalle = (err && err.message) ? String(err.message) : "";
-      toast(detalle ? `No se pudo restaurar: ${detalle}` : "No se pudo restaurar el respaldo", "error");
+      toast(
+        (detalle ? `No se pudo restaurar: ${detalle}` : "No se pudo restaurar el respaldo")
+          + " — revisa que el archivo no esté dañado o incompleto e inténtalo de nuevo. No se perdió nada: la restauración no llegó a aplicarse. Si se repite, no sigas insistiendo y avisa antes de intentarlo con otro respaldo.",
+        "error"
+      );
     } finally {
       setRestoring(false);
       setRestoreFile(null);
@@ -21002,6 +21419,18 @@ export default function SistemaVentas() {
   const revisarCola = useCallback(async () => {
     try { setEnCola(await cuantosPendientes()); } catch (e) { /* sin IndexedDB */ }
   }, []);
+
+  /* Si registrar-sw.jsx detecta que el trabajador de servicio cambió de
+     versión mientras esta pestaña ya estaba abierta, lo avisa acá (ver el
+     porqué en ese archivo: es lo que hacía que el celular y la tablet, con
+     la pestaña abierta días enteros, se quedaran corriendo arreglos viejos
+     de conteos, ventas, recepciones y ediciones). */
+  const [actualizacionDisponible, setActualizacionDisponible] = useState(false);
+  useEffect(() => {
+    const avisar = () => setActualizacionDisponible(true);
+    window.addEventListener("galpon:actualizacion-disponible", avisar);
+    return () => window.removeEventListener("galpon:actualizacion-disponible", avisar);
+  }, []);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [products, setProducts] = useState([]);
   const [sales, setSales] = useState([]);
@@ -21056,16 +21485,28 @@ export default function SistemaVentas() {
   // pasa de una a la otra pantalla sin tener que ir a buscarla, e imprime la
   // etiqueta mientras el producto todavía está fresco en la cabeza.
   const [seccionProductosPendiente, setSeccionProductosPendiente] = useState(null);
-  const [toastData, setToastState] = useState(null);
+  // Cuando un administrador pide editar una recepción desde Proveedores (ver
+  // SuppliersView → InvoiceViewerModal), la corrección en sí solo sabe hacerse
+  // en la pestaña Recepción (ahí vive loadInvoiceForEdit, con el borrador y el
+  // resto del formulario). Esto deja la factura pedida a mano mientras se
+  // cambia de pestaña, el mismo mecanismo que seccionProductosPendiente de
+  // arriba, para que ReceivingView la recoja apenas se monta.
+  const [facturaPendienteDeEditar, setFacturaPendienteDeEditar] = useState(null);
+
+  // Cola de avisos de sistema (ver AvisoDeSistema más arriba). Antes "toast"
+  // reemplazaba de una el único aviso que hubiera en pantalla y se borraba
+  // solo con un timer — si dos cosas avisaban seguidas, la primera se podía
+  // perder sin que nadie la alcanzara a leer. Ahora cada llamada a toast()
+  // se agrega al final de la fila y se queda ahí hasta que la persona toque
+  // "Continuar": nada desaparece solo, y nada se pisa con lo siguiente.
+  const [colaAvisos, setColaAvisos] = useState([]);
+  const avisoActual = colaAvisos[0] || null;
+  const cerrarAvisoActual = useCallback(() => {
+    setColaAvisos((prev) => prev.slice(1));
+  }, []);
 
   const toast = useCallback((msg, type = "success") => {
-    setToastState({ msg, type });
-    // Los errores largos se quedan más tiempo en pantalla — alcanzar a leerlos
-    // importa más que ser breve, sobre todo en el celular, donde a veces se
-    // vuelve a mirar la pantalla recién un rato después de tocar el botón.
-    // Los éxitos (siempre cortos) se quedan en lo de siempre.
-    const duracion = type === "error" ? Math.min(7000, Math.max(2400, msg.length * 55)) : 2400;
-    setTimeout(() => setToastState(null), duracion);
+    setColaAvisos((prev) => [...prev, { msg, type, id: uid("aviso") }]);
   }, []);
 
   // Salir cierra la sesión en Supabase y borra las copias en memoria, para que
@@ -21302,7 +21743,7 @@ export default function SistemaVentas() {
         }
         if (r.trabadas.length) {
           console.error("[pendientes] no se pudieron subir", r.trabadas);
-          toast(`${r.trabadas.length} operación(es) no se pudieron subir. Revisa la consola.`, "error");
+          toast(`${r.trabadas.length} operación(es) guardadas en este equipo quedaron sin poder subirse a la base — no fue por falta de internet (eso se reintenta solo), fue otra cosa. No se perdieron: siguen guardadas acá. Avísame con el detalle (una venta, una recepción, un conteo) para revisarlas directo.`, "error");
         }
       } catch (e) {
         console.error("[pendientes] fallo al vaciar la cola", e);
@@ -21342,7 +21783,7 @@ export default function SistemaVentas() {
       <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <style>{FONTS}</style>
         <LoginScreen users={users} businessName={settings.businessName} businessLogo={settings.businessLogo} onLogin={(s) => { setModoVenta(false); setSaltarInventarioGeneral(false); setTab("pos"); setVisitedTabs(new Set(["pos"])); setSession(s); }} toast={toast} />
-        <Toast toast={toastData} />
+        <AvisoDeSistema aviso={avisoActual} onContinuar={cerrarAvisoActual} />
       </div>
     );
   }
@@ -21378,7 +21819,7 @@ export default function SistemaVentas() {
           adminEscapeHatch={rolEfectivo === "admin"}
           onAdminEscape={() => setSaltarInventarioGeneral(true)}
         />
-        <Toast toast={toastData} />
+        <AvisoDeSistema aviso={avisoActual} onContinuar={cerrarAvisoActual} />
       </div>
     );
   }
@@ -21585,6 +22026,7 @@ export default function SistemaVentas() {
             un almacén donde la conexión se corta sola, no saberlo es lo que
             hace perder plata. */}
         <BarraDeConexion enCola={enCola} onSubir={async () => { await subirLoPendiente().then(r => setEnCola(r.quedan)); refrescarAhora(); }} />
+        <BarraDeActualizacion disponible={actualizacionDisponible} onRecargar={() => window.location.reload()} />
 
         {/* En Vender el ancho tope es mayor: es la pantalla del mesón, la que
             se usa todo el día, y en un monitor ancho el tope normal (max-w-6xl)
@@ -21598,12 +22040,12 @@ export default function SistemaVentas() {
         <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} /></TabPane>
+        <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} facturaPendienteDeEditar={facturaPendienteDeEditar} setFacturaPendienteDeEditar={setFacturaPendienteDeEditar} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "consumos"} visited={visitedTabs.has("consumos")}><ConsumosView toast={toast} /></TabPane>}
         <TabPane active={tab === "revisar"} visited={visitedTabs.has("revisar")}><ReviewProductsView products={products} setProducts={setProducts} categories={categories} suppliers={suppliers} setSuppliers={setSuppliers} settings={settings} setSettings={setSettings} productGroups={productGroups} setProductGroups={setProductGroups} role={rolEfectivo} session={session} toast={toast} seccionPendiente={seccionProductosPendiente} onSeccionPendienteConsumida={() => setSeccionProductosPendiente(null)} /></TabPane>
         {rolEfectivo === "admin" && <TabPane active={tab === "categorias"} visited={visitedTabs.has("categorias")}><CategoriesView categories={categories} setCategories={setCategories} products={products} setProducts={setProducts} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "ofertas"} visited={visitedTabs.has("ofertas")}><OfertasView offers={offers} setOffers={setOffers} clearances={clearances} setClearances={setClearances} products={products} sales={sales} settings={settings} toast={toast} /></TabPane>}
-        {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} /></TabPane>}
+        {rolEfectivo === "admin" && <TabPane active={tab === "proveedores"} visited={visitedTabs.has("proveedores")}><SuppliersView suppliers={suppliers} setSuppliers={setSuppliers} invoicesIndex={invoicesIndex} purchaseItems={purchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} movements={movements} setMovements={setMovements} products={products} role={rolEfectivo} toast={toast} onRequestEditInvoice={(inv) => { setFacturaPendienteDeEditar(inv); setTab("recepcion"); }} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "clientes"} visited={visitedTabs.has("clientes")}><ClientesView customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} movements={movements} setMovements={setMovements} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "egresos"} visited={visitedTabs.has("egresos")}><ExpensesView movements={movements} setMovements={setMovements} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} toast={toast} /></TabPane>}
         {rolEfectivo === "admin" && <TabPane active={tab === "sueldos"} visited={visitedTabs.has("sueldos")}><PayrollPanel workers={workers} setWorkers={setWorkers} movements={movements} setMovements={setMovements} session={session} toast={toast} /></TabPane>}
@@ -21644,7 +22086,7 @@ export default function SistemaVentas() {
           }}
         />
       )}
-      <Toast toast={toastData} />
+      <AvisoDeSistema aviso={avisoActual} onContinuar={cerrarAvisoActual} />
     </div>
   );
 }
