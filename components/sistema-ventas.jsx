@@ -6389,6 +6389,15 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
    ficha a la que volver. */
 const VENTANA_MAS_VENDIDOS_MS = 30 * 24 * 60 * 60 * 1000;
 const TOPE_MAS_VENDIDOS = 12;
+// Excluidos a mano (pedido de Fran, 31-oct-2026): "Vaso pluma Vit" se vende
+// seguido, pero no es el tipo de producto que agiliza nada apareciendo
+// arriba — al sacarlo, el siguiente más vendido (en este caso "Pichanga")
+// sube solo a ocupar su lugar, sin tocar el resto del orden. Para agregar o
+// quitar otro producto de esta lista a mano, basta con sumar o sacar su id
+// acá abajo.
+const EXCLUIDOS_MAS_VENDIDOS = new Set([
+  "d33603b0-c20d-4ede-8895-debfe56b45e2", // Vaso pluma Vit
+]);
 
 function MasVendidosPanel({ products, sales, clearances, onAdd }) {
   const masVendidos = useMemo(() => {
@@ -6404,7 +6413,7 @@ function MasVendidosPanel({ products, sales, clearances, onAdd }) {
     if (unidadesPorId.size === 0) return [];
     return products
       .map(p => ({ p, unidades: unidadesPorId.get(p.id) || 0 }))
-      .filter(e => e.unidades > 0)
+      .filter(e => e.unidades > 0 && !EXCLUIDOS_MAS_VENDIDOS.has(e.p.id))
       .sort((a, b) => b.unidades - a.unidades)
       .slice(0, TOPE_MAS_VENDIDOS)
       .map(e => e.p);
