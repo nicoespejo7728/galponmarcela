@@ -10760,6 +10760,7 @@ function ShiftDetailModal({ shift, onClose }) {
           ))}
         </div>
         <div className="flex justify-between font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total ventas ({shift.salesCount})</span><span className="font-mono">{formatCLP(shift.salesTotal)}</span></div>
+        <div className="flex justify-between"><span style={{ color: C.gray }}>Compras del día ({shift.purchasesCount || 0})</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(shift.purchasesTotal || 0)}</span></div>
         {(shift.salesBySeller || []).length > 0 && (
           <div className="pt-1 pb-1 space-y-0.5">
             <div className="text-xs font-semibold" style={{ color: C.gray }}>Desglose por vendedor</div>
@@ -10799,7 +10800,7 @@ function ShiftDetailModal({ shift, onClose }) {
   );
 }
 
-function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
+function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
   const [openingAmount, setOpeningAmount] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [reinforceOpen, setReinforceOpen] = useState(false);
@@ -10855,6 +10856,24 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
     // la venta misma (cada vendedor entra con su propia cuenta al sistema).
     return sales.filter(s => new Date(s.date).getTime() >= start);
   }, [sales, sharedShift]);
+
+  // "Compras del día" (pedido de Fran, nov. 2026): mismo criterio que las
+  // ventas del turno — todas las recepciones registradas desde que se abrió
+  // esta caja, sin importar quién las hizo ni la forma de pago. Se incluyen
+  // las a crédito igual que el fiado cuenta en el total de ventas, aunque
+  // ninguna de las dos mueva efectivo de caja — lo que se busca acá es el
+  // total comprado en el turno, no el egreso de caja (ese ya se ve en
+  // Egresos y en el libro de cada proveedor).
+  const shiftPurchasesList = useMemo(() => {
+    if (!sharedShift) return [];
+    const start = new Date(sharedShift.openedAt).getTime();
+    return (invoicesIndex || []).filter(inv => new Date(inv.date).getTime() >= start);
+  }, [invoicesIndex, sharedShift]);
+
+  const purchasesSummary = useMemo(() => {
+    const total = shiftPurchasesList.reduce((a, inv) => a + inv.totalGross, 0);
+    return { total, count: shiftPurchasesList.length };
+  }, [shiftPurchasesList]);
 
   const summary = useMemo(() => {
     // "Fiado" cuenta como venta del turno (para el total), pero no aporta
@@ -10929,6 +10948,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
       openingAmount: sharedShift.openingAmount,
       salesByMethod: summary.byMethod, salesTotal: summary.total, salesCount: summary.count,
       salesBySeller,
+      purchasesTotal: purchasesSummary.total, purchasesCount: purchasesSummary.count,
       withdrawals: sharedShift.withdrawals, withdrawalsTotal,
       reinforcements: sharedShift.reinforcements || [], reinforcementsTotal,
       expectedCash, countedCash: Number(countedCash),
@@ -10986,6 +11006,10 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
             <div className="font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(summary.byMethod[method] || 0)}</div>
           </div>
         ))}
+        <div className="rounded-xl p-3.5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Compras del día</div>
+          <div className="font-mono font-semibold" style={{ color: C.rust }}>{formatCLP(purchasesSummary.total)}</div>
+        </div>
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -22037,7 +22061,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} invoicesIndex={invoicesIndex} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} facturaPendienteDeEditar={facturaPendienteDeEditar} setFacturaPendienteDeEditar={setFacturaPendienteDeEditar} /></TabPane>
