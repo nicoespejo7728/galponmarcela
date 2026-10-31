@@ -6371,6 +6371,97 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
   );
 }
 
+/* Pedido de Fran (31-oct-2026): un acceso rápido aparte, ARRIBA del Catálogo
+   rápido de siempre, armado solo con lo que de verdad más se vende — los
+   mismos productos que aparecen en el ranking "por unidades vendidas" de
+   Análisis — para no tener que ir bajando por las secciones a buscar lo que
+   se toca a cada rato. A diferencia del Catálogo rápido (que depende de
+   marcar cada producto a mano con la casilla "acceso rápido"), este no
+   necesita ninguna configuración: se arma solo mirando los últimos 30 días
+   de venta, y se reordena solo si cambia lo que más se vende — ningún
+   producto "nace" acá, así que si todavía no hay ventas no se muestra nada
+   (ver masVendidos.length === 0 más abajo).
+
+   Cuenta por UNIDADES vendidas (no por ingresos): lo que importa acá es qué
+   se toca más veces en el mesón, no qué deja más plata — un producto caro
+   que se vende poco no agiliza nada apareciendo arriba. Un producto temporal
+   (sin productId real, ver ProductoTemporal) no se cuenta: no hay ninguna
+   ficha a la que volver. */
+const VENTANA_MAS_VENDIDOS_MS = 30 * 24 * 60 * 60 * 1000;
+const TOPE_MAS_VENDIDOS = 8;
+
+function MasVendidosPanel({ products, sales, clearances, onAdd }) {
+  const masVendidos = useMemo(() => {
+    const ahora = Date.now();
+    const unidadesPorId = new Map();
+    for (const s of sales) {
+      if (ahora - new Date(s.date).getTime() > VENTANA_MAS_VENDIDOS_MS) continue;
+      for (const it of s.items) {
+        if (!it.productId) continue;
+        unidadesPorId.set(it.productId, (unidadesPorId.get(it.productId) || 0) + it.qty);
+      }
+    }
+    if (unidadesPorId.size === 0) return [];
+    return products
+      .map(p => ({ p, unidades: unidadesPorId.get(p.id) || 0 }))
+      .filter(e => e.unidades > 0)
+      .sort((a, b) => b.unidades - a.unidades)
+      .slice(0, TOPE_MAS_VENDIDOS)
+      .map(e => e.p);
+  }, [products, sales]);
+
+  // Nada que mostrar todavía (negocio nuevo, o ninguna venta en 30 días) —
+  // se omite el panel entero en vez de mostrar una caja vacía arriba del
+  // Catálogo rápido de siempre.
+  if (masVendidos.length === 0) return null;
+
+  return (
+    <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+      <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
+        <TrendingUp size={17} style={{ color: C.greenDark }} />
+        <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Lo que más se vende</h2>
+        <span className="ml-auto text-xs" style={{ color: C.gray }}>Últimos 30 días</span>
+      </header>
+      <div className="grid grid-cols-2 gap-2.5 p-4">
+        {masVendidos.map(p => {
+          const outOfStock = p.stock <= 0;
+          const clearance = liquidacionDeProducto(p.id, clearances);
+          return (
+            <button
+              key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
+              className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
+              style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
+            >
+              <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>
+                {p.name}
+                {clearance && !outOfStock && (
+                  <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
+                )}
+                {p.isGrupo && (
+                  <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
+                )}
+              </span>
+              <span className="flex items-end justify-between gap-1">
+                {outOfStock ? (
+                  <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
+                ) : (
+                  <span className="flex items-baseline gap-1.5">
+                    {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+                    <span className="text-base font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
+                      {formatCLP(clearance ? clearance.price : p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+                    </span>
+                  </span>
+                )}
+                {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 /* La caja es una sola y la comparte todo el equipo, así que el login no basta
    para saber quién hizo cada venta. Antes de cobrar se pide elegir el nombre
    e ingresar el PIN DE VENDEDOR de esa persona (se configura en Usuarios,
@@ -7703,7 +7794,8 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           </div>
         </section>
 
-        <div className="order-2 min-w-0">
+        <div className="order-2 min-w-0 space-y-3">
+          <MasVendidosPanel products={productosYGrupos} sales={sales} clearances={clearances} onAdd={addToCart} />
           <QuickCatalogPanel products={productosYGrupos} clearances={clearances} onAdd={addToCart}
             onProductoTemporal={productoTemporalDisponible ? agregarProductoTemporal : null} />
         </div>
