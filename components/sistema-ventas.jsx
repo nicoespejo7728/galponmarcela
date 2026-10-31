@@ -6933,13 +6933,20 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     // precio rebajado puntual que el administrador dejó corriendo desde
     // "Ofertas" para darle salida a stock parado.
     const clearance = liquidacionDeProducto(product.id, clearances);
+    // Productos de stock ilimitado (pedido de Fran, nov. 2026 — las
+    // impresiones fueron el primer caso): no tienen unidades que se puedan
+    // agotar, así que ningún tope de stock les aplica. Tratarlos acá como si
+    // tuvieran stock infinito evita tener que repetir esta excepción en cada
+    // chequeo de abajo y en la edición de cantidad en el carrito (que usa el
+    // "stock" que queda guardado en la línea del carrito).
+    const stockDisponible = product.stockIlimitado ? Infinity : product.stock;
     setCart(prev => {
       const existing = prev.find(i => i.productId === product.id);
       if (product.unitType === "peso") {
         const addQty = Number(weightKg) || 0;
         if (addQty <= 0) return prev;
         const already = existing ? existing.qty : 0;
-        if (already + addQty > product.stock) { toast(`Sin stock suficiente de "${product.name}" — queda menos de lo que intentas agregar. Baja la cantidad, o ingresa stock nuevo desde Recepción si ya llegó y no se ha registrado.`, "error"); return prev; }
+        if (already + addQty > stockDisponible) { toast(`Sin stock suficiente de "${product.name}" — queda menos de lo que intentas agregar. Baja la cantidad, o ingresa stock nuevo desde Recepción si ya llegó y no se ha registrado.`, "error"); return prev; }
         // Igual que en el grupo de arriba: la línea que se acaba de tocar
         // sube al principio, se esté agregando recién o sumando a una que ya
         // estaba en el carrito.
@@ -6947,15 +6954,16 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
         return [{
           productId: product.id, barcode: product.barcode, name: product.name,
           price: clearance ? clearance.price : product.price,
-          cost: product.cost, qty: addQty, stock: product.stock, unitType: "peso", category: product.category,
+          cost: product.cost, qty: addQty, stock: stockDisponible, unitType: "peso", category: product.category,
           isLiquidacion: !!clearance,
+          ...(product.stockIlimitado ? { unlimitedStock: true } : {}),
         }, ...prev];
       }
       if (existing) {
-        if (existing.qty >= product.stock) { toast(`Sin más stock de "${product.name}" — ya está en el carrito todo el stock disponible. No se puede agregar más hasta que entre stock nuevo por Recepción.`, "error"); return prev; }
+        if (existing.qty >= stockDisponible) { toast(`Sin más stock de "${product.name}" — ya está en el carrito todo el stock disponible. No se puede agregar más hasta que entre stock nuevo por Recepción.`, "error"); return prev; }
         return [{ ...existing, qty: existing.qty + 1 }, ...prev.filter(i => i.productId !== product.id)];
       }
-      if (product.stock <= 0) { toast(`"${product.name}" no tiene stock — no se puede vender sin stock registrado. Ingrésalo desde Recepción si llegó mercadería, o corrígelo desde Inventario si el producto sí está físicamente y el número está mal.`, "error"); return prev; }
+      if (stockDisponible <= 0) { toast(`"${product.name}" no tiene stock — no se puede vender sin stock registrado. Ingrésalo desde Recepción si llegó mercadería, o corrígelo desde Inventario si el producto sí está físicamente y el número está mal.`, "error"); return prev; }
       // Siempre se cobra el precio vigente del producto (o el de liquidación,
       // si tiene). Antes, si quedaba stock de antes de la última baja de
       // precio, la línea completa se cobraba al precio viejo hasta agotar
@@ -6966,9 +6974,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       return [{
         productId: product.id, barcode: product.barcode, name: product.name,
         price: clearance ? clearance.price : product.price,
-        cost: product.cost, qty: 1, stock: product.stock, unitType: "unidad",
+        cost: product.cost, qty: 1, stock: stockDisponible, unitType: "unidad",
         category: product.category,
         isLiquidacion: !!clearance,
+        ...(product.stockIlimitado ? { unlimitedStock: true } : {}),
       }, ...prev];
     });
   }
@@ -7250,6 +7259,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
           price: i.price + recargo, cost: i.cost, unitType: i.unitType,
           ...(recargo ? { cardSurcharge: recargo } : {}),
           ...(discount ? { discount } : {}),
+          // Productos de stock ilimitado (ver addToCart): este dato viaja
+          // hasta guardarVenta (operacion.js) para que el kárdex no les
+          // descuente ninguna unidad al vender.
+          ...(i.unlimitedStock ? { unlimitedStock: true } : {}),
         };
         return [base];
       }),
@@ -7268,6 +7281,9 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
       boletaEmitida: boletaEmitidaFinal,
     };
     const newProducts = latestProducts.map(p => {
+      // Stock ilimitado: no se le descuenta nada en pantalla (ver también el
+      // kárdex en guardarVenta, operacion.js, que es el que de verdad manda).
+      if (p.stockIlimitado) return p;
       const item = cart.find(i => i.productId === p.id);
       if (item) {
         const nextStock = Math.max(0, p.stock - item.qty);
@@ -7600,7 +7616,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                   <button key={p.id} onClick={() => { addToCart(p); setNameQuery(""); }} className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-black/[.04] text-left" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
                     <span className="truncate" style={{ color: C.ink }}>{p.name}{clearance && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>liquidación</span>}{p.isGrupo && <span className="ml-1.5 text-[10px] font-normal px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>grupo</span>}</span>
                     <span className="flex items-center gap-2 flex-shrink-0">
-                      <span className="text-xs font-mono" style={{ color: C.gray }}>stock {p.stock}{p.unitType === "peso" ? " kg" : ""}</span>
+                      <span className="text-xs font-mono" style={{ color: C.gray }}>{p.stockIlimitado ? "sin límite" : `stock ${p.stock}${p.unitType === "peso" ? " kg" : ""}`}</span>
                       {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
                       <span className="font-semibold font-mono" style={{ color: clearance ? C.rust : C.greenDark }}>{formatCLP(clearance ? clearance.price : p.price)}{p.unitType === "peso" ? "/kg" : ""}</span>
                     </span>
@@ -10760,7 +10776,6 @@ function ShiftDetailModal({ shift, onClose }) {
           ))}
         </div>
         <div className="flex justify-between font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total ventas ({shift.salesCount})</span><span className="font-mono">{formatCLP(shift.salesTotal)}</span></div>
-        <div className="flex justify-between"><span style={{ color: C.gray }}>Compras del día ({shift.purchasesCount || 0})</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(shift.purchasesTotal || 0)}</span></div>
         {(shift.salesBySeller || []).length > 0 && (
           <div className="pt-1 pb-1 space-y-0.5">
             <div className="text-xs font-semibold" style={{ color: C.gray }}>Desglose por vendedor</div>
@@ -10800,7 +10815,7 @@ function ShiftDetailModal({ shift, onClose }) {
   );
 }
 
-function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
+function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
   const [openingAmount, setOpeningAmount] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [reinforceOpen, setReinforceOpen] = useState(false);
@@ -10856,24 +10871,6 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
     // la venta misma (cada vendedor entra con su propia cuenta al sistema).
     return sales.filter(s => new Date(s.date).getTime() >= start);
   }, [sales, sharedShift]);
-
-  // "Compras del día" (pedido de Fran, nov. 2026): mismo criterio que las
-  // ventas del turno — todas las recepciones registradas desde que se abrió
-  // esta caja, sin importar quién las hizo ni la forma de pago. Se incluyen
-  // las a crédito igual que el fiado cuenta en el total de ventas, aunque
-  // ninguna de las dos mueva efectivo de caja — lo que se busca acá es el
-  // total comprado en el turno, no el egreso de caja (ese ya se ve en
-  // Egresos y en el libro de cada proveedor).
-  const shiftPurchasesList = useMemo(() => {
-    if (!sharedShift) return [];
-    const start = new Date(sharedShift.openedAt).getTime();
-    return (invoicesIndex || []).filter(inv => new Date(inv.date).getTime() >= start);
-  }, [invoicesIndex, sharedShift]);
-
-  const purchasesSummary = useMemo(() => {
-    const total = shiftPurchasesList.reduce((a, inv) => a + inv.totalGross, 0);
-    return { total, count: shiftPurchasesList.length };
-  }, [shiftPurchasesList]);
 
   const summary = useMemo(() => {
     // "Fiado" cuenta como venta del turno (para el total), pero no aporta
@@ -10948,7 +10945,6 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
       openingAmount: sharedShift.openingAmount,
       salesByMethod: summary.byMethod, salesTotal: summary.total, salesCount: summary.count,
       salesBySeller,
-      purchasesTotal: purchasesSummary.total, purchasesCount: purchasesSummary.count,
       withdrawals: sharedShift.withdrawals, withdrawalsTotal,
       reinforcements: sharedShift.reinforcements || [], reinforcementsTotal,
       expectedCash, countedCash: Number(countedCash),
@@ -11006,10 +11002,6 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
             <div className="font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(summary.byMethod[method] || 0)}</div>
           </div>
         ))}
-        <div className="rounded-xl p-3.5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <div className="text-xs mb-1" style={{ color: C.gray }}>Compras del día</div>
-          <div className="font-mono font-semibold" style={{ color: C.rust }}>{formatCLP(purchasesSummary.total)}</div>
-        </div>
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -11575,7 +11567,9 @@ function buildCategoryInvestmentStats(products, sales, lastSaleMap, windowDays) 
     .map(b => {
       const catalog = catalogByCat.get(b.cat) || [];
       const activeStock = catalog.filter(p => p.stock > 0);
-      const outOfStock = catalog.filter(p => p.stock <= 0).length;
+      // Stock ilimitado (impresiones y similares): no cuentan como "sin
+      // stock" ni "bajo el mínimo" — nunca llevan stock de verdad.
+      const outOfStock = catalog.filter(p => !p.stockIlimitado && p.stock <= 0).length;
       const belowMin = catalog.filter(p => p.stock > 0 && p.stock <= p.minStock).length;
       const stalledCount = activeStock.filter(p => {
         const last = lastSaleMap.get(p.id);
@@ -12394,8 +12388,9 @@ function AnalyticsView({ sales, products, setProducts, suppliers, invoicesIndex,
       .slice(0, 8);
   }, [products, lastSaleMap]);
 
-  // --- Stock por agotarse ---
-  const lowStock = useMemo(() => products.filter(p => p.stock <= p.minStock).sort((a, b) => (a.stock / (a.minStock || 1)) - (b.stock / (b.minStock || 1))), [products]);
+  // --- Stock por agotarse --- (los de stock ilimitado quedan afuera: nunca
+  // "se agotan", así que no tiene sentido avisar de ellos acá).
+  const lowStock = useMemo(() => products.filter(p => !p.stockIlimitado && p.stock <= p.minStock).sort((a, b) => (a.stock / (a.minStock || 1)) - (b.stock / (b.minStock || 1))), [products]);
 
   // --- Proveedores: a quién se le compra más y quién deja más rentabilidad ---
   const supplierStats = useMemo(() => {
@@ -16586,7 +16581,9 @@ function ProductTable({ items, role, suppliers, onRestock, onShrink, onEdit, onD
                 </td>
                 {role === "admin" && <td className="px-4 py-2.5 text-right font-mono" style={{ color: C.gray }}>{formatCLP(p.cost)}</td>}
                 <td className="px-4 py-2.5 text-right">
-                  <Badge tone={p.stock <= p.minStock ? "rust" : "green"}>{p.stock}{p.unitType === "peso" ? " kg" : ""}</Badge>
+                  {p.stockIlimitado
+                    ? <Badge tone="green">sin límite</Badge>
+                    : <Badge tone={p.stock <= p.minStock ? "rust" : "green"}>{p.stock}{p.unitType === "peso" ? " kg" : ""}</Badge>}
                 </td>
                 {/* Durante la marcha blanca todo el equipo puede reponer stock y
                     corregir precios; eliminar sigue siendo solo del
@@ -17040,7 +17037,7 @@ function InventoryView({ products, setProducts, movements, setMovements, purchas
     toast(`${rows.length} producto(s) importados`, "success");
   }
 
-  const lowStock = products.filter(p => p.stock <= p.minStock).length;
+  const lowStock = products.filter(p => !p.stockIlimitado && p.stock <= p.minStock).length;
   const puedeAjustar = role === "admin" || enMarchaBlanca(settings);
   function abrirEliminar(p) { setDeleteConfirmText(""); setDeleting(p); }
   const tableHandlers = { role, suppliers, puedeAjustar, onRestock: setRestocking, onShrink: setShrinking, onEdit: setEditing, onDelete: abrirEliminar, onRename: setRenaming };
@@ -22061,7 +22058,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} invoicesIndex={invoicesIndex} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} facturaPendienteDeEditar={facturaPendienteDeEditar} setFacturaPendienteDeEditar={setFacturaPendienteDeEditar} /></TabPane>
