@@ -6388,7 +6388,7 @@ function QuickCatalogPanel({ products, clearances, onAdd, onProductoTemporal }) 
    (sin productId real, ver ProductoTemporal) no se cuenta: no hay ninguna
    ficha a la que volver. */
 const VENTANA_MAS_VENDIDOS_MS = 30 * 24 * 60 * 60 * 1000;
-const TOPE_MAS_VENDIDOS = 8;
+const TOPE_MAS_VENDIDOS = 12;
 
 function MasVendidosPanel({ products, sales, clearances, onAdd }) {
   const masVendidos = useMemo(() => {
@@ -6417,42 +6417,47 @@ function MasVendidosPanel({ products, sales, clearances, onAdd }) {
 
   return (
     <section className="rounded-xl overflow-hidden flex flex-col" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-      <header className="px-4 py-3 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
-        <TrendingUp size={17} style={{ color: C.greenDark }} />
-        <h2 className="text-base font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Lo que más se vende</h2>
-        <span className="ml-auto text-xs" style={{ color: C.gray }}>Últimos 30 días</span>
+      <header className="px-3 py-2 flex items-center gap-1.5 flex-shrink-0" style={{ borderBottom: `1.5px solid ${C.paperLine}` }}>
+        <TrendingUp size={14} style={{ color: C.greenDark }} />
+        <h2 className="text-xs font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Lo que más se vende</h2>
+        <span className="ml-auto text-[10px]" style={{ color: C.gray }}>Últimos 30 días</span>
       </header>
-      <div className="grid grid-cols-2 gap-2.5 p-4">
+      {/* Fichas más chicas que las del Catálogo rápido a propósito (pedido
+          de Fran, 31-oct-2026: con 12 productos arriba, del mismo tamaño se
+          veía "tosco y grande") — menos relleno, letra más chica, altura
+          mínima más baja. Siguen siendo botones grandes para el dedo, solo
+          que más compactos. */}
+      <div className="grid grid-cols-2 gap-1.5 p-3">
         {masVendidos.map(p => {
           const outOfStock = p.stock <= 0;
           const clearance = liquidacionDeProducto(p.id, clearances);
           return (
             <button
               key={p.id} onClick={() => onAdd(p)} disabled={outOfStock}
-              className="rounded-xl p-3 text-left flex flex-col justify-between gap-2 min-h-[92px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
+              className="rounded-lg p-2 text-left flex flex-col justify-between gap-1 min-h-[58px] disabled:cursor-not-allowed active:scale-[.97] transition hover:shadow-md"
               style={{ background: outOfStock ? C.rustSoft : "#fff", border: `1.5px solid ${outOfStock ? C.rust : clearance ? C.rust : C.paperLine}`, opacity: outOfStock ? 0.7 : 1 }}
             >
-              <span className="text-sm font-semibold leading-snug line-clamp-2" style={{ color: C.ink }}>
+              <span className="text-[11px] font-semibold leading-tight line-clamp-2" style={{ color: C.ink }}>
                 {p.name}
                 {clearance && !outOfStock && (
-                  <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
+                  <span className="ml-1 text-[8px] font-bold align-middle px-1 py-0.5 rounded-full" style={{ background: C.rustSoft, color: C.rust }}>LIQ.</span>
                 )}
                 {p.isGrupo && (
-                  <span className="ml-1 text-[9px] font-bold align-middle px-1.5 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
+                  <span className="ml-1 text-[8px] font-bold align-middle px-1 py-0.5 rounded-full" style={{ background: C.paperDark, color: C.gray }}>GRUPO</span>
                 )}
               </span>
               <span className="flex items-end justify-between gap-1">
                 {outOfStock ? (
-                  <span className="text-xs font-bold" style={{ color: C.rust }}>Sin stock</span>
+                  <span className="text-[10px] font-bold" style={{ color: C.rust }}>Sin stock</span>
                 ) : (
-                  <span className="flex items-baseline gap-1.5">
-                    {clearance && <span className="text-xs font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
-                    <span className="text-base font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
-                      {formatCLP(clearance ? clearance.price : p.price)}<span className="text-xs font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
+                  <span className="flex items-baseline gap-1">
+                    {clearance && <span className="text-[10px] font-mono line-through" style={{ color: C.gray }}>{formatCLP(p.price)}</span>}
+                    <span className="text-xs font-mono font-bold leading-none" style={{ color: clearance ? C.rust : C.greenDark }}>
+                      {formatCLP(clearance ? clearance.price : p.price)}<span className="text-[10px] font-medium" style={{ color: C.gray }}>{p.unitType === "peso" ? "/kg" : ""}</span>
                     </span>
                   </span>
                 )}
-                {p.unitType === "peso" && <Scale size={14} style={{ color: C.gray }} />}
+                {p.unitType === "peso" && <Scale size={11} style={{ color: C.gray }} />}
               </span>
             </button>
           );
