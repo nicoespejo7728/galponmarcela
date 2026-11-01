@@ -21831,23 +21831,31 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, tk, us, ic, wk] = await Promise.all([
+        // Lo mínimo para que la pantalla ya sea útil: catálogo, caja, fiado, y
+        // lo que alimenta los avisos de la barra lateral (conteos, feedback,
+        // tareas). El historial largo —ventas, movimientos, cajas cerradas,
+        // facturas, líneas de compra— no hace falta para que alguien entre y
+        // empiece a vender: son las colecciones con más filas de lejos (miles
+        // de ventas y de movimientos, varios MB entre las dos) y antes se
+        // esperaban igual que las demás, bloqueando toda la pantalla de
+        // entrada hasta que la más lenta de las ~20 terminara. En la señal de
+        // celular del almacén eso se sentía como que el sistema no abría.
+        // Ahora se piden aparte, DESPUÉS, sin bloquear (ver más abajo):
+        // llegan solas a los pocos segundos y ninguna pestaña las necesita
+        // antes de que alguien la abra a propósito — los avisos de la barra
+        // lateral no dependen de ellas.
+        const [s, p, cat, ofr, liq, grp, os, sup, cu, cl, spl, fb, tk, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
           loadJSON("product-categories", []),
           loadJSON("quantity-offers", []),
           loadJSON("price-clearance", []),
           loadJSON("product-groups", []),
-          loadJSON("sales-log", []),
-          loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
-          loadJSON("shifts-log", []),
           loadJSON("suppliers", []),
           loadJSON("customers", []),
           loadJSON("customer-ledger", []),
           loadJSON("supplier-ledger", []),
-          loadJSON("invoices-index", []),
-          loadJSON("purchase-items-log", []),
           loadJSON("marcelita-feedback", []),
           loadJSON("worker-tasks", []),
           loadJSON("users", []),
@@ -21863,10 +21871,10 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setProductGroups(grp); setSales(sl); setMovements(mv);
-        setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
+        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setProductGroups(grp);
+        setOpenShifts(os); setSuppliers(sup);
         setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
-        setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb); setTasks(tk);
+        setFeedback(fb); setTasks(tk);
         setUsers(us); setInventoryCounts(ic); setWorkers(wk);
       } catch (e) {
         console.error("[carga inicial] no se pudieron leer los datos", e);
@@ -21875,6 +21883,25 @@ export default function SistemaVentas() {
         // Pase lo que pase se sale del estado de carga: quedarse girando para
         // siempre es peor que entrar y ver un aviso de que algo falló.
         if (!cancelado) setLoading(false);
+      }
+
+      // El historial largo, de fondo: no bloquea la pantalla de arriba (ya se
+      // salió de "cargando" más arriba pase lo que pase con esto). Se piden
+      // juntas pero cada una se aplica aparte, y si una falla (un corte de
+      // red momentáneo) no tira abajo a las demás — la sincronización de
+      // cada 15 segundos las vuelve a pedir solas de todas formas.
+      try {
+        const [sl, mv, sh, invIdx, pItems] = await Promise.all([
+          loadJSON("sales-log", []),
+          loadJSON("movements-log", []),
+          loadJSON("shifts-log", []),
+          loadJSON("invoices-index", []),
+          loadJSON("purchase-items-log", []),
+        ]);
+        if (cancelado) return;
+        setSales(sl); setMovements(mv); setShiftsLog(sh); setInvoicesIndex(invIdx); setPurchaseItems(pItems);
+      } catch (e) {
+        console.error("[carga inicial] no se pudo leer el historial largo (ventas, movimientos, etc.)", e);
       }
     })();
     return () => { cancelado = true; };
