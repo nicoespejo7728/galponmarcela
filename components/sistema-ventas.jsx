@@ -10777,6 +10777,7 @@ function ShiftDetailModal({ shift, onClose }) {
           ))}
         </div>
         <div className="flex justify-between font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total ventas ({shift.salesCount})</span><span className="font-mono">{formatCLP(shift.salesTotal)}</span></div>
+        <div className="flex justify-between"><span style={{ color: C.gray }}>Compras del día ({shift.purchasesCount || 0})</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(shift.purchasesTotal || 0)}</span></div>
         {(shift.salesBySeller || []).length > 0 && (
           <div className="pt-1 pb-1 space-y-0.5">
             <div className="text-xs font-semibold" style={{ color: C.gray }}>Desglose por vendedor</div>
@@ -10816,7 +10817,7 @@ function ShiftDetailModal({ shift, onClose }) {
   );
 }
 
-function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
+function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
   const [openingAmount, setOpeningAmount] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [reinforceOpen, setReinforceOpen] = useState(false);
@@ -10872,6 +10873,24 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
     // la venta misma (cada vendedor entra con su propia cuenta al sistema).
     return sales.filter(s => new Date(s.date).getTime() >= start);
   }, [sales, sharedShift]);
+
+  // "Compras del día" (pedido de Fran, nov. 2026): mismo criterio que las
+  // ventas del turno — todas las recepciones registradas desde que se abrió
+  // esta caja, sin importar quién las hizo ni la forma de pago. Se incluyen
+  // las a crédito igual que el fiado cuenta en el total de ventas, aunque
+  // ninguna de las dos mueva efectivo de caja — lo que se busca acá es el
+  // total comprado en el turno, no el egreso de caja (ese ya se ve en
+  // Egresos y en el libro de cada proveedor).
+  const shiftPurchasesList = useMemo(() => {
+    if (!sharedShift) return [];
+    const start = new Date(sharedShift.openedAt).getTime();
+    return (invoicesIndex || []).filter(inv => new Date(inv.date).getTime() >= start);
+  }, [invoicesIndex, sharedShift]);
+
+  const purchasesSummary = useMemo(() => {
+    const total = shiftPurchasesList.reduce((a, inv) => a + inv.totalGross, 0);
+    return { total, count: shiftPurchasesList.length };
+  }, [shiftPurchasesList]);
 
   const summary = useMemo(() => {
     // "Fiado" cuenta como venta del turno (para el total), pero no aporta
@@ -10946,6 +10965,7 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
       openingAmount: sharedShift.openingAmount,
       salesByMethod: summary.byMethod, salesTotal: summary.total, salesCount: summary.count,
       salesBySeller,
+      purchasesTotal: purchasesSummary.total, purchasesCount: purchasesSummary.count,
       withdrawals: sharedShift.withdrawals, withdrawalsTotal,
       reinforcements: sharedShift.reinforcements || [], reinforcementsTotal,
       expectedCash, countedCash: Number(countedCash),
@@ -11003,6 +11023,10 @@ function CajaView({ sales, openShifts, setOpenShifts, shiftsLog, setShiftsLog, s
             <div className="font-mono font-semibold" style={{ color: C.ink }}>{formatCLP(summary.byMethod[method] || 0)}</div>
           </div>
         ))}
+        <div className="rounded-xl p-3.5" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="text-xs mb-1" style={{ color: C.gray }}>Compras del día</div>
+          <div className="font-mono font-semibold" style={{ color: C.rust }}>{formatCLP(purchasesSummary.total)}</div>
+        </div>
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -21181,118 +21205,7 @@ function ActividadCard({ item, onIr }) {
   );
 }
 
-/* ---------------------------------------------------------
-   TAREAS ASIGNADAS
-   A diferencia de los avisos de arriba (que el sistema calcula solo), esto
-   es lo opuesto: un administrador encarga algo suelto del día a día —
-   limpiar, ordenar, reponer, hacer ensaladas, hacer pichanga, o cualquier
-   otra cosa que escriba— y elige a quién se lo asigna. La persona
-   asignada (o cualquier administrador) la marca como hecha cuando
-   corresponda. Vive en galpon.tarea (migración 0042), colección
-   worker-tasks. */
-const TAREA_PRESETS = ["Limpiar", "Ordenar", "Reponer", "Hacer ensaladas", "Hacer pichanga"];
-
-function NewTaskModal({ users, session, onClose, onSave, toast }) {
-  const [preset, setPreset] = useState(TAREA_PRESETS[0]);
-  const [usingCustom, setUsingCustom] = useState(false);
-  const [custom, setCustom] = useState("");
-  const [detail, setDetail] = useState("");
-  const [assignedToId, setAssignedToId] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  async function submit() {
-    const title = (usingCustom ? custom : preset).trim();
-    if (!title) return toast("Escribe o elige qué hay que hacer", "error");
-    const user = users.find(u => u.id === assignedToId);
-    if (!user) return toast("Elige a quién se le asigna", "error");
-    setSaving(true);
-    try {
-      await onSave({
-        id: uid("tarea"), title, detail: detail.trim() || null,
-        assignedToId: user.id, assignedToName: user.name,
-        assignedBy: session.name, status: "pendiente",
-        createdAt: new Date().toISOString(),
-        completedAt: null, completedBy: null,
-      });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Modal title="Nueva tarea" onClose={saving ? () => {} : onClose}>
-      <Field label="¿Qué hay que hacer?">
-        <div className="grid grid-cols-2 gap-1.5 mb-2">
-          {TAREA_PRESETS.map(p => (
-            <button
-              key={p} type="button" onClick={() => { setPreset(p); setUsingCustom(false); }}
-              className="py-1.5 rounded-md text-[11px] font-medium"
-              style={!usingCustom && preset === p ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}
-            >
-              {p}
-            </button>
-          ))}
-          <button
-            type="button" onClick={() => setUsingCustom(true)}
-            className="py-1.5 rounded-md text-[11px] font-medium"
-            style={usingCustom ? { background: C.brass, color: C.ink } : { background: C.paperDark, color: C.gray }}
-          >
-            Otra…
-          </button>
-        </div>
-        {usingCustom && (
-          <input autoFocus value={custom} onChange={e => setCustom(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Ej. Ordenar la bodega de atrás" />
-        )}
-      </Field>
-      <Field label="Detalle (opcional)">
-        <textarea value={detail} onChange={e => setDetail(e.target.value)} rows={2} className={inputCls} style={inputStyle()} placeholder="Alguna indicación extra, si hace falta…" />
-      </Field>
-      <Field label="Asignar a">
-        <select value={assignedToId} onChange={e => setAssignedToId(e.target.value)} className={inputCls} style={inputStyle()}>
-          <option value="">Elige un perfil</option>
-          {users.map(u => <option key={u.id} value={u.id}>{u.name} ({u.role === "admin" ? "Administrador" : "Vendedor"})</option>)}
-        </select>
-      </Field>
-      <Btn full icon={saving ? Loader2 : Check} onClick={submit} disabled={saving}>{saving ? "Guardando…" : "Asignar tarea"}</Btn>
-    </Modal>
-  );
-}
-
-function TaskCard({ task, session, role, onComplete, onCancel }) {
-  const isMine = task.assignedToId === session.userId;
-  const puedeCompletar = task.status === "pendiente" && (isMine || role === "admin");
-  return (
-    <div className="rounded-xl p-4 flex items-start gap-3" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-semibold" style={{ color: C.ink }}>{task.title}</div>
-        {task.detail && <div className="text-xs mt-0.5" style={{ color: C.gray }}>{task.detail}</div>}
-        <div className="text-[11px] mt-1" style={{ color: C.gray }}>
-          Asignada a {task.assignedToName}{isMine ? " (tú)" : ""} por {task.assignedBy} · {formatDate(task.createdAt)}
-        </div>
-        {task.status === "completada" && (
-          <div className="text-[11px] mt-0.5 font-medium" style={{ color: C.greenDark }}>Hecha por {task.completedBy} · {formatDate(task.completedAt)}</div>
-        )}
-      </div>
-      <div className="flex flex-col gap-1.5 flex-shrink-0 items-end">
-        <Badge tone={task.status === "completada" ? "green" : "gray"}>{task.status === "completada" ? "Hecha" : "Pendiente"}</Badge>
-        {puedeCompletar && (
-          <button onClick={() => onComplete(task.id)} className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: C.greenSoft, color: C.greenDark }}>
-            Marcar hecha
-          </button>
-        )}
-        {task.status === "pendiente" && role === "admin" && (
-          <button onClick={() => onCancel(task.id)} className="text-[11px] font-medium" style={{ color: C.gray }}>
-            Cancelar
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ActividadesView({ session, role, products, inventoryCounts, customers, customerLedger, openShifts, feedback, sales, movements, purchaseItems, settings, setTab, tasks, setTasks, users, toast }) {
-  const [creatingTask, setCreatingTask] = useState(false);
-
+function ActividadesView({ session, role, products, inventoryCounts, customers, customerLedger, openShifts, feedback, sales, movements, purchaseItems, settings, setTab }) {
   const actividades = useMemo(
     () => construirActividades({ rolEfectivo: role, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback }),
     [role, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback]
@@ -21306,90 +21219,20 @@ function ActividadesView({ session, role, products, inventoryCounts, customers, 
     { clave: "baja", titulo: "Para revisar", items: todas.filter(a => a.severidad === "baja") },
   ].filter(g => g.items.length > 0);
 
-  const misTareas = useMemo(() => {
-    const base = role === "admin" ? tasks : tasks.filter(t => t.assignedToId === session.userId);
-    return base
-      .filter(t => t.status !== "cancelada")
-      .slice()
-      .sort((a, b) => {
-        if (a.status !== b.status) return a.status === "pendiente" ? -1 : 1;
-        return new Date(b.createdAt) - new Date(a.createdAt);
-      });
-  }, [tasks, role, session]);
-  const tareasPendientes = misTareas.filter(t => t.status === "pendiente").length;
-
-  async function persistTasks(next) {
-    setTasks(next);
-    await saveJSON("worker-tasks", next);
-  }
-
-  async function createTask(task) {
-    try {
-      const latest = await loadJSON("worker-tasks", tasks);
-      await persistTasks([task, ...latest]);
-      setCreatingTask(false);
-      toast(`Tarea asignada a ${task.assignedToName}`, "success");
-    } catch (e) {
-      toast(friendlyError(e, "No se pudo guardar la tarea"), "error");
-    }
-  }
-
-  async function completeTask(id) {
-    try {
-      const latest = await loadJSON("worker-tasks", tasks);
-      const next = latest.map(t => t.id === id
-        ? { ...t, status: "completada", completedAt: new Date().toISOString(), completedBy: session.name }
-        : t);
-      await persistTasks(next);
-      toast("Tarea marcada como hecha", "success");
-    } catch (e) {
-      toast(friendlyError(e, "No se pudo actualizar la tarea"), "error");
-    }
-  }
-
-  async function cancelTask(id) {
-    try {
-      const latest = await loadJSON("worker-tasks", tasks);
-      const next = latest.map(t => t.id === id ? { ...t, status: "cancelada" } : t);
-      await persistTasks(next);
-      toast("Tarea cancelada", "success");
-    } catch (e) {
-      toast(friendlyError(e, "No se pudo cancelar la tarea"), "error");
-    }
-  }
-
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
         <Bell size={20} style={{ color: C.green }} />
         <div>
           <h2 className="text-lg font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Actividades pendientes</h2>
-          <p className="text-xs" style={{ color: C.gray }}>Lo que el sistema detectó que necesita una decisión o una acción, más las tareas que te hayan asignado — no reemplaza cada pestaña, solo junta los avisos en un lugar.</p>
+          <p className="text-xs" style={{ color: C.gray }}>Lo que el sistema detectó que necesita una decisión o una acción — no reemplaza cada pestaña, solo junta los avisos en un lugar.</p>
         </div>
-      </div>
-
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: C.gray }}>
-            Tareas asignadas{tareasPendientes > 0 ? ` (${tareasPendientes} pendiente${tareasPendientes === 1 ? "" : "s"})` : ""}
-          </div>
-          {role === "admin" && <Btn size="sm" icon={Plus} onClick={() => setCreatingTask(true)}>Nueva tarea</Btn>}
-        </div>
-        {misTareas.length === 0 ? (
-          <div className="rounded-xl p-5 text-center" style={{ background: "#fff", border: `1.5px dashed ${C.paperLine}` }}>
-            <p className="text-sm" style={{ color: C.gray }}>{role === "admin" ? "Sin tareas asignadas por ahora." : "No tienes tareas asignadas por ahora."}</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {misTareas.map(t => <TaskCard key={t.id} task={t} session={session} role={role} onComplete={completeTask} onCancel={cancelTask} />)}
-          </div>
-        )}
       </div>
 
       {todas.length === 0 ? (
         <div className="rounded-xl p-8 text-center" style={{ background: "#fff", border: `1.5px dashed ${C.paperLine}` }}>
           <CheckCircle2 size={28} style={{ color: C.green }} className="mx-auto mb-2" />
-          <p className="text-sm font-medium" style={{ color: C.ink }}>Todo al día — no hay nada más pendiente por ahora.</p>
+          <p className="text-sm font-medium" style={{ color: C.ink }}>Todo al día — no hay nada pendiente por ahora.</p>
         </div>
       ) : (
         <div className="space-y-5">
@@ -21403,8 +21246,6 @@ function ActividadesView({ session, role, products, inventoryCounts, customers, 
           ))}
         </div>
       )}
-
-      {creatingTask && <NewTaskModal users={users} session={session} onClose={() => setCreatingTask(false)} onSave={createTask} toast={toast} />}
     </div>
   );
 }
@@ -21684,7 +21525,6 @@ export default function SistemaVentas() {
   const [invoicesIndex, setInvoicesIndex] = useState([]);
   const [purchaseItems, setPurchaseItems] = useState([]);
   const [feedback, setFeedback] = useState([]);
-  const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
   const [inventoryCounts, setInventoryCounts] = useState([]);
   const [workers, setWorkers] = useState([]);
@@ -21831,33 +21671,24 @@ export default function SistemaVentas() {
     (async () => {
       setLoading(true);
       try {
-        // Lo mínimo para que la pantalla ya sea útil: catálogo, caja, fiado, y
-        // lo que alimenta los avisos de la barra lateral (conteos, feedback,
-        // tareas). El historial largo —ventas, movimientos, cajas cerradas,
-        // facturas, líneas de compra— no hace falta para que alguien entre y
-        // empiece a vender: son las colecciones con más filas de lejos (miles
-        // de ventas y de movimientos, varios MB entre las dos) y antes se
-        // esperaban igual que las demás, bloqueando toda la pantalla de
-        // entrada hasta que la más lenta de las ~20 terminara. En la señal de
-        // celular del almacén eso se sentía como que el sistema no abría.
-        // Ahora se piden aparte, DESPUÉS, sin bloquear (ver más abajo):
-        // llegan solas a los pocos segundos y ninguna pestaña las necesita
-        // antes de que alguien la abra a propósito — los avisos de la barra
-        // lateral no dependen de ellas.
-        const [s, p, cat, ofr, liq, grp, os, sup, cu, cl, spl, fb, tk, us, ic, wk] = await Promise.all([
+        const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = await Promise.all([
           loadJSON("business-settings", null),
           loadJSON("products-catalog", []),
           loadJSON("product-categories", []),
           loadJSON("quantity-offers", []),
           loadJSON("price-clearance", []),
           loadJSON("product-groups", []),
+          loadJSON("sales-log", []),
+          loadJSON("movements-log", []),
           loadJSON("open-shifts", []),
+          loadJSON("shifts-log", []),
           loadJSON("suppliers", []),
           loadJSON("customers", []),
           loadJSON("customer-ledger", []),
           loadJSON("supplier-ledger", []),
+          loadJSON("invoices-index", []),
+          loadJSON("purchase-items-log", []),
           loadJSON("marcelita-feedback", []),
-          loadJSON("worker-tasks", []),
           loadJSON("users", []),
           loadJSON("inventory-counts", []),
           loadJSON("workers", []),
@@ -21871,10 +21702,10 @@ export default function SistemaVentas() {
         // peligroso: bastaba una lectura fallida para que la aplicación creyera
         // que era la primera vez y volviera a inyectar todo el histórico.
         setSettings(s || DEFAULT_SETTINGS);
-        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setProductGroups(grp);
-        setOpenShifts(os); setSuppliers(sup);
+        setProducts(p); setCategories(cat); setOffers(ofr); setClearances(liq); setProductGroups(grp); setSales(sl); setMovements(mv);
+        setOpenShifts(os); setShiftsLog(sh); setSuppliers(sup);
         setCustomers(cu); setCustomerLedger(cl); setSupplierLedger(spl);
-        setFeedback(fb); setTasks(tk);
+        setInvoicesIndex(invIdx); setPurchaseItems(pItems); setFeedback(fb);
         setUsers(us); setInventoryCounts(ic); setWorkers(wk);
       } catch (e) {
         console.error("[carga inicial] no se pudieron leer los datos", e);
@@ -21883,25 +21714,6 @@ export default function SistemaVentas() {
         // Pase lo que pase se sale del estado de carga: quedarse girando para
         // siempre es peor que entrar y ver un aviso de que algo falló.
         if (!cancelado) setLoading(false);
-      }
-
-      // El historial largo, de fondo: no bloquea la pantalla de arriba (ya se
-      // salió de "cargando" más arriba pase lo que pase con esto). Se piden
-      // juntas pero cada una se aplica aparte, y si una falla (un corte de
-      // red momentáneo) no tira abajo a las demás — la sincronización de
-      // cada 15 segundos las vuelve a pedir solas de todas formas.
-      try {
-        const [sl, mv, sh, invIdx, pItems] = await Promise.all([
-          loadJSON("sales-log", []),
-          loadJSON("movements-log", []),
-          loadJSON("shifts-log", []),
-          loadJSON("invoices-index", []),
-          loadJSON("purchase-items-log", []),
-        ]);
-        if (cancelado) return;
-        setSales(sl); setMovements(mv); setShiftsLog(sh); setInvoicesIndex(invIdx); setPurchaseItems(pItems);
-      } catch (e) {
-        console.error("[carga inicial] no se pudo leer el historial largo (ventas, movimientos, etc.)", e);
       }
     })();
     return () => { cancelado = true; };
@@ -21945,7 +21757,6 @@ export default function SistemaVentas() {
         loadJSONStrict("invoices-index", reciente),
         loadJSONStrict("purchase-items-log", reciente),
         loadJSONStrict("marcelita-feedback", reciente),
-        loadJSONStrict("worker-tasks", reciente),
         loadJSONStrict("users"),
         loadJSONStrict("inventory-counts", reciente),
         loadJSONStrict("workers"),
@@ -21955,7 +21766,7 @@ export default function SistemaVentas() {
       // un corte de red momentáneo), esa pieza en particular simplemente se deja
       // como estaba — nunca se reemplaza el catálogo, las ventas, etc. por una
       // lista vacía solo porque la sincronización tuvo un tropiezo puntual.
-      const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, tk, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
+      const [s, p, cat, ofr, liq, grp, sl, mv, os, sh, sup, cu, cl, spl, invIdx, pItems, fb, us, ic, wk] = results.map(r => r.status === "fulfilled" ? r.value : undefined);
       if (s) setSettings(s);
       // Los datos "mutables" (catálogo, proveedores, cajas abiertas, usuarios) solo
       // se reemplazan si lo leído trae algo, o si igual no había nada localmente —
@@ -21985,7 +21796,6 @@ export default function SistemaVentas() {
       if (invIdx !== undefined) setInvoicesIndex(prev => mergeById(prev, invIdx));
       if (pItems !== undefined) setPurchaseItems(prev => mergeById(prev, pItems));
       if (fb !== undefined) setFeedback(prev => mergeById(prev, fb));
-      if (tk !== undefined) setTasks(prev => mergeById(prev, tk));
       if (ic !== undefined) setInventoryCounts(prev => mergeById(prev, ic));
       marcaSincroRef.current = Date.now();
     }
@@ -22097,7 +21907,7 @@ export default function SistemaVentas() {
     ? inventoryCounts.filter(r => r.status === "excepcion_solicitada").length
     : inventoryCounts.filter(r => r.assignedToId === session.userId && r.status === "pendiente").length;
 
-  const allData = { settings, products, categories, sales, movements, openShifts, shiftsLog, suppliers, customers, customerLedger, supplierLedger, invoicesIndex, purchaseItems, feedback, tasks, users, inventoryCounts, workers };
+  const allData = { settings, products, categories, sales, movements, openShifts, shiftsLog, suppliers, customers, customerLedger, supplierLedger, invoicesIndex, purchaseItems, feedback, users, inventoryCounts, workers };
 
   async function restoreAll(archivo) {
     // Los respaldos del sistema anterior traen identificadores propios
@@ -22117,7 +21927,7 @@ export default function SistemaVentas() {
       settings: "business-settings", products: "products-catalog", categories: "product-categories",
       sales: "sales-log", movements: "movements-log",
       openShifts: "open-shifts", shiftsLog: "shifts-log", suppliers: "suppliers", invoicesIndex: "invoices-index",
-      purchaseItems: "purchase-items-log", feedback: "marcelita-feedback", tasks: "worker-tasks", users: "users",
+      purchaseItems: "purchase-items-log", feedback: "marcelita-feedback", users: "users",
       inventoryCounts: "inventory-counts", workers: "workers",
       customers: "customers", customerLedger: "customer-ledger",
       supplierLedger: "supplier-ledger",
@@ -22125,7 +21935,7 @@ export default function SistemaVentas() {
     const setters = {
       settings: setSettings, products: setProducts, categories: setCategories, sales: setSales, movements: setMovements,
       openShifts: setOpenShifts, shiftsLog: setShiftsLog, suppliers: setSuppliers, invoicesIndex: setInvoicesIndex,
-      purchaseItems: setPurchaseItems, feedback: setFeedback, tasks: setTasks, users: setUsers,
+      purchaseItems: setPurchaseItems, feedback: setFeedback, users: setUsers,
       inventoryCounts: setInventoryCounts, workers: setWorkers,
       customers: setCustomers, customerLedger: setCustomerLedger,
       supplierLedger: setSupplierLedger,
@@ -22145,7 +21955,7 @@ export default function SistemaVentas() {
     const orden = [
       "workers", "suppliers", "customers", "settings", "categories", "products", "openShifts",
       "invoicesIndex", "sales", "purchaseItems", "movements", "shiftsLog",
-      "customerLedger", "supplierLedger", "inventoryCounts", "feedback", "tasks",
+      "customerLedger", "supplierLedger", "inventoryCounts", "feedback",
     ];
     for (const field of orden) {
       if (data[field] === undefined) continue;
@@ -22176,12 +21986,9 @@ export default function SistemaVentas() {
   // bread-holidays/bread-shortages, que no están cargados acá — el badge de
   // la pestaña cuenta las demás señales, y el aviso de pan aparece recién al
   // abrirla.
-  const tareasPendientesPropias = rolEfectivo === "admin"
-    ? tasks.filter(t => t.status === "pendiente").length
-    : tasks.filter(t => t.assignedToId === session.userId && t.status === "pendiente").length;
   const actividadesPendientes = construirActividades({
     rolEfectivo, session, products, inventoryCounts, customers, customerLedger, openShifts, feedback,
-  }).length + tareasPendientesPropias;
+  }).length;
   const avisos = {
     recepcion: rolEfectivo === "admin" ? pendingApprovals : 0,
     conteos: pendingCounts,
@@ -22305,9 +22112,9 @@ export default function SistemaVentas() {
             siempre. */}
         <main className={`p-4 sm:p-6 mx-auto pb-24 lg:pb-6 ${tab === "pos" ? "max-w-[1600px]" : "max-w-6xl"}`}>
         <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
-        <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} tasks={tasks} setTasks={setTasks} users={users} toast={toast} /></TabPane>
+        <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} invoicesIndex={invoicesIndex} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} facturaPendienteDeEditar={facturaPendienteDeEditar} setFacturaPendienteDeEditar={setFacturaPendienteDeEditar} /></TabPane>
