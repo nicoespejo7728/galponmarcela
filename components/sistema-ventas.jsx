@@ -7878,6 +7878,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                     <input
                       type="number" value={d.amount} placeholder="0"
                       onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totalConAbono))}
+                      onFocus={e => e.target.select()}
                       className={`${inputCls} font-mono`} style={inputStyle()}
                     />
                     {paymentBreakdown.length > 2 && (
@@ -10496,6 +10497,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
                 <input
                   type="number" value={d.amount} placeholder="0"
                   onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totals.net * 1.19))}
+                  onFocus={e => e.target.select()}
                   className={`${inputCls} font-mono`} style={inputStyle()}
                 />
                 {paymentBreakdown.length > 2 && (
@@ -18066,6 +18068,7 @@ function MovementModal({ initial, onClose, onSave }) {
               <input
                 type="number" value={d.amount} placeholder="0"
                 onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, Number(amount)))}
+                onFocus={e => e.target.select()}
                 className={`${inputCls} font-mono`} style={inputStyle()}
               />
               {paymentBreakdown.length > 2 && (
