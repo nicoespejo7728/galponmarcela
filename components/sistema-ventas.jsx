@@ -6885,6 +6885,37 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
 
   const [weightPromptProduct, setWeightPromptProduct] = useState(null);
 
+  /* El lector de código de barras "escribe" apretando teclas, como si fuera
+     un teclado — así que solo capta algo mientras el cursor esté parado en
+     este campo. Antes, apenas el foco se iba a cualquier otro lado (se
+     cerraba una ventana, se tocaba un botón, se hacía clic en una zona
+     vacía de la pantalla) había que volver a hacer clic ahí a mano para
+     que el siguiente escaneo funcionara — a pedido de Fran, ya no hace
+     falta: el foco vuelve solo al campo apenas queda libre.
+
+     "Queda libre" quiere decir: ninguna de las ventanas de este módulo
+     está abierta pidiendo su propio dato (el peso, el PIN de quien cobra,
+     el monto, etc.) y la persona no está escribiendo a mano en otro campo
+     de texto de verdad (buscar por nombre, el efectivo recibido, una
+     cantidad en el carrito) — esos dos casos se respetan tal cual están,
+     sin robarles el foco. */
+  const modalAbierto = !!(weightPromptProduct || scannerOpen || identifyOpen || cobroPoint ||
+    ventaNueva || quickAdd || receipt || consumptionOpen || quickCustomerOpen || abonoFiadoOpen);
+  const modalAbiertoRef = useRef(modalAbierto);
+  useEffect(() => { modalAbiertoRef.current = modalAbierto; }, [modalAbierto]);
+
+  function reenfocarEscaner() {
+    // Se revisa en el siguiente tick (no apenas se pierde el foco) para
+    // dar tiempo a que, si el clic abrió una ventana o movió el foco a
+    // otro campo, eso ya se haya reflejado — y entonces no se le quita.
+    setTimeout(() => {
+      if (modalAbiertoRef.current) return;
+      const activo = document.activeElement;
+      if (activo && activo !== inputRef.current && ["INPUT", "TEXTAREA", "SELECT"].includes(activo.tagName)) return;
+      inputRef.current?.focus();
+    }, 0);
+  }
+
   function addToCart(product, weightKg) {
     if (product.unitType === "peso" && weightKg === undefined) {
       setWeightPromptProduct(product);
@@ -7595,6 +7626,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
                 if (clean && products.some(p => p.barcode === clean)) handleScan(val);
               }}
               onKeyDown={e => { if (e.key === "Enter") handleScan(barcode); }}
+              onBlur={reenfocarEscaner}
               placeholder="Escanea o escribe el código de barras…"
               aria-label="Código de barras"
               className={`${inputCls} pl-10 font-mono`} style={inputStyle()}
