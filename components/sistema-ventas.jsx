@@ -19,6 +19,11 @@ import {
   autorizarConPin,
   cambiarPin,
   identificarPorPin,
+  identificarPorTarjeta,
+  autorizarConTarjeta,
+  asignarTarjetaPerfil,
+  asignarTarjetaNegocio,
+  iniciarSesionConTarjeta,
   registrarConteoInventarioGeneral,
   unificarCategorias,
   unificarProductos,
@@ -37,6 +42,7 @@ import {
   reactivarProducto,
 } from "@/lib/datos";
 import { obtenerCliente } from "@/lib/supabase/cliente";
+import { escucharTarjetaNFC, puenteNFC } from "@/lib/nfc-bridge";
 import { cargarCatalogos, perfilVaALaCasa } from "@/lib/datos/catalogos";
 import { nuevoId, clave } from "@/lib/datos/traduccion";
 import { repartirCodigos, esCodigoDelAlmacen, svgEan13, modulosEan13, PREFIJO_ALMACEN, normalizarCodigoParaComparar } from "@/lib/codigos-barra";
@@ -197,6 +203,13 @@ function uid(_prefijo) {
 }
 function formatCLP(n) {
   return new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Math.round(n || 0));
+}
+// Documento de una recepción: "factura" | "factura_exenta" | "boleta" (null/
+// vacío es "sin documento", que se maneja aparte con noDocument/reason).
+function etiquetaDocumento(documentType) {
+  if (documentType === "factura") return "Factura";
+  if (documentType === "factura_exenta") return "Factura exenta";
+  return "Boleta";
 }
 function formatDate(iso) {
   try {
@@ -6095,6 +6108,72 @@ function LoginScreen({ users, businessName, businessLogo, onLogin, toast }) {
   const [password, setPassword] = useState("");
   const [entrando, setEntrando] = useState(false);
 
+  // Tarjeta NFC como reemplazo del usuario/contraseña (migración 0044, a
+  // pedido de Fran): acercar la tarjeta abre la cuenta completa de esa
+  // persona, sin escribir nada. Para una cuenta de administrador —que abre
+  // TODO el sistema, no una acción puntual— se pide además su PIN antes de
+  // terminar de entrar; "tarjetaNombre"/"tarjetaUid" quedan guardados
+  // mientras se espera ese PIN.
+  const [tarjetaEsperandoPin, setTarjetaEsperandoPin] = useState(false);
+  const [tarjetaNombre, setTarjetaNombre] = useState("");
+  const [tarjetaUid, setTarjetaUid] = useState("");
+  const [tarjetaPin, setTarjetaPin] = useState("");
+
+  async function completarSesion(datos) {
+    const { error, data } = await obtenerCliente().auth.verifyOtp({
+      email: datos.email, token_hash: datos.tokenHash, type: "magiclink",
+    });
+    if (error || !data?.user) {
+      return toast("No se pudo entrar con la tarjeta — intenta de nuevo o usa tu usuario y contraseña.", "error");
+    }
+    await cargarCatalogos({ forzar: true });
+    const sb2 = obtenerCliente();
+    const { data: perfil } = await sb2
+      .from("perfil").select("id,nombre,usuario,rol,activo").eq("id", data.user.id).maybeSingle();
+    if (!perfil || !perfil.activo) {
+      await obtenerCliente().auth.signOut();
+      return toast("Tu cuenta no está activa. Habla con un administrador.", "error");
+    }
+    fijarUsuarioActual(perfil.id);
+    onLogin({ role: perfil.rol, name: perfil.nombre, username: perfil.usuario, userId: perfil.id });
+  }
+
+  async function entrarConTarjeta(uid, pin) {
+    if (entrando) return;
+    setEntrando(true);
+    try {
+      const r = await iniciarSesionConTarjeta(uid, pin);
+      if (r.requierePin) {
+        setTarjetaUid(uid); setTarjetaNombre(r.nombre); setTarjetaEsperandoPin(true); setTarjetaPin("");
+        return;
+      }
+      setTarjetaEsperandoPin(false);
+      await completarSesion(r);
+    } catch (e) {
+      if (e.requierePin) {
+        // PIN incorrecto: se queda en el mismo paso para reintentar, en vez
+        // de obligar a acercar la tarjeta otra vez.
+        setTarjetaUid(uid); setTarjetaNombre(e.nombre); setTarjetaEsperandoPin(true); setTarjetaPin("");
+        toast(e.message, "error");
+      } else {
+        toast(friendlyError(e, "No se pudo entrar con la tarjeta"), "error");
+      }
+    } finally {
+      setEntrando(false);
+    }
+  }
+
+  useEffect(() => {
+    // Mientras se espera el PIN de un administrador, un segundo golpe de
+    // tarjeta no interrumpe ese paso — hay que cancelarlo primero.
+    if (tarjetaEsperandoPin) return;
+    return escucharTarjetaNFC(uid => entrarConTarjeta(uid));
+  }, [tarjetaEsperandoPin]);
+
+  function cancelarTarjeta() {
+    setTarjetaEsperandoPin(false); setTarjetaNombre(""); setTarjetaUid(""); setTarjetaPin("");
+  }
+
   // La contraseña ya no se compara en el navegador: la verifica Supabase Auth,
   // que la guarda hasheada. El usuario del equipo sigue escribiendo su nombre de
   // siempre ("fran"); el correo interno se arma a partir de él.
@@ -6141,13 +6220,36 @@ function LoginScreen({ users, businessName, businessLogo, onLogin, toast }) {
         </div>
 
         <div className="rounded-xl p-5 shadow-sm" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
-          <Field label="Usuario">
-            <input autoFocus value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Ej. fran" />
-          </Field>
-          <Field label="Contraseña">
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
-          </Field>
-          <Btn full onClick={submit} icon={Check} disabled={entrando}>{entrando ? "Entrando…" : "Entrar"}</Btn>
+          {tarjetaEsperandoPin ? (
+            <>
+              <div className="rounded-lg p-3 mb-3 text-sm" style={{ background: C.brassSoft, color: C.ink }}>
+                Eres <strong>{tarjetaNombre}</strong> — ingresa tu PIN para continuar.
+              </div>
+              <Field label="Tu PIN">
+                <input autoFocus type="password" inputMode="numeric" value={tarjetaPin}
+                  onChange={e => setTarjetaPin(e.target.value.replace(/\D/g, ""))}
+                  onKeyDown={e => e.key === "Enter" && entrarConTarjeta(tarjetaUid, tarjetaPin)}
+                  className={inputCls} style={inputStyle()} placeholder="••••" />
+              </Field>
+              <div className="flex gap-2">
+                <Btn variant="ghost" full onClick={cancelarTarjeta}>Cancelar</Btn>
+                <Btn full icon={Check} disabled={entrando} onClick={() => entrarConTarjeta(tarjetaUid, tarjetaPin)}>
+                  {entrando ? "Comprobando…" : "Continuar"}
+                </Btn>
+              </div>
+            </>
+          ) : (
+            <>
+              <Field label="Usuario">
+                <input autoFocus value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Ej. fran" />
+              </Field>
+              <Field label="Contraseña">
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
+              </Field>
+              <Btn full onClick={submit} icon={Check} disabled={entrando}>{entrando ? "Entrando…" : "Entrar"}</Btn>
+              <p className="text-center text-[11px] mt-3" style={{ color: C.grayLight }}>O acerca tu tarjeta.</p>
+            </>
+          )}
         </div>
         <p className="text-center text-[11px] mt-6" style={{ color: C.grayLight }}>¿No tienes cuenta? Pídele a un administrador que te cree un usuario desde "Usuarios".</p>
       </div>
@@ -6170,6 +6272,74 @@ function AdminGateModal({ onClose, onEnter, toast }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [entrando, setEntrando] = useState(false);
+
+  // Tarjeta NFC para entrar al panel (migración 0044) — igual que en
+  // LoginScreen, pero acá solo tiene sentido una tarjeta de administrador:
+  // una de vendedor se rechaza antes de tocar la sesión de la caja.
+  const [tarjetaEsperandoPin, setTarjetaEsperandoPin] = useState(false);
+  const [tarjetaNombre, setTarjetaNombre] = useState("");
+  const [tarjetaUid, setTarjetaUid] = useState("");
+  const [tarjetaPin, setTarjetaPin] = useState("");
+
+  async function completarSesionTarjeta(r) {
+    if (r.rol !== "admin") {
+      return toast("Esa tarjeta es de un vendedor — no sirve para entrar al panel de administración.", "error");
+    }
+    const sb = obtenerCliente();
+    const { data, error } = await sb.auth.verifyOtp({ email: r.email, token_hash: r.tokenHash, type: "magiclink" });
+    if (error || !data?.user) {
+      return toast("No se pudo entrar con la tarjeta — intenta de nuevo o usa tu usuario y contraseña.", "error");
+    }
+    await cargarCatalogos({ forzar: true });
+    const { data: perfil } = await sb
+      .from("perfil").select("id,nombre,usuario,rol,activo").eq("id", data.user.id).maybeSingle();
+    if (!perfil?.activo || perfil.rol !== "admin") {
+      await sb.auth.signOut();
+      olvidarInstantaneas();
+      toast(
+        perfil?.activo
+          ? "Esa cuenta no es de administrador. La sesión se cerró — vuelve a entrar."
+          : "Esa cuenta no está activa. La sesión se cerró — vuelve a entrar.",
+        "error"
+      );
+      onEnter(null);
+      return;
+    }
+    fijarUsuarioActual(perfil.id);
+    onEnter({ role: perfil.rol, name: perfil.nombre, username: perfil.usuario, userId: perfil.id });
+  }
+
+  async function entrarConTarjeta(uid, pin) {
+    if (entrando) return;
+    setEntrando(true);
+    try {
+      const r = await iniciarSesionConTarjeta(uid, pin);
+      if (r.requierePin) {
+        setTarjetaUid(uid); setTarjetaNombre(r.nombre); setTarjetaEsperandoPin(true); setTarjetaPin("");
+        return;
+      }
+      setTarjetaEsperandoPin(false);
+      await completarSesionTarjeta(r);
+    } catch (e) {
+      if (e.requierePin) {
+        setTarjetaUid(uid); setTarjetaNombre(e.nombre); setTarjetaEsperandoPin(true); setTarjetaPin("");
+        toast(e.message, "error");
+      } else {
+        toast(friendlyError(e, "No se pudo entrar al panel de administración"), "error");
+      }
+    } finally {
+      setEntrando(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tarjetaEsperandoPin) return;
+    return escucharTarjetaNFC(uid => entrarConTarjeta(uid));
+  }, [tarjetaEsperandoPin]);
+
+  function cancelarTarjeta() {
+    setTarjetaEsperandoPin(false); setTarjetaNombre(""); setTarjetaUid(""); setTarjetaPin("");
+  }
 
   async function submit() {
     if (!username.trim() || !password) return toast("Ingresa tu usuario y contraseña de administrador", "error");
@@ -6225,13 +6395,36 @@ function AdminGateModal({ onClose, onEnter, toast }) {
       <p className="text-xs mb-3" style={{ color: C.gray }}>
         Entra con tu usuario y contraseña de administrador. La caja sigue funcionando igual — al terminar, usa "Volver a vender" para salir del panel sin cerrar nada.
       </p>
-      <Field label="Usuario de administrador">
-        <input autoFocus value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Ej. fran" />
-      </Field>
-      <Field label="Contraseña">
-        <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
-      </Field>
-      <Btn full onClick={submit} icon={Lock} disabled={entrando}>{entrando ? "Entrando…" : "Entrar al panel"}</Btn>
+      {tarjetaEsperandoPin ? (
+        <>
+          <div className="rounded-lg p-3 mb-3 text-sm" style={{ background: C.brassSoft, color: C.ink }}>
+            Eres <strong>{tarjetaNombre}</strong> — ingresa tu PIN para continuar.
+          </div>
+          <Field label="Tu PIN">
+            <input autoFocus type="password" inputMode="numeric" value={tarjetaPin}
+              onChange={e => setTarjetaPin(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={e => e.key === "Enter" && entrarConTarjeta(tarjetaUid, tarjetaPin)}
+              className={inputCls} style={inputStyle()} placeholder="••••" />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={cancelarTarjeta}>Cancelar</Btn>
+            <Btn full icon={Lock} disabled={entrando} onClick={() => entrarConTarjeta(tarjetaUid, tarjetaPin)}>
+              {entrando ? "Comprobando…" : "Continuar"}
+            </Btn>
+          </div>
+        </>
+      ) : (
+        <>
+          <Field label="Usuario de administrador">
+            <input autoFocus value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Ej. fran" />
+          </Field>
+          <Field label="Contraseña">
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
+          </Field>
+          <Btn full onClick={submit} icon={Lock} disabled={entrando}>{entrando ? "Entrando…" : "Entrar al panel"}</Btn>
+          <p className="text-center text-[11px] mt-3" style={{ color: C.grayLight }}>O acerca tu tarjeta de administrador.</p>
+        </>
+      )}
     </Modal>
   );
 }
@@ -6649,20 +6842,21 @@ function IdentifySellerModal({ onClose, onConfirm }) {
   const [checking, setChecking] = useState(false);
 
   // A propósito no recibe la lista de usuarios ni pide elegir un nombre:
-  // toda la gracia de la caja compartida es escribir SOLO el PIN. Quién es
-  // lo decide el servidor (galpon.identificar_por_pin, migración 0013),
-  // comparando contra los hashes — nunca se compara en el navegador.
-  async function submit() {
+  // toda la gracia de la caja compartida es escribir SOLO el PIN (o acercar
+  // la tarjeta). Quién es lo decide el servidor (galpon.identificar_por_pin
+  // / galpon.identificar_por_tarjeta — migraciones 0013 y 0043), comparando
+  // contra los hashes o el número de tarjeta — nunca en el navegador.
+  async function identificar(credencial, porTarjeta) {
     if (checking) return;
-    const limpio = pin.trim();
-    if (limpio.length < 4) return setError("Ingresa tu PIN de vendedor");
     setChecking(true);
     setError("");
     try {
-      const persona = await identificarPorPin(limpio);
+      const persona = porTarjeta ? await identificarPorTarjeta(credencial) : await identificarPorPin(credencial);
       if (!persona) {
-        setError("PIN incorrecto. Si es tu primer día, pide a un administrador que te asigne uno en Usuarios.");
-        setPin("");
+        setError(porTarjeta
+          ? "Esa tarjeta no está asignada a nadie todavía — escribe tu PIN, o pide a un administrador que te la asigne en Usuarios."
+          : "PIN incorrecto. Si es tu primer día, pide a un administrador que te asigne uno en Usuarios.");
+        if (!porTarjeta) setPin("");
         return;
       }
       onConfirm(persona);
@@ -6670,6 +6864,18 @@ function IdentifySellerModal({ onClose, onConfirm }) {
       setChecking(false);
     }
   }
+
+  function submit() {
+    const limpio = pin.trim();
+    if (limpio.length < 4) return setError("Ingresa tu PIN de vendedor");
+    identificar(limpio, false);
+  }
+
+  // Tarjeta NFC (migración 0043): acercarla identifica igual que escribir
+  // el PIN. Si no hay puente NFC corriendo en este computador (lector no
+  // enchufado, o el programita no está abierto) simplemente nunca llega
+  // ningún aviso — se sigue escribiendo el PIN como siempre.
+  useEffect(() => escucharTarjetaNFC(uid => identificar(uid, true)), [checking]);
 
   return (
     <Modal title="¿Quién realiza esta venta?" onClose={onClose}>
@@ -6681,6 +6887,7 @@ function IdentifySellerModal({ onClose, onConfirm }) {
           className={`${inputCls} font-mono text-center text-lg tracking-widest`} style={inputStyle()} placeholder="••••"
         />
       </Field>
+      <p className="text-[11px] mb-3" style={{ color: C.gray }}>O acerca tu tarjeta.</p>
       {error && <p className="text-xs mb-3" style={{ color: C.rust }}>{error}</p>}
       <Btn full icon={Check} onClick={submit} disabled={checking}>{checking ? "Comprobando…" : "Confirmar e identificar"}</Btn>
     </Modal>
@@ -6769,6 +6976,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   // venta para el desglose del cierre de caja. No hace falta recordar a la
   // última persona: cada quien escribe su propio PIN en cada venta.
   const [identifyOpen, setIdentifyOpen] = useState(false);
+
+  // Entre identificarse y que la venta quede guardada (procederConVenta más
+  // abajo) hay un viaje de ida y vuelta a la base que, con la señal de
+  // celular del almacén, puede tardar varios segundos — hasta PLAZO_VENTA en
+  // el peor caso (ver lib/datos/index.js). Sin esto, la pantalla se quedaba
+  // muda todo ese rato: no cambiaba nada, no avisaba nada, así que quien
+  // cobra no tenía forma de saber si seguía trabajando o si ya no iba a
+  // pasar nada — y la tentación era volver a apretar "Cobrar y emitir",
+  // lo que mandaba una SEGUNDA venta (con su propio id) encima de la
+  // primera que en realidad sí iba a llegar. Con este estado el botón
+  // avisa "Procesando venta…" y queda deshabilitado hasta que termina,
+  // para bien o para mal, una sola vez.
+  const [checkoutEnCurso, setCheckoutEnCurso] = useState(false);
 
   // Cobro con la máquina Point: null mientras no hay ningún cobro en curso.
   // { estado: "creando" | "esperando", id?, seller, monto } — ver checkout()
@@ -7150,6 +7370,10 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
   );
 
   async function checkout(seller) {
+    // Si ya hay una venta en curso (ver checkoutEnCurso más arriba), un
+    // segundo llamado —un doble clic, o Enter apretado mientras el primero
+    // todavía esperaba la base— no debe mandar otra venta encima.
+    if (checkoutEnCurso) return;
     if (cart.length === 0) return;
     if (!seller?.id) return;
     if (payment === "Fiado" && !selectedCustomer) return;
@@ -7163,12 +7387,19 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
     // Débito o Crédito puros (no un pago combinado, ahí no hay un solo monto
     // que mandar) con una máquina Point asignada a esta caja: el cobro se
     // manda primero a la máquina y la venta recién se registra si Mercado
-    // Pago confirma el pago — ver cobrarConMaquina más abajo.
+    // Pago confirma el pago — ver cobrarConMaquina más abajo. Esa pantalla
+    // ya tiene su propio aviso ("creando"/"esperando"), así que acá no hace
+    // falta checkoutEnCurso.
     const terminalId = (payment === "Débito" || payment === "Crédito")
       ? terminalPointDeEsteEquipo() : null;
     if (terminalId) return cobrarConMaquina(seller, terminalId);
 
-    await procederConVenta(seller);
+    setCheckoutEnCurso(true);
+    try {
+      await procederConVenta(seller);
+    } finally {
+      setCheckoutEnCurso(false);
+    }
   }
 
   async function cobrarConMaquina(seller, terminalId) {
@@ -8024,7 +8255,7 @@ function POSView({ products, setProducts, settings, setSettings, sales, setSales
               </div>
             )}
 
-            <Btn full onClick={() => setIdentifyOpen(true)} disabled={cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - totalConAbono < 0) || (payment === "Fiado" && !selectedCustomer) || (payment === "Pago combinado" && !desglosePagoValido)} icon={Check}>Cobrar y emitir</Btn>
+            <Btn full onClick={() => setIdentifyOpen(true)} disabled={checkoutEnCurso || cart.length === 0 || (payment === "Efectivo" && cashReceived !== "" && Number(cashReceived) - totalConAbono < 0) || (payment === "Fiado" && !selectedCustomer) || (payment === "Pago combinado" && !desglosePagoValido)} icon={Check}>{checkoutEnCurso ? "Procesando venta…" : "Cobrar y emitir"}</Btn>
 
             {/* Ya no es solo para administradores: cualquiera del equipo lo
                 registra con su PIN y queda a su nombre. El control pasó de
@@ -8290,20 +8521,20 @@ function ConsumptionAuthModal({ cart, onClose, onConfirm, toast }) {
   const [trabajando, setTrabajando] = useState(false);
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
 
-  async function submit() {
+  async function identificar(credencial, porTarjeta) {
     if (trabajando) return;
-    const limpio = pin.trim();
-    if (!persona && limpio.length < 4) return setError("Escribe tu PIN de vendedor");
     setTrabajando(true);
     setError("");
     try {
-      // El PIN se compara en la base, contra los hashes: acá solo se pregunta
-      // de quién es. Se guarda la persona ya identificada para que un fallo al
+      // El PIN (o la tarjeta) se compara en la base: acá solo se pregunta de
+      // quién es. Se guarda la persona ya identificada para que un fallo al
       // registrar no obligue a escribir el PIN otra vez.
-      const quien = persona || await identificarPorPin(limpio);
+      const quien = porTarjeta ? await identificarPorTarjeta(credencial) : (persona || await identificarPorPin(credencial));
       if (!quien) {
-        setPin("");
-        return setError("PIN incorrecto. Si todavía no tienes uno, pídele a un administrador que te lo asigne en Usuarios.");
+        if (!porTarjeta) setPin("");
+        return setError(porTarjeta
+          ? "Esa tarjeta no está asignada a nadie todavía — escribe tu PIN, o pide a un administrador que te la asigne en Usuarios."
+          : "PIN incorrecto. Si todavía no tienes uno, pídele a un administrador que te lo asigne en Usuarios.");
       }
       setPersona(quien);
       await onConfirm({ persona: quien, reason: reason.trim() });
@@ -8313,6 +8544,16 @@ function ConsumptionAuthModal({ cart, onClose, onConfirm, toast }) {
       setTrabajando(false);
     }
   }
+
+  function submit() {
+    const limpio = pin.trim();
+    if (!persona && limpio.length < 4) return setError("Escribe tu PIN de vendedor");
+    identificar(limpio, false);
+  }
+
+  // Tarjeta NFC (migración 0043): igual que en IdentifySellerModal — si no
+  // hay puente NFC corriendo acá, esto simplemente nunca avisa de nada.
+  useEffect(() => escucharTarjetaNFC(uid => identificar(uid, true)), [trabajando, reason, persona]);
 
   return (
     <Modal title="Consumo interno" onClose={onClose}>
@@ -8329,6 +8570,7 @@ function ConsumptionAuthModal({ cart, onClose, onConfirm, toast }) {
           onKeyDown={e => e.key === "Enter" && submit()}
           className={`${inputCls} font-mono text-center text-lg tracking-[0.4em]`} style={inputStyle()} placeholder="••••" />
       </Field>
+      <p className="text-[11px] mb-3 -mt-2" style={{ color: C.gray }}>O acerca tu tarjeta.</p>
       <Field label="Motivo (opcional)">
         <input value={reason} onChange={e => setReason(e.target.value)}
           onKeyDown={e => e.key === "Enter" && submit()}
@@ -9053,19 +9295,30 @@ function ApprovalsPanel({ products, setProducts, toast }) {
    unitario a ojo.
 
    La conversión vive en el producto (`unitsPerKg`, doce panes por kilo) y se
-   aplica en el borde, igual que los gramos en la caja: se escribe en kilos y
-   por dentro se sigue guardando en unidades, que es como se vende, como se
-   cuenta el stock y como lo espera todo lo demás. */
+   aplica en el borde, igual que los gramos en la caja: se escribe en gramos
+   (ver cambio de nov. 2026 más abajo) y por dentro se sigue guardando en
+   unidades, que es como se vende, como se cuenta el stock y como lo espera
+   todo lo demás. */
 function unidadesPorKilo(producto) {
   const n = Number(producto?.unitsPerKg) || 0;
   return producto && producto.unitType !== "peso" && n > 0 ? n : 0;
 }
 
-/* Kilos con hasta tres decimales, sin ceros de relleno: 3 y no "3,000". */
-function enKilos(unidades, porKilo) {
+/* Gramos a partir de las unidades guardadas (nov. 2026): antes este campo
+   pedía kilos, con hasta tres decimales (3 y no "3,000") — y un producto por
+   peso de verdad (queso, cecinas) pide SIEMPRE gramos en Recepción, nunca
+   kilos. Tener los dos criterios a la vez en la misma pantalla —gramos para
+   un producto, kilos para otro, según cuál sea— es justo la "confusión
+   tremenda" que describió Fran. Ahora los dos casos se escriben siempre en
+   gramos, sin excepción. */
+function enGramosDesdeUnidades(unidades, porKilo) {
   if (!porKilo) return "";
-  const kg = (Number(unidades) || 0) / porKilo;
-  return kg === 0 ? "" : String(Number(kg.toFixed(3)));
+  const g = ((Number(unidades) || 0) / porKilo) * GRAMOS_POR_KILO;
+  return g === 0 ? "" : String(Math.round(g));
+}
+function unidadesDesdeGramos(gramos, porKilo) {
+  if (!porKilo) return 0;
+  return Math.round(((Number(gramos) || 0) / GRAMOS_POR_KILO) * porKilo);
 }
 
 /* =====================================================================
@@ -9200,10 +9453,12 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
   // quien no es admin esto le queda como propuesta pendiente de aprobación,
   // así que no tiene sentido avisarle acá de algo que todavía no rige.
   const quedaStockMasCaro = role === "admin" && quedanUnidadesAlPrecioAnterior(currentProduct, precioNuevo);
-  // Por omisión se recibe en kilos cuando el producto lo permite: es como
+  // Por omisión se recibe por peso cuando el producto lo permite: es como
   // viene la boleta. El botón queda al lado por si un día llegan sueltas.
-  const [enKilo, setEnKilo] = useState(porKilo > 0);
-  const porKiloActivo = porKilo > 0 && enKilo;
+  // (Antes "por peso" pedía kilos; desde nov. 2026 pide gramos siempre,
+  // igual que un producto por peso de verdad — ver unidadesDesdeGramos.)
+  const [porPeso, setPorPeso] = useState(porKilo > 0);
+  const porPesoActivo = porKilo > 0 && porPeso;
 
   /* Adentro `netCost` es siempre el neto. En el campo, en cambio, va lo que
      dice la factura: si el proveedor cobra con IVA incluido, quien recibe
@@ -9214,13 +9469,12 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
   const escritoPorUnidad = item.costoEscrito !== undefined && item.costoEscrito !== null
     ? item.costoEscrito
     : redondearBonito(comoEnLaFactura(item.netCost, forma));
-  const costoPorKilo = porKiloActivo
+  const costoPorKilo = porPesoActivo
     ? redondearBonito(comoEnLaFactura(item.netCost, forma) * porKilo) : 0;
   const cuenta = explicarPrecio(Number(escritoPorUnidad) || 0, forma);
 
-  function cambiarKilos(texto) {
-    const kg = Number(texto) || 0;
-    onChange({ ...item, qty: Math.round(kg * porKilo) });
+  function cambiarGramos(texto) {
+    onChange({ ...item, qty: unidadesDesdeGramos(texto, porKilo) });
   }
   function cambiarCostoPorUnidad(texto) {
     onChange({ ...item, costoEscrito: texto, netCost: netoDesde(texto, forma) });
@@ -9365,18 +9619,18 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
       <Badge tone={item.isNew ? "brass" : "green"}>{item.isNew ? "nuevo" : "existente"}</Badge>
       <div className="flex flex-col items-center">
         <span className="text-[10px]" style={{ color: C.gray }}>
-          {porKiloActivo ? "recibes (kg)" : item.unitType === "peso" ? "recibes (g)" : "recibes"}
+          {porPesoActivo || item.unitType === "peso" ? "recibes (g)" : "recibes"}
         </span>
-        {/* En gramos o en kilos, según lo que diga la boleta: por dentro se
-            sigue guardando en kilos (peso) o en unidades (pan). */}
+        {/* Siempre en gramos, sea producto por peso o "pan fresco" por kilo:
+            por dentro se sigue guardando en kilos (peso) o en unidades (pan). */}
         <input
-          type="number" inputMode="decimal" step={porKiloActivo ? "0.001" : "1"}
-          value={porKiloActivo ? enKilos(item.qty, porKilo) : item.unitType === "peso" ? enGramos(item.qty) : item.qty}
-          onChange={e => porKiloActivo
-            ? cambiarKilos(e.target.value)
+          type="number" inputMode="decimal" step="1"
+          value={porPesoActivo ? enGramosDesdeUnidades(item.qty, porKilo) : item.unitType === "peso" ? enGramos(item.qty) : item.qty}
+          onChange={e => porPesoActivo
+            ? cambiarGramos(e.target.value)
             : onChange({ ...item, qty: item.unitType === "peso" ? desdeGramos(e.target.value) : e.target.value })}
           className={`${inputCls} font-mono w-20 text-center`} style={inputStyle()} />
-        {porKiloActivo && (
+        {porPesoActivo && (
           <span className="text-[10px] mt-0.5" style={{ color: C.greenDark }}>
             = {Number(item.qty) || 0} un.
           </span>
@@ -9384,26 +9638,26 @@ function DraftRow({ item, onChange, onRemove, role, products, categories = [], c
       </div>
       <div className="flex flex-col items-center">
         <span className="text-[10px]" style={{ color: C.gray }}>
-          {porKiloActivo ? "costo por kilo" : "costo"} {forma === "conIva" ? "(con IVA)" : "(neto)"}
+          {porPesoActivo ? "costo por kilo" : "costo"} {forma === "conIva" ? "(con IVA)" : "(neto)"}
         </span>
-        <input type="number" step={porKiloActivo ? "1" : "any"}
-          value={porKiloActivo ? (costoPorKilo || "") : escritoPorUnidad}
-          onChange={e => porKiloActivo ? cambiarCostoPorKilo(e.target.value) : cambiarCostoPorUnidad(e.target.value)}
+        <input type="number" step={porPesoActivo ? "1" : "any"}
+          value={porPesoActivo ? (costoPorKilo || "") : escritoPorUnidad}
+          onChange={e => porPesoActivo ? cambiarCostoPorKilo(e.target.value) : cambiarCostoPorUnidad(e.target.value)}
           className={`${inputCls} font-mono w-24 text-center`} style={inputStyle()} />
         {/* El selector va pegado al campo, no arriba en un rincón: la pregunta
             es sobre ESTE número y hay que poder contestarla mirándolo. */}
         <div className="mt-1"><SelectorFormaCosto forma={forma} onCambiar={cambiarForma} compacto /></div>
-        {porKiloActivo && (
+        {porPesoActivo && (
           <span className="text-[10px] mt-0.5" style={{ color: C.gray }}>
             {formatCLP(Number(escritoPorUnidad) || 0)} c/u
           </span>
         )}
       </div>
       {porKilo > 0 && (
-        <button type="button" onClick={() => setEnKilo(v => !v)}
+        <button type="button" onClick={() => setPorPeso(v => !v)}
           className="text-[10px] underline self-end pb-1" style={{ color: C.gray }}
           title={`Este producto se compra por kilo — ${porKilo} unidades por kilo`}>
-          {enKilo ? "anotar por unidad" : "anotar por kilo"}
+          {porPeso ? "anotar por unidad" : "anotar por peso"}
         </button>
       )}
       <div className="flex flex-col items-center">
@@ -9673,6 +9927,17 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     return { qty: acc.qty + qty, net: acc.net + qty * cost };
   }, { qty: 0, net: 0 });
 
+  // El total que de verdad hay que pagar y registrar (gasto, deuda con el
+  // proveedor, comparación con "Monto total de la factura"). Para casi toda
+  // recepción el documento cobra el 19% de IVA sobre el neto, así que se
+  // suma siempre — PERO una "Factura exenta (sin IVA)" no tiene ese 19% en
+  // ninguna parte: el total del documento es el neto tal cual. Antes de
+  // este distingo, el sistema le sumaba el 19% a TODO documento sin
+  // excepción, así que una factura exenta quedaba registrada más cara de lo
+  // que en realidad costó — y el monto no calzaba con lo que decía la
+  // factura real (ver "Monto total de la factura" más abajo).
+  const totalFactura = documentType === "factura_exenta" ? totals.net : totals.net * (1 + IVA);
+
   // Carga una recepción ya guardada al formulario para corregirla. Se pide
   // admin porque las políticas de la base solo dejan editar factura_compra y
   // compra_detalle a un administrador — pedirlo también acá evita que alguien
@@ -9786,11 +10051,11 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const esCombinado = paymentMethod === "Pago combinado";
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
-    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
+    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totalFactura)) {
       return toast(
         filasDesglose.length < 2
           ? "El pago combinado necesita al menos dos formas de pago con un monto puesto — agrega otra, o cambia el tipo de pago si en realidad es solo una."
-          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totals.net * 1.19)} — ajusta los montos hasta que calcen exacto.`,
+          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totalFactura)} — ajusta los montos hasta que calcen exacto.`,
         "error"
       );
     }
@@ -9945,7 +10210,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       }
     });
 
-    const totalGross = totals.net * 1.19;
+    const totalGross = totalFactura;
     const invoiceId = uid("inv");
     const supplierName = supplier.trim() || "Sin proveedor";
 
@@ -10100,11 +10365,11 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
     const esCombinado = paymentMethod === "Pago combinado";
     const filasDesglose = paymentBreakdown.filter(d => d.method && Number(d.amount) > 0);
     const sumaDesglose = filasDesglose.reduce((s, d) => s + Number(d.amount), 0);
-    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totals.net * 1.19)) {
+    if (esCombinado && (filasDesglose.length < 2 || sumaDesglose !== totalFactura)) {
       return toast(
         filasDesglose.length < 2
           ? "El pago combinado necesita al menos dos formas de pago con un monto puesto — agrega otra, o cambia el tipo de pago si en realidad es solo una."
-          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totals.net * 1.19)} — ajusta los montos hasta que calcen exacto.`,
+          : `El desglose del pago combinado suma ${formatCLP(sumaDesglose)}, pero la recepción es por ${formatCLP(totalFactura)} — ajusta los montos hasta que calcen exacto.`,
         "error"
       );
     }
@@ -10259,7 +10524,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       });
     }
 
-    const totalGross = totals.net * 1.19;
+    const totalGross = totalFactura;
     const updatedInvoice = {
       ...editContext.originalInvoice,
       refNumber: refNumber.trim() || null,
@@ -10461,8 +10726,13 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
 
         <div className="mb-3">
           <div className="text-xs font-medium mb-1.5" style={{ color: C.ink }}>¿Es factura, boleta, o no dan ninguna?</div>
-          <div className="flex gap-1.5">
-            {[["factura", "Factura"], ["boleta", "Boleta"], ["sin_documento", "Sin documento"]].map(([v, l]) => (
+          <div className="flex gap-1.5 flex-wrap">
+            {/* "Factura exenta" aparte de "Factura": una factura normal SÍ
+                lleva 19% de IVA sobre el neto (lo que calcula totalFactura
+                más arriba), pero hay proveedores/documentos que no cobran
+                IVA en absoluto — acá se marca eso, para que el total que se
+                registra sea el neto tal cual, sin sumarle nada. */}
+            {[["factura", "Factura"], ["factura_exenta", "Factura exenta"], ["boleta", "Boleta"], ["sin_documento", "Sin documento"]].map(([v, l]) => (
               <button key={v} onClick={() => setDocumentType(v)} className="flex-1 py-2 rounded-lg text-xs font-medium" style={documentType === v ? (v === "sin_documento" ? { background: C.rust, color: "#fff" } : { background: C.ink, color: C.paper }) : { background: C.paperDark, color: C.gray }}>{l}</button>
             ))}
           </div>
@@ -10528,7 +10798,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
                 </select>
                 <input
                   type="number" value={d.amount} placeholder="0"
-                  onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totals.net * 1.19))}
+                  onChange={e => setPaymentBreakdown(prev => autocompletarDesglose(prev, idx, e.target.value, totalFactura))}
                   onFocus={e => e.target.select()}
                   className={`${inputCls} font-mono`} style={inputStyle()}
                 />
@@ -10545,7 +10815,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
               <span className="text-sm font-semibold" style={{ color: C.gray }}>Suma declarada</span>
               <span className="font-mono font-bold" style={{ color: C.ink }}>{formatCLP(paymentBreakdown.reduce((s, d) => s + (Number(d.amount) || 0), 0))}</span>
             </div>
-            <p className="text-[11px]" style={{ color: C.gray }}>Debe sumar exactamente el total de la recepción ({formatCLP(totals.net * 1.19)}).</p>
+            <p className="text-[11px]" style={{ color: C.gray }}>Debe sumar exactamente el total de la recepción ({formatCLP(totalFactura)}).</p>
           </div>
         )}
 
@@ -10646,8 +10916,8 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
           <div className="px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.paperDark }}>
             <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Productos a recibir ({draftItems.length})</span>
             <span className="text-xs font-mono" style={{ color: C.gray }}>
-              {totals.qty} unid. · neto {formatCLP(totals.net)} · con IVA {formatCLP(totals.net * (1 + IVA))}
-              {statedTotal !== "" && Math.abs(Number(statedTotal) - totals.net * (1 + IVA)) > 1 && (
+              {totals.qty} unid. · neto {formatCLP(totals.net)} · {documentType === "factura_exenta" ? "total (exenta, sin IVA)" : "con IVA"} {formatCLP(totalFactura)}
+              {statedTotal !== "" && Math.abs(Number(statedTotal) - totalFactura) > 1 && (
                 <span style={{ color: C.brassText }}> · factura dice {formatCLP(Number(statedTotal))}</span>
               )}
             </span>
@@ -10707,7 +10977,7 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
               <button key={inv.id} onClick={() => setViewingInvoice(inv)} className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left hover:bg-black/[.03]" style={{ borderBottom: `1px solid ${C.paperLine}` }}>
                 <div className="min-w-0">
                   <div className="text-sm truncate" style={{ color: C.ink }}>{inv.supplierName}</div>
-                  <div className="text-[11px]" style={{ color: C.gray }}>{formatDate(inv.date)}{inv.documentType ? ` · ${inv.documentType === "factura" ? "Factura" : "Boleta"}` : ""}</div>
+                  <div className="text-[11px]" style={{ color: C.gray }}>{formatDate(inv.date)}{inv.documentType ? ` · ${etiquetaDocumento(inv.documentType)}` : ""}</div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <span className="text-xs font-mono" style={{ color: C.gray }}>{formatCLP(inv.totalGross)}</span>
@@ -10811,6 +11081,14 @@ function ShiftDetailModal({ shift, onClose }) {
           ))}
         </div>
         <div className="flex justify-between font-semibold pt-2" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total ventas ({shift.salesCount})</span><span className="font-mono">{formatCLP(shift.salesTotal)}</span></div>
+        {(shift.abonosCount || 0) > 0 && (
+          <>
+            <div className="flex justify-between text-sm"><span style={{ color: C.gray }}>Abonos de fiado cobrados ({shift.abonosCount})</span><span className="font-mono" style={{ color: C.greenDark }}>+{formatCLP(shift.abonosTotal || 0)}</span></div>
+            {["Efectivo", "Débito", "Crédito", "Transferencia"].filter(m => (shift.abonosByMethod || {})[m] > 0).map(m => (
+              <div key={m} className="flex justify-between text-xs pl-3"><span style={{ color: C.gray }}>{m}</span><span className="font-mono">{formatCLP(shift.abonosByMethod[m])}</span></div>
+            ))}
+          </>
+        )}
         <div className="flex justify-between"><span style={{ color: C.gray }}>Compras del día ({shift.purchasesCount || 0})</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(shift.purchasesTotal || 0)}</span></div>
         {(shift.salesBySeller || []).length > 0 && (
           <div className="pt-1 pb-1 space-y-0.5">
@@ -10851,7 +11129,7 @@ function ShiftDetailModal({ shift, onClose }) {
   );
 }
 
-function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
+function CajaView({ sales, invoicesIndex, customerLedger, openShifts, setOpenShifts, shiftsLog, setShiftsLog, session, role, toast }) {
   const [openingAmount, setOpeningAmount] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [reinforceOpen, setReinforceOpen] = useState(false);
@@ -10926,10 +11204,40 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
     return { total, count: shiftPurchasesList.length };
   }, [shiftPurchasesList]);
 
+  // "Abonos de fiado cobrados" (reportado por Fran, nov. 2026: "cuando me
+  // pagan una cuenta de fiado, no se refleja en el resumen de caja del
+  // día"). Cuando a un cliente le cobran una deuda de fiado que ya tenía
+  // —desde Fiados ("Registrar abono"), o junto a una venta nueva con
+  // "Abonar cuenta fiada" en Vender— esa plata entra de verdad a la caja,
+  // pero no es una "venta" (no hay productos de por medio): el abono vive
+  // en customerLedger, nunca en sales. Por eso shiftSalesList (de donde
+  // sale todo el resumen de abajo) nunca la veía: el efectivo contado en el
+  // cajón quedaba más alto que el "esperado" cada vez que alguien pagaba su
+  // fiado en efectivo, sin que el cierre explicara esa diferencia en
+  // ninguna parte. Mismo criterio de fecha que el resto del resumen: todo
+  // abono desde que se abrió esta caja, sin importar quién lo cobró.
+  const shiftAbonosList = useMemo(() => {
+    if (!sharedShift) return [];
+    const start = new Date(sharedShift.openedAt).getTime();
+    return (customerLedger || []).filter(m => m.type === "abono" && new Date(m.date).getTime() >= start);
+  }, [customerLedger, sharedShift]);
+
+  const abonosSummary = useMemo(() => {
+    // Los mismos 4 métodos que ofrece "Registrar abono" (CustomerLedgerModal)
+    // — un abono nunca es "Fiado" (sería pagar una deuda con otra deuda) ni
+    // "Pago combinado" (eso solo existe para una venta).
+    const byMethod = { Efectivo: 0, "Débito": 0, "Crédito": 0, Transferencia: 0 };
+    shiftAbonosList.forEach(m => { byMethod[m.paymentMethod] = (byMethod[m.paymentMethod] || 0) + (Number(m.amount) || 0); });
+    const total = shiftAbonosList.reduce((s, m) => s + (Number(m.amount) || 0), 0);
+    return { byMethod, total, count: shiftAbonosList.length };
+  }, [shiftAbonosList]);
+
   const summary = useMemo(() => {
     // "Fiado" cuenta como venta del turno (para el total), pero no aporta
-    // efectivo: expectedCash de más abajo solo suma byMethod.Efectivo, así
-    // que una venta fiada nunca infla el efectivo esperado en caja. Ojo: el
+    // efectivo: expectedCash de más abajo solo suma byMethod.Efectivo (más
+    // abonosSummary.byMethod.Efectivo, el cobro de un fiado VIEJO — ver más
+    // arriba), así que una venta fiada nueva nunca infla el efectivo
+    // esperado en caja. Ojo: el
     // desglose por método que se guarda al cerrar la caja (turnosCerrados,
     // operacion.js) solo tiene columna propia para los cuatro métodos de
     // siempre — el total del cierre SÍ incluye lo fiado, pero si se vuelve a
@@ -10964,7 +11272,12 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
 
   const withdrawalsTotal = (sharedShift?.withdrawals || []).reduce((s, w) => s + w.amount, 0);
   const reinforcementsTotal = (sharedShift?.reinforcements || []).reduce((s, r) => s + r.amount, 0);
-  const expectedCash = sharedShift ? sharedShift.openingAmount + summary.byMethod.Efectivo + reinforcementsTotal - withdrawalsTotal : 0;
+  // Efectivo esperado = dotación + lo vendido en efectivo + lo cobrado en
+  // efectivo de fiados antiguos (abonosSummary) + refuerzos − retiros. Antes
+  // faltaba el término de abonos, así que un fiado pagado en efectivo
+  // siempre dejaba el cajón con más plata real de la que el sistema
+  // "esperaba", sin que el cierre dijera por qué.
+  const expectedCash = sharedShift ? sharedShift.openingAmount + summary.byMethod.Efectivo + abonosSummary.byMethod.Efectivo + reinforcementsTotal - withdrawalsTotal : 0;
 
   async function registerWithdrawal(amount, reason) {
     const w = { id: uid("wd"), amount, reason, date: new Date().toISOString(), by: session.name };
@@ -10999,6 +11312,7 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
       openingAmount: sharedShift.openingAmount,
       salesByMethod: summary.byMethod, salesTotal: summary.total, salesCount: summary.count,
       salesBySeller,
+      abonosByMethod: abonosSummary.byMethod, abonosTotal: abonosSummary.total, abonosCount: abonosSummary.count,
       purchasesTotal: purchasesSummary.total, purchasesCount: purchasesSummary.count,
       withdrawals: sharedShift.withdrawals, withdrawalsTotal,
       reinforcements: sharedShift.reinforcements || [], reinforcementsTotal,
@@ -11065,6 +11379,9 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Ventas del turno ({summary.count})</span><span className="font-mono font-semibold" style={{ color: C.greenDark }}>{formatCLP(summary.total)}</span></div>
+        {abonosSummary.count > 0 && (
+          <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Abonos de fiado cobrados ({abonosSummary.count})</span><span className="font-mono font-semibold" style={{ color: C.greenDark }}>+{formatCLP(abonosSummary.total)}</span></div>
+        )}
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Refuerzos ({(sharedShift.reinforcements || []).length})</span><span className="font-mono font-semibold" style={{ color: C.brassText }}>+{formatCLP(reinforcementsTotal)}</span></div>
         <div className="flex justify-between text-sm mb-1"><span style={{ color: C.gray }}>Retiros ({sharedShift.withdrawals.length})</span><span className="font-mono font-semibold" style={{ color: C.rust }}>−{formatCLP(withdrawalsTotal)}</span></div>
         <div className="flex justify-between text-base font-semibold pt-2 mt-2" style={{ borderTop: `1px dashed ${C.paperLine}`, color: C.ink }}><span>Efectivo esperado en caja</span><span className="font-mono">{formatCLP(expectedCash)}</span></div>
@@ -11082,6 +11399,23 @@ function CajaView({ sales, invoicesIndex, openShifts, setOpenShifts, shiftsLog, 
                 <span className="text-sm truncate" style={{ color: C.ink }}>{v.seller}</span>
                 <span className="text-xs flex-shrink-0" style={{ color: C.gray }}>{v.count} venta{v.count === 1 ? "" : "s"}</span>
                 <span className="font-mono font-semibold text-sm flex-shrink-0" style={{ color: C.greenDark }}>{formatCLP(v.total)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {abonosSummary.count > 0 && (
+        <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+          <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: C.paperDark }}>
+            <CreditCard size={15} style={{ color: C.gray }} />
+            <span className="text-sm font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Abonos de fiado por método</span>
+          </div>
+          <div className="divide-y" style={{ borderColor: C.paperLine }}>
+            {["Efectivo", "Débito", "Crédito", "Transferencia"].filter(m => abonosSummary.byMethod[m] > 0).map(m => (
+              <div key={m} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                <span className="text-sm" style={{ color: C.ink }}>{m}</span>
+                <span className="font-mono font-semibold text-sm" style={{ color: C.greenDark }}>{formatCLP(abonosSummary.byMethod[m])}</span>
               </div>
             ))}
           </div>
@@ -12804,15 +13138,21 @@ function InvoiceViewerModal({ invoiceMeta, onClose, purchaseItems = [], toast, r
         </div>
         <div className="text-sm space-y-1.5">
           <div className="flex justify-between"><span style={{ color: C.gray }}>Fecha</span><span>{formatDate(invoiceMeta.date)}</span></div>
-          {invoiceMeta.documentType && <div className="flex justify-between"><span style={{ color: C.gray }}>Documento</span><span>{invoiceMeta.documentType === "factura" ? "Factura" : "Boleta"}</span></div>}
+          {invoiceMeta.documentType && <div className="flex justify-between"><span style={{ color: C.gray }}>Documento</span><span>{etiquetaDocumento(invoiceMeta.documentType)}</span></div>}
           {invoiceMeta.refNumber && <div className="flex justify-between"><span style={{ color: C.gray }}>N° documento</span><span className="font-mono">{invoiceMeta.refNumber}</span></div>}
           <div className="flex justify-between"><span style={{ color: C.gray }}>Productos</span><span>{purchaseItems.filter(pi => pi.invoiceId === invoiceMeta.id).length || invoiceMeta.itemCount || 0}</span></div>
           <div className="flex justify-between"><span style={{ color: C.gray }}>Registrada por</span><span>{invoiceMeta.registeredBy}</span></div>
           {invoiceMeta.paymentMethod && <div className="flex justify-between"><span style={{ color: C.gray }}>Forma de pago</span><span>{invoiceMeta.paymentMethod === "Crédito con el proveedor" ? "Crédito" : invoiceMeta.paymentMethod}</span></div>}
           {invoiceMeta.duePaymentDate && <div className="flex justify-between"><span style={{ color: C.gray }}>Fecha de pago</span><span>{invoiceMeta.duePaymentDate}</span></div>}
           {invoiceMeta.statedTotal != null && <div className="flex justify-between"><span style={{ color: C.gray }}>Monto informado</span><span className="font-mono">{formatCLP(invoiceMeta.statedTotal)}</span></div>}
-          <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Monto neto</span><span className="font-mono">{formatCLP(invoiceMeta.totalNet)}</span></div>
-          <div className="flex justify-between font-semibold"><span>Total con IVA</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
+          {invoiceMeta.documentType === "factura_exenta" ? (
+            <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Total (exenta, sin IVA)</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
+          ) : (
+            <>
+              <div className="flex justify-between pt-2 font-semibold" style={{ borderTop: `1px dashed ${C.paperLine}` }}><span>Monto neto</span><span className="font-mono">{formatCLP(invoiceMeta.totalNet)}</span></div>
+              <div className="flex justify-between font-semibold"><span>Total con IVA</span><span className="font-mono">{formatCLP(invoiceMeta.totalGross)}</span></div>
+            </>
+          )}
           {/* Corregir cantidades, kilos o forma de pago de una recepción ya
               guardada — pedido de Fran, oct. 2026. Solo un administrador: la
               política de la base ya lo exige para factura_compra/compra_detalle
@@ -16008,11 +16348,15 @@ function CustomerModal({ initial, onClose, onSave, quick, toast }) {
   const esNuevo = !initial?.id;
   const [pin, setPin] = useState("");
   const [autorizando, setAutorizando] = useState(false);
+  // Tarjeta NFC de administrador (migración 0043): si ya se acercó una
+  // tarjeta válida, "Guardar" no vuelve a pedir el PIN — la autorización
+  // ya quedó confirmada con la base en el momento del tap.
+  const [tarjetaAutorizada, setTarjetaAutorizada] = useState(false);
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
   async function submit() {
     if (!form.name.trim()) return toast?.("Escribe el nombre del cliente", "error");
-    if (esNuevo) {
-      if (!pin.trim()) return toast?.("Pide el PIN de un administrador para abrir fiado a un cliente nuevo", "error");
+    if (esNuevo && !tarjetaAutorizada) {
+      if (!pin.trim()) return toast?.("Pide el PIN (o la tarjeta) de un administrador para abrir fiado a un cliente nuevo", "error");
       setAutorizando(true);
       try {
         if (!(await autorizarConPin(pin))) {
@@ -16031,6 +16375,26 @@ function CustomerModal({ initial, onClose, onSave, quick, toast }) {
       creditLimit: form.creditLimit === "" ? null : Number(form.creditLimit),
     });
   }
+
+  // Tarjeta NFC: acercarla autoriza de inmediato (sin esperar a "Guardar"),
+  // para que se note al tiro si la tarjeta sirve o no. Si no hay puente NFC
+  // corriendo en este computador, esto simplemente nunca avisa de nada y se
+  // sigue usando el PIN como siempre.
+  useEffect(() => {
+    if (!esNuevo || tarjetaAutorizada) return;
+    return escucharTarjetaNFC(async (uid) => {
+      try {
+        if (await autorizarConTarjeta(uid)) {
+          setTarjetaAutorizada(true);
+          toast?.("Tarjeta válida — administrador autorizado", "success");
+        } else {
+          toast?.("Esa tarjeta no autoriza como administrador", "error");
+        }
+      } catch (e) {
+        toast?.(friendlyError(e, "No se pudo comprobar la tarjeta"), "error");
+      }
+    });
+  }, [esNuevo, tarjetaAutorizada]);
   return (
     <Modal title={initial?.id ? "Editar cliente" : "Nuevo cliente"} onClose={onClose}>
       <Field label="Nombre"><input autoFocus value={form.name} onChange={e => set("name", e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="Nombre del cliente" /></Field>
@@ -16045,9 +16409,18 @@ function CustomerModal({ initial, onClose, onSave, quick, toast }) {
         </>
       )}
       {esNuevo && (
-        <Field label="PIN de administrador (para autorizar fiado a un cliente nuevo)">
-          <input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
-        </Field>
+        tarjetaAutorizada ? (
+          <div className="rounded-lg p-2.5 mb-3 text-xs font-semibold flex items-center gap-1.5" style={{ background: C.greenSoft, color: C.greenDark }}>
+            <Check size={14} />Tarjeta de administrador aceptada — ya no hace falta el PIN.
+          </div>
+        ) : (
+          <>
+            <Field label="PIN de administrador (para autorizar fiado a un cliente nuevo)">
+              <input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => quick && e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" />
+            </Field>
+            <p className="text-[11px] mb-3 -mt-2" style={{ color: C.gray }}>O acerca la tarjeta de un administrador.</p>
+          </>
+        )
       )}
       <Btn full icon={Check} onClick={submit} disabled={autorizando}>{autorizando ? "Comprobando PIN…" : "Guardar cliente"}</Btn>
     </Modal>
@@ -17308,6 +17681,10 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
   const [note, setNote] = useState("");
   const [pin, setPin] = useState("");
   const [authorizerName, setAuthorizerName] = useState("");
+  // Tarjeta NFC de administrador (migración 0043): igual que en el alta de
+  // cliente de fiado — si ya se acercó una tarjeta válida, no hace falta
+  // pedir también el PIN.
+  const [tarjetaAutorizada, setTarjetaAutorizada] = useState(false);
   const isPeso = product.unitType === "peso";
   const qtyNum = kgMode && hasKgConversion ? Math.round((Number(kg) || 0) * product.unitsPerKg) : (Number(qty) || 0);
   const valueLost = qtyNum * (product.cost || 0);
@@ -17317,15 +17694,36 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
     if (qtyNum <= 0) return toast("Ingresa una cantidad válida", "error");
     if (qtyNum > product.stock) return toast(`Esa cantidad supera el stock disponible (quedan ${product.stock}) — ajústala a lo que realmente hay.`, "error");
     if (needsAuthorizerName && !authorizerName.trim()) return toast("Indica qué administrador autoriza", "error");
-    try {
-      if (!(await autorizarConPin(pin))) {
-        return toast("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+    if (!tarjetaAutorizada) {
+      try {
+        if (!(await autorizarConPin(pin))) {
+          return toast("Ese PIN no es de un administrador. Sirve el PIN del negocio (Ajustes) o el personal de un administrador.", "error");
+        }
+      } catch (e) {
+        return toast(friendlyError(e, "No se pudo comprobar el PIN"), "error");
       }
-    } catch (e) {
-      return toast(friendlyError(e, "No se pudo comprobar el PIN"), "error");
     }
     onConfirm({ qty: qtyNum, reason, note: note.trim(), authorizedBy: needsAuthorizerName ? authorizerName.trim() : session.name });
   }
+
+  // Tarjeta NFC: acercarla autoriza al tiro, sin esperar a "Autorizar y
+  // descontar" — así se nota de inmediato si sirve. Sin puente NFC
+  // corriendo acá, esto simplemente nunca avisa de nada.
+  useEffect(() => {
+    if (tarjetaAutorizada) return;
+    return escucharTarjetaNFC(async (uid) => {
+      try {
+        if (await autorizarConTarjeta(uid)) {
+          setTarjetaAutorizada(true);
+          toast("Tarjeta válida — administrador autorizado", "success");
+        } else {
+          toast("Esa tarjeta no autoriza como administrador", "error");
+        }
+      } catch (e) {
+        toast(friendlyError(e, "No se pudo comprobar la tarjeta"), "error");
+      }
+    });
+  }, [tarjetaAutorizada]);
 
   return (
     <Modal title={`Registrar merma — ${product.name}`} onClose={onClose}>
@@ -17361,7 +17759,16 @@ function ShrinkageModal({ product, adminPin, role, session, onClose, onConfirm, 
           <span style={{ color: C.rust }}>Valor de la pérdida</span><span className="font-mono" style={{ color: C.rust }}>{formatCLP(valueLost)}</span>
         </div>
       )}
-      <Field label="PIN de administrador (el del negocio o el tuyo, si eres admin)"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
+      {tarjetaAutorizada ? (
+        <div className="rounded-lg p-2.5 mb-3 text-xs font-semibold flex items-center gap-1.5" style={{ background: C.greenSoft, color: C.greenDark }}>
+          <Check size={14} />Tarjeta de administrador aceptada — ya no hace falta el PIN.
+        </div>
+      ) : (
+        <>
+          <Field label="PIN de administrador (el del negocio o el tuyo, si eres admin)"><input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} className={inputCls} style={inputStyle()} placeholder="••••" /></Field>
+          <p className="text-[11px] mb-3 -mt-2" style={{ color: C.gray }}>O acerca la tarjeta de un administrador.</p>
+        </>
+      )}
       {needsAuthorizerName && (
         <Field label="Nombre del administrador que autoriza"><input value={authorizerName} onChange={e => setAuthorizerName(e.target.value)} className={inputCls} style={inputStyle()} placeholder="Nombre" /></Field>
       )}
@@ -18326,7 +18733,9 @@ function ExpensesView({ movements, setMovements, invoicesIndex, setInvoicesIndex
     if (existe && guardado.invoiceId && Number(anterior.amount) !== Number(guardado.amount)) {
       const latestInvoices = await loadJSON("invoices-index", invoicesIndex);
       const newInvoices = latestInvoices.map(inv => inv.id === guardado.invoiceId
-        ? { ...inv, totalGross: guardado.amount, totalNet: guardado.amount / 1.19 }
+        // Factura exenta: el neto es el monto tal cual, no hay 19% que
+        // sacarle (ver totalFactura en ReceptionView, mismo criterio).
+        ? { ...inv, totalGross: guardado.amount, totalNet: inv.documentType === "factura_exenta" ? guardado.amount : guardado.amount / 1.19 }
         : inv);
       setInvoicesIndex(newInvoices);
       await saveJSON("invoices-index", newInvoices);
@@ -19551,7 +19960,63 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
   );
 }
 
-function UserCard({ user, sales, invoicesIndex, shiftsLog, isSelf, onEdit, onDelete }) {
+/* Asignar (o quitar) la tarjeta NFC de una persona ya creada. Se pide el
+   lector enchufado al computador donde se abre este modal — no hace falta
+   que sea el mismo que usará esa persona después. La tarjeta sirve para
+   identificarse en Vender, y si la persona es administradora, también
+   para autorizar (ver lib/nfc-bridge.js). */
+function CardAssignModal({ user, onClose, toast }) {
+  const [conectado, setConectado] = useState(puenteNFC.estado().conectado);
+  const [trabajando, setTrabajando] = useState(false);
+
+  useEffect(() => puenteNFC.escuchar(e => setConectado(e.conectado)), []);
+
+  useEffect(() => {
+    return escucharTarjetaNFC(async (uid) => {
+      setTrabajando(true);
+      try {
+        await asignarTarjetaPerfil(user.id, uid);
+        toast(`Tarjeta asignada a ${user.name}`, "success");
+        onClose();
+      } catch (e) {
+        toast(friendlyError(e, "No se pudo asignar la tarjeta"), "error");
+      } finally {
+        setTrabajando(false);
+      }
+    });
+  }, []);
+
+  async function quitar() {
+    setTrabajando(true);
+    try {
+      await asignarTarjetaPerfil(user.id, null);
+      toast(`Tarjeta quitada a ${user.name}`, "success");
+      onClose();
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo quitar la tarjeta"), "error");
+    } finally {
+      setTrabajando(false);
+    }
+  }
+
+  return (
+    <Modal title={`Tarjeta NFC — ${user.name}`} onClose={onClose}>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Acerca la tarjeta que va a usar {user.name} al lector de este computador. Queda asignada apenas se detecta — no hace falta apretar nada más.
+        {user.role === "admin" && " Como es administrador/a, esa misma tarjeta también le servirá para autorizar."}
+      </p>
+      <div className="rounded-lg p-4 mb-3 flex items-center gap-3" style={{ background: C.paperDark }}>
+        <CreditCard size={20} style={{ color: trabajando ? C.brass : C.gray }} />
+        <span className="text-sm" style={{ color: C.ink }}>
+          {trabajando ? "Comprobando…" : "Esperando que acerques la tarjeta…"}
+        </span>
+      </div>
+      <Btn variant="ghost" full onClick={quitar} disabled={trabajando}>Quitar tarjeta asignada</Btn>
+    </Modal>
+  );
+}
+
+function UserCard({ user, sales, invoicesIndex, shiftsLog, isSelf, onEdit, onDelete, onAssignCard }) {
   const [expanded, setExpanded] = useState(false);
   const stats = userStats(user, sales, invoicesIndex, shiftsLog);
   return (
@@ -19570,6 +20035,7 @@ function UserCard({ user, sales, invoicesIndex, shiftsLog, isSelf, onEdit, onDel
       </div>
       <div className="flex gap-1.5 mt-2">
         <button onClick={() => onEdit(user)} className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><Pencil size={16} /></button>
+        <button onClick={() => onAssignCard(user)} title="Asignar tarjeta NFC" className="p-2.5 rounded-md" style={{ background: C.paperDark, color: C.ink }}><CreditCard size={16} /></button>
         {!isSelf && <button onClick={() => onDelete(user)} className="p-2.5 rounded-md" style={{ background: C.rustSoft, color: C.rust }}><Trash2 size={16} /></button>}
         <button onClick={() => setExpanded(e => !e)} className="text-xs font-medium flex items-center gap-1 ml-auto" style={{ color: C.green }}>
           {expanded ? "Ocultar resumen" : "Ver resumen"}
@@ -19600,6 +20066,7 @@ function UserCard({ user, sales, invoicesIndex, shiftsLog, isSelf, onEdit, onDel
 function UsersView({ users, setUsers, sales, invoicesIndex, shiftsLog, session, toast }) {
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [assigningCard, setAssigningCard] = useState(null);
 
   // Si guardar falla (por ejemplo, un PIN de vendedor que ya usa otra
   // persona — algo que solo el servidor puede saber con certeza, migración
@@ -19649,11 +20116,12 @@ function UsersView({ users, setUsers, sales, invoicesIndex, shiftsLog, session, 
       </div>
       <div className="grid sm:grid-cols-2 gap-3">
         {users.map(u => (
-          <UserCard key={u.id} user={u} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} isSelf={u.id === session.userId} onEdit={setEditing} onDelete={setDeleting} />
+          <UserCard key={u.id} user={u} sales={sales} invoicesIndex={invoicesIndex} shiftsLog={shiftsLog} isSelf={u.id === session.userId} onEdit={setEditing} onDelete={setDeleting} onAssignCard={setAssigningCard} />
         ))}
       </div>
 
       {editing !== null && <UserModal initial={editing.id ? editing : null} users={users} onClose={() => setEditing(null)} onSave={saveUser} toast={toast} />}
+      {assigningCard && <CardAssignModal user={assigningCard} onClose={() => setAssigningCard(null)} toast={toast} />}
       {deleting && (
         <Modal title="Eliminar usuario" onClose={() => setDeleting(null)}>
           <p className="text-sm mb-4" style={{ color: C.ink }}>¿Eliminar a <strong>{deleting.name}</strong> (@{deleting.username})? Ya no podrá iniciar sesión. El historial de ventas y recepciones que ya hizo se mantiene.</p>
@@ -20313,6 +20781,30 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
   const [businessName, setBusinessName] = useState(settings.businessName);
   const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
+  // Tarjeta NFC del negocio (migración 0043): la que sirve para autorizar en
+  // cualquier caja sin ser la personal de un administrador — pensada para
+  // dejarla guardada, por ejemplo, en el cajón de Caja. "Armada" significa
+  // que este panel está escuchando el lector de ESTE computador a la
+  // espera de la próxima tarjeta que se acerque, para asignarla.
+  const [armadoTarjetaNegocio, setArmadoTarjetaNegocio] = useState(false);
+  const [trabajandoTarjetaNegocio, setTrabajandoTarjetaNegocio] = useState(false);
+  const [conectadoNFC, setConectadoNFC] = useState(puenteNFC.estado().conectado);
+  useEffect(() => puenteNFC.escuchar(e => setConectadoNFC(e.conectado)), []);
+  useEffect(() => {
+    if (!armadoTarjetaNegocio) return;
+    return escucharTarjetaNFC(async (uid) => {
+      setTrabajandoTarjetaNegocio(true);
+      try {
+        await asignarTarjetaNegocio(uid);
+        toast("Tarjeta del negocio registrada", "success");
+      } catch (e) {
+        toast(friendlyError(e, "No se pudo registrar la tarjeta"), "error");
+      } finally {
+        setTrabajandoTarjetaNegocio(false);
+        setArmadoTarjetaNegocio(false);
+      }
+    });
+  }, [armadoTarjetaNegocio]);
   const [ivaIncluded, setIvaIncluded] = useState(settings.ivaIncluded);
   const [recargoCigarrosPct, setRecargoCigarrosPct] = useState(String(porcentajeRecargoTarjeta(settings)));
   // Solo para mostrar un ejemplo con plata real en vez de un porcentaje
@@ -20381,6 +20873,17 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
       toast("PIN actualizado", "success");
     } catch (err) {
       toast(friendlyError(err, "No se pudo cambiar el PIN"), "error");
+    }
+  }
+  async function quitarTarjetaNegocio() {
+    setTrabajandoTarjetaNegocio(true);
+    try {
+      await asignarTarjetaNegocio(null);
+      toast("Tarjeta del negocio quitada", "success");
+    } catch (e) {
+      toast(friendlyError(e, "No se pudo quitar la tarjeta"), "error");
+    } finally {
+      setTrabajandoTarjetaNegocio(false);
     }
   }
   async function handleLogo(e) {
@@ -20606,6 +21109,29 @@ function SettingsView({ settings, setSettings, toast, products, sales, allData, 
         <Field label="PIN actual"><input type="password" value={currentPin} onChange={e => setCurrentPin(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
         <Field label="PIN nuevo"><input type="password" value={newPin} onChange={e => setNewPin(e.target.value)} className={inputCls} style={inputStyle()} /></Field>
         <Btn onClick={changePin} icon={Lock}>Actualizar PIN</Btn>
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
+        <h3 className="text-base font-semibold mb-1 flex items-center gap-2" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+          <CreditCard size={17} /> Tarjeta NFC del negocio
+        </h3>
+        <p className="text-xs mb-3" style={{ color: C.gray }}>
+          Una tarjeta que autoriza en cualquier caja, sin ser la personal de ningún administrador — pensada para dejarla guardada en el negocio (por ejemplo, en Caja). Sirve junto con las tarjetas y PIN personales de cada administrador, no los reemplaza. El lector tiene que estar enchufado a ESTE computador para registrarla.
+        </p>
+        {armadoTarjetaNegocio ? (
+          <div className="rounded-lg p-3 mb-3 flex items-center gap-3" style={{ background: C.paperDark }}>
+            <CreditCard size={20} style={{ color: trabajandoTarjetaNegocio ? C.brass : C.gray }} />
+            <span className="text-sm" style={{ color: C.ink }}>
+              {trabajandoTarjetaNegocio ? "Comprobando…" : "Esperando que acerques la tarjeta…"}
+            </span>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <Btn size="sm" icon={CreditCard} onClick={() => setArmadoTarjetaNegocio(a => !a)} disabled={trabajandoTarjetaNegocio}>
+            {armadoTarjetaNegocio ? "Cancelar" : "Escanear tarjeta nueva"}
+          </Btn>
+          <Btn size="sm" variant="ghost" onClick={quitarTarjetaNegocio} disabled={trabajandoTarjetaNegocio}>Quitar tarjeta registrada</Btn>
+        </div>
       </div>
 
       <div className="rounded-xl p-4" style={{ background: "#fff", border: `1.5px solid ${C.paperLine}` }}>
@@ -22149,7 +22675,7 @@ export default function SistemaVentas() {
         <TabPane active={tab === "pos"} visited={visitedTabs.has("pos")}><POSView products={products} setProducts={setProducts} settings={settings} setSettings={setSettings} sales={sales} setSales={setSales} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} offers={offers} clearances={clearances} productGroups={productGroups} purchaseItems={purchaseItems} inventoryCounts={inventoryCounts} session={session} toast={toast} role={rolEfectivo} customers={customers} setCustomers={setCustomers} customerLedger={customerLedger} setCustomerLedger={setCustomerLedger} openShifts={openShifts} setTab={setTab} onCambioEnCola={revisarCola} /></TabPane>
         <TabPane active={tab === "actividades"} visited={visitedTabs.has("actividades")}><ActividadesView session={session} role={rolEfectivo} products={products} inventoryCounts={inventoryCounts} customers={customers} customerLedger={customerLedger} openShifts={openShifts} feedback={feedback} sales={sales} movements={movements} purchaseItems={purchaseItems} settings={settings} setTab={setTab} /></TabPane>
         <TabPane active={tab === "inventario-general"} visited={visitedTabs.has("inventario-general")}><GeneralInventoryView products={products} setProducts={setProducts} inventoryCounts={inventoryCounts} session={session} toast={toast} /></TabPane>
-        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} invoicesIndex={invoicesIndex} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
+        <TabPane active={tab === "caja"} visited={visitedTabs.has("caja")}><CajaView sales={sales} invoicesIndex={invoicesIndex} customerLedger={customerLedger} openShifts={openShifts} setOpenShifts={setOpenShifts} shiftsLog={shiftsLog} setShiftsLog={setShiftsLog} session={session} role={rolEfectivo} toast={toast} /></TabPane>
         <TabPane active={tab === "facturas"} visited={visitedTabs.has("facturas")}><InvoicesView sales={sales} settings={settings} marcaSincroRef={marcaSincroRef} onRefrescar={refrescarAhora} /></TabPane>
         <TabPane active={tab === "inventario"} visited={visitedTabs.has("inventario")}><InventoryView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} settings={settings} role={rolEfectivo} session={session} toast={toast} /></TabPane>
         <TabPane active={tab === "recepcion"} visited={visitedTabs.has("recepcion")}><ReceivingView products={products} setProducts={setProducts} movements={movements} setMovements={setMovements} suppliers={suppliers} setSuppliers={setSuppliers} categories={categories} invoicesIndex={invoicesIndex} setInvoicesIndex={setInvoicesIndex} purchaseItems={purchaseItems} setPurchaseItems={setPurchaseItems} supplierLedger={supplierLedger} setSupplierLedger={setSupplierLedger} role={rolEfectivo} session={session} toast={toast} setTab={setTab} setSeccionProductosPendiente={setSeccionProductosPendiente} settings={settings} facturaPendienteDeEditar={facturaPendienteDeEditar} setFacturaPendienteDeEditar={setFacturaPendienteDeEditar} /></TabPane>

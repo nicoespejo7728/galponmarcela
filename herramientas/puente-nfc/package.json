@@ -1,0 +1,14 @@
+{
+  "name": "puente-nfc-galpon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Puente local entre el lector NFC (PC/SC) y el sistema web de El Galpón. Corre aparte del navegador, en el mismo computador donde está enchufado el lector.",
+  "main": "puente.js",
+  "scripts": {
+    "start": "node puente.js"
+  },
+  "dependencies": {
+    "nfc-pcsc": "^0.8.1",
+    "ws": "^8.18.0"
+  }
+}
