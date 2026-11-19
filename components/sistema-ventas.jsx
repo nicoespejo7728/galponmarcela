@@ -6121,8 +6121,13 @@ function LoginScreen({ users, businessName, businessLogo, onLogin, toast }) {
   const [tarjetaPin, setTarjetaPin] = useState("");
 
   async function completarSesion(datos) {
+    // OJO: con token_hash, Supabase rechaza la llamada si además se manda
+    // el email ("Only the token_hash and type should be provided") — por
+    // eso entrar con tarjeta fallaba siempre al final, tanto para
+    // vendedores (que llegan acá directo) como para administradores
+    // (después del PIN).
     const { error, data } = await obtenerCliente().auth.verifyOtp({
-      email: datos.email, token_hash: datos.tokenHash, type: "magiclink",
+      token_hash: datos.tokenHash, type: "magiclink",
     });
     if (error || !data?.user) {
       return toast("No se pudo entrar con la tarjeta — intenta de nuevo o usa tu usuario y contraseña.", "error");
@@ -6287,7 +6292,9 @@ function AdminGateModal({ onClose, onEnter, toast }) {
       return toast("Esa tarjeta es de un vendedor — no sirve para entrar al panel de administración.", "error");
     }
     const sb = obtenerCliente();
-    const { data, error } = await sb.auth.verifyOtp({ email: r.email, token_hash: r.tokenHash, type: "magiclink" });
+    // OJO: igual que en LoginScreen — con token_hash no se debe mandar
+    // también el email, o Supabase lo rechaza con 400.
+    const { data, error } = await sb.auth.verifyOtp({ token_hash: r.tokenHash, type: "magiclink" });
     if (error || !data?.user) {
       return toast("No se pudo entrar con la tarjeta — intenta de nuevo o usa tu usuario y contraseña.", "error");
     }
