@@ -80,11 +80,28 @@ export async function POST(request) {
 
   const sb = clienteServicio();
 
-  const { data: perfil, error: errorPerfil } = await sb
-    .from("perfil")
-    .select("id,nombre,usuario,rol,activo")
+  // Migración 0045: la tarjeta ya no vive en una columna de "perfil" (que
+  // solo alcanzaba para una), sino en "perfil_tarjeta" — cada perfil puede
+  // tener hasta dos (principal/respaldo), cualquiera de las dos abre lo
+  // mismo. Primero se busca a quién pertenece esta tarjeta, después se
+  // trae su perfil.
+  const { data: tarjeta, error: errorTarjeta } = await sb
+    .from("perfil_tarjeta")
+    .select("perfil_id")
     .eq("tarjeta_uid", uidNormalizado)
     .maybeSingle();
+
+  if (errorTarjeta) {
+    return Response.json({ error: errorTarjeta.message }, { status: 500 });
+  }
+
+  const { data: perfil, error: errorPerfil } = tarjeta
+    ? await sb
+        .from("perfil")
+        .select("id,nombre,usuario,rol,activo")
+        .eq("id", tarjeta.perfil_id)
+        .maybeSingle()
+    : { data: null, error: null };
 
   if (errorPerfil) {
     return Response.json({ error: errorPerfil.message }, { status: 500 });

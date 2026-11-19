@@ -22,6 +22,7 @@ import {
   identificarPorTarjeta,
   autorizarConTarjeta,
   asignarTarjetaPerfil,
+  obtenerTarjetasPerfil,
   asignarTarjetaNegocio,
   iniciarSesionConTarjeta,
   registrarConteoInventarioGeneral,
@@ -19960,38 +19961,55 @@ function UserModal({ initial, users, onClose, onSave, toast }) {
   );
 }
 
-/* Asignar (o quitar) la tarjeta NFC de una persona ya creada. Se pide el
+/* Asignar (o quitar) las tarjetas NFC de una persona ya creada. Se pide el
    lector enchufado al computador donde se abre este modal — no hace falta
-   que sea el mismo que usará esa persona después. La tarjeta sirve para
-   identificarse en Vender, y si la persona es administradora, también
-   para autorizar (ver lib/nfc-bridge.js). */
+   que sea el mismo que usará esa persona después.
+
+   Migración 0045 (a pedido de Fran): cada perfil puede tener hasta DOS
+   tarjetas propias — "principal" y "respaldo", por si se pierde o se
+   olvida la primera — en vez de una sola. Las dos sirven exactamente
+   igual para todo: identificarse en Vender, y si la persona es
+   administradora, también autorizar y entrar a la cuenta completa (ver
+   lib/nfc-bridge.js). Solo se puede estar escuchando una tarjeta nueva a
+   la vez (para no confundir a cuál de las dos fila le corresponde). */
 function CardAssignModal({ user, onClose, toast }) {
-  const [conectado, setConectado] = useState(puenteNFC.estado().conectado);
+  const [cargando, setCargando] = useState(true);
+  const [tarjetas, setTarjetas] = useState({ principal: null, respaldo: null });
+  const [armado, setArmado] = useState(null); // "principal" | "respaldo" | null
   const [trabajando, setTrabajando] = useState(false);
 
-  useEffect(() => puenteNFC.escuchar(e => setConectado(e.conectado)), []);
+  useEffect(() => {
+    let vivo = true;
+    obtenerTarjetasPerfil(user.id)
+      .then(t => { if (vivo) setTarjetas(t); })
+      .catch(e => { if (vivo) toast(friendlyError(e, "No se pudieron leer las tarjetas de esta persona"), "error"); })
+      .finally(() => { if (vivo) setCargando(false); });
+    return () => { vivo = false; };
+  }, [user.id]);
 
   useEffect(() => {
+    if (!armado) return;
     return escucharTarjetaNFC(async (uid) => {
       setTrabajando(true);
       try {
-        await asignarTarjetaPerfil(user.id, uid);
-        toast(`Tarjeta asignada a ${user.name}`, "success");
-        onClose();
+        await asignarTarjetaPerfil(user.id, armado, uid);
+        setTarjetas(t => ({ ...t, [armado]: uid }));
+        toast(`Tarjeta ${armado === "principal" ? "principal" : "de respaldo"} asignada a ${user.name}`, "success");
       } catch (e) {
         toast(friendlyError(e, "No se pudo asignar la tarjeta"), "error");
       } finally {
         setTrabajando(false);
+        setArmado(null);
       }
     });
-  }, []);
+  }, [armado]);
 
-  async function quitar() {
+  async function quitar(etiqueta) {
     setTrabajando(true);
     try {
-      await asignarTarjetaPerfil(user.id, null);
-      toast(`Tarjeta quitada a ${user.name}`, "success");
-      onClose();
+      await asignarTarjetaPerfil(user.id, etiqueta, null);
+      setTarjetas(t => ({ ...t, [etiqueta]: null }));
+      toast(`Tarjeta ${etiqueta === "principal" ? "principal" : "de respaldo"} quitada a ${user.name}`, "success");
     } catch (e) {
       toast(friendlyError(e, "No se pudo quitar la tarjeta"), "error");
     } finally {
@@ -19999,19 +20017,55 @@ function CardAssignModal({ user, onClose, toast }) {
     }
   }
 
-  return (
-    <Modal title={`Tarjeta NFC — ${user.name}`} onClose={onClose}>
-      <p className="text-xs mb-3" style={{ color: C.gray }}>
-        Acerca la tarjeta que va a usar {user.name} al lector de este computador. Queda asignada apenas se detecta — no hace falta apretar nada más.
-        {user.role === "admin" && " Como es administrador/a, esa misma tarjeta también le servirá para autorizar."}
-      </p>
-      <div className="rounded-lg p-4 mb-3 flex items-center gap-3" style={{ background: C.paperDark }}>
-        <CreditCard size={20} style={{ color: trabajando ? C.brass : C.gray }} />
-        <span className="text-sm" style={{ color: C.ink }}>
-          {trabajando ? "Comprobando…" : "Esperando que acerques la tarjeta…"}
-        </span>
+  function FilaTarjeta({ etiqueta, titulo }) {
+    const asignada = tarjetas[etiqueta];
+    const estaArmando = armado === etiqueta;
+    return (
+      <div className="rounded-lg p-3 mb-3" style={{ background: C.paperDark }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium" style={{ color: C.ink }}>{titulo}</span>
+          <span className="text-xs font-medium" style={{ color: asignada ? C.greenDark : C.gray }}>
+            {asignada ? "Asignada" : "Sin asignar"}
+          </span>
+        </div>
+        {estaArmando && (
+          <div className="rounded-lg p-3 mb-2 flex items-center gap-3" style={{ background: "#fff" }}>
+            <CreditCard size={18} style={{ color: trabajando ? C.brass : C.gray }} />
+            <span className="text-sm" style={{ color: C.ink }}>
+              {trabajando ? "Comprobando…" : "Esperando que acerques la tarjeta…"}
+            </span>
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Btn
+            size="sm" icon={CreditCard}
+            onClick={() => setArmado(a => (a === etiqueta ? null : etiqueta))}
+            disabled={trabajando && !estaArmando}
+          >
+            {estaArmando ? "Cancelar" : asignada ? "Reemplazar tarjeta" : "Escanear tarjeta nueva"}
+          </Btn>
+          {asignada && !estaArmando && (
+            <Btn size="sm" variant="ghost" onClick={() => quitar(etiqueta)} disabled={trabajando}>Quitar</Btn>
+          )}
+        </div>
       </div>
-      <Btn variant="ghost" full onClick={quitar} disabled={trabajando}>Quitar tarjeta asignada</Btn>
+    );
+  }
+
+  return (
+    <Modal title={`Tarjetas NFC — ${user.name}`} onClose={onClose}>
+      <p className="text-xs mb-3" style={{ color: C.gray }}>
+        Cada persona puede tener hasta dos tarjetas propias: una principal y una de respaldo, por si se pierde o se olvida la primera. Las dos funcionan exactamente igual para identificarse en Vender.
+        {user.role === "admin" && " Como es administrador/a, cualquiera de las dos también le sirve para autorizar y para entrar a la cuenta completa con solo acercarla."}
+      </p>
+      {cargando ? (
+        <p className="text-sm text-center py-4" style={{ color: C.gray }}>Cargando…</p>
+      ) : (
+        <>
+          <FilaTarjeta etiqueta="principal" titulo="Tarjeta principal" />
+          <FilaTarjeta etiqueta="respaldo" titulo="Tarjeta de respaldo" />
+        </>
+      )}
     </Modal>
   );
 }
