@@ -89,7 +89,7 @@ import {
   Bot, Send, MessageSquare, CheckCircle2, Sparkle,
   CalendarCheck2, ClipboardList, CalendarClock, Users, Download, Blend,
   MoreHorizontal, CreditCard, UserPlus, History, Bell, Flashlight, Coffee, Percent, Layers,
-  Bluetooth, NotebookPen,
+  Bluetooth, NotebookPen, LayoutGrid,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -22662,7 +22662,32 @@ export default function SistemaVentas() {
     // las guarda Supabase Auth y nunca salen en el archivo.
   }
 
-  const grupos = GRUPOS[rolEfectivo];
+  // Vista simplificada (pedido de Fran, nov-2026, para aliviar a Mauricio):
+  // un administrador puede preferir un menú más corto, sin el grupo de
+  // oficina (Sueldos, Finanzas, Usuarios, Ajustes...) que casi no usa en el
+  // día a día de bodega. Es una preferencia propia, guardada en su propio
+  // perfil (migración 0047) — nunca un permiso: sigue siendo administrador
+  // en todo lo demás, y "tabs" (de donde salen el título de arriba y la
+  // barra inferior) sigue siendo la lista completa sin filtrar, así que
+  // nada se rompe si queda en una pestaña que el menú ya no muestra.
+  const miPerfil = users.find(u => u.id === session.userId);
+  const vistaSimplificada = rolEfectivo === "admin" && miPerfil?.simplifiedView === true;
+  const grupos = vistaSimplificada
+    ? GRUPOS.admin.filter(g => g.titulo !== "Administración")
+    : GRUPOS[rolEfectivo];
+
+  async function alternarVistaSimplificada() {
+    const latest = await loadJSON("users", users);
+    const np = latest.map(u => u.id === session.userId ? { ...u, simplifiedView: !u.simplifiedView } : u);
+    setUsers(np);
+    try {
+      await saveJSON("users", np);
+    } catch (e) {
+      setUsers(latest);
+      toast(friendlyError(e, "No se pudo cambiar la vista"), "error");
+    }
+  }
+
   // No incluye la recomendación de pan (ver useActividadPan): esa depende de
   // bread-holidays/bread-shortages, que no están cargados acá — el badge de
   // la pestaña cuenta las demás señales, y el aviso de pan aparece recién al
@@ -22756,6 +22781,23 @@ export default function SistemaVentas() {
               >
                 <ShoppingCart size={16} aria-hidden="true" />
                 <span className="hidden sm:inline">Volver a vender</span>
+              </button>
+            )}
+            {/* Vista simplificada (pedido de Fran, nov-2026): solo para quien
+                de verdad ve el panel de administrador ahora mismo — no tiene
+                sentido ofrecerla mientras se está viendo el menú de vendedor
+                (ya es corto) ni, menos, mientras dura la máscara de "Volver a
+                vender". Un clic basta para ir y volver, así nunca es una
+                trampa sin salida. */}
+            {rolEfectivo === "admin" && (
+              <button
+                onClick={alternarVistaSimplificada}
+                title={vistaSimplificada ? "Mostrar también Administración" : "Ocultar Administración del menú (queda a un clic si la necesitas)"}
+                className="flex items-center gap-2 text-sm px-3 py-2 rounded-lg font-medium"
+                style={{ background: vistaSimplificada ? C.brassSoft : C.paperDark, color: vistaSimplificada ? C.brassText : C.ink }}
+              >
+                <LayoutGrid size={16} aria-hidden="true" />
+                <span className="hidden sm:inline">{vistaSimplificada ? "Ver todo" : "Vista simple"}</span>
               </button>
             )}
             <button
