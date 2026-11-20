@@ -10165,8 +10165,14 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
         // alguna pista, aunque el usuario no haya tocado nada (ver
         // categoriaGarantizada más arriba; pedido de Fran, sept. 2026).
         const categoriaFinal = (item.category || "").trim() || categoriaGarantizada(item.name, categoriaModel);
+        // Se fija aquí mismo (antes quedaba en null) para que las líneas de
+        // compra de más abajo (newPurchaseItems) puedan apuntar a este mismo
+        // producto desde su primera compra, y para poder confirmar después
+        // del guardado que de verdad quedó creado (ver la relectura después
+        // de guardar, más abajo).
+        item.productId = uid("prod");
         newProducts.push({
-          id: uid("prod"),
+          id: item.productId,
           barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           name: upperField(item.name),
           category: upperField(categoriaFinal),
@@ -10291,6 +10297,35 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       // guardaba todo en paralelo porque no había relaciones que respetar.
       await saveJSON("invoices-index", newInvoicesIndex);
       await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
+      // OJO — bug grave reportado varias veces por Mauricio (nov-2026): el
+      // guardado del catálogo salta en silencio cualquier producto nuevo
+      // cuyo código de barras —el escrito a mano, o el que se le repartió
+      // más arriba— ya lo tenga otro producto, aunque sea uno desactivado o
+      // lo acabe de crear otro equipo un instante antes (mismo motivo por el
+      // que "crear y vender" en Vender y "producto nuevo" en Inventario ya
+      // se releen después de guardar — ver esos dos lugares). Hasta ahora
+      // Recepción era la única pantalla que lo hacía sin confirmar nada
+      // después: el producto quedaba entero afuera del catálogo para
+      // siempre —sin stock, sin poder venderse ni encontrarse, nunca más—
+      // mientras el resto de la recepción se mostraba guardada sin ningún
+      // aviso. Por eso parecía "se ingresa bien, pero después no aparece":
+      // de verdad nunca llegó a guardarse, y nada lo decía.
+      const idsNuevosDeEstaRecepcion = draftItems.filter(it => it.isNew).map(it => it.productId);
+      if (idsNuevosDeEstaRecepcion.length > 0) {
+        const verificacion = await loadJSON("products-catalog", newProducts);
+        const idsVerificados = new Set(verificacion.map(p => p.id));
+        const faltantes = draftItems.filter(it => it.isNew && !idsVerificados.has(it.productId));
+        if (faltantes.length > 0) {
+          setProducts(verificacion);
+          const nombres = faltantes.map(it => `"${it.name.trim() || "un producto"}"`).join(" y ");
+          toast(
+            `${nombres} no se pudo guardar: su código de barras ya lo tiene otro producto (puede estar desactivado, o puede ser que otro equipo lo haya recibido justo un segundo antes que tú). El resto de esta recepción SÍ quedó guardado — no la guardes de nuevo completa o quedará duplicada. Saca esa línea del formulario (las demás siguen abajo tal cual), revisa ese código en Inventario, y agrégala de nuevo en una recepción aparte.`,
+            "error"
+          );
+          return;
+        }
+        setProducts(verificacion);
+      }
       await saveJSON("purchase-items-log", newPurchaseItems);
       // A crédito no hay egreso nuevo que guardar (newMovements quedó igual a
       // lo que ya había): se guarda el cargo en el libro de crédito en su
@@ -10466,8 +10501,12 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       // Misma garantía que en confirmReception: si quedó sin sección, se
       // recalcula acá antes de guardar (ver categoriaGarantizada más arriba).
       const categoriaFinal = (item.category || "").trim() || categoriaGarantizada(item.name, categoriaModel);
+      // Mismo motivo que en confirmReception: se fija acá para que
+      // lineasActualizadas (más abajo) apunte a este mismo producto, y para
+      // poder confirmar después del guardado que de verdad quedó creado.
+      item.productId = uid("prod");
       newProducts.push({
-        id: uid("prod"),
+        id: item.productId,
         barcode: item.barcode.trim() || codigosAsignados.get(item.tempId) || `INT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         name: upperField(item.name),
         category: upperField(categoriaFinal),
@@ -10576,6 +10615,26 @@ function ReceivingView({ products, setProducts, movements, setMovements, supplie
       // documento, después el catálogo y las líneas, y al final el pago/cargo.
       await saveJSON("invoices-index", newInvoicesIndex);
       await saveJSON("products-catalog", newProducts, { origen: "recepcion" });
+      // Mismo chequeo que en confirmReception (ver el comentario largo allá):
+      // un producto nuevo agregado durante esta edición puede quedar fuera
+      // del catálogo en silencio si su código ya lo tiene otro. Se relee para
+      // confirmar antes de seguir con las líneas de compra y el pago/cargo.
+      const idsNuevosDeEstaEdicion = draftItems.filter(it => it.isNew).map(it => it.productId);
+      if (idsNuevosDeEstaEdicion.length > 0) {
+        const verificacion = await loadJSON("products-catalog", newProducts);
+        const idsVerificados = new Set(verificacion.map(p => p.id));
+        const faltantes = draftItems.filter(it => it.isNew && !idsVerificados.has(it.productId));
+        if (faltantes.length > 0) {
+          setProducts(verificacion);
+          const nombres = faltantes.map(it => `"${it.name.trim() || "un producto"}"`).join(" y ");
+          toast(
+            `${nombres} no se pudo guardar: su código de barras ya lo tiene otro producto (puede estar desactivado, o puede ser que otro equipo lo haya recibido justo un segundo antes que tú). El resto de la corrección SÍ quedó guardado — no la guardes de nuevo completa o quedará duplicada. Saca esa línea del formulario, revisa ese código en Inventario, y agrégala de nuevo en una recepción aparte.`,
+            "error"
+          );
+          return;
+        }
+        setProducts(verificacion);
+      }
       await saveJSON("purchase-items-log", newPurchaseItems);
 
       // --- Pago o cargo asociado ---
